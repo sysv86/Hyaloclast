@@ -27,9 +27,8 @@ On macOS / MoltenVK, Tiers 2–3 are automatically gated when `VK_KHR_ray_tracin
   - `VK_KHR_synchronization2`, `VK_KHR_buffer_device_address`
   - `VK_EXT_descriptor_indexing`, `VK_EXT_memory_budget`
   - `VK_EXT_opacity_micromap`, `VK_EXT_ray_tracing_invocation_reorder` / `VK_NV_ray_tracing_invocation_reorder`
-- **Dual integration mode**:
-  - **With Pyroclast (`VulkanShadersTurboExtension`)**: Registers via Fabric's `"turboshaders"` entrypoint. Uses the 40-byte `IGNIS_TERRAIN_40B` vertex layout (first 12 bytes = `RGB32_FLOAT` local position) so `UberGpuBuffer` terrain slices feed both rasterization and Tier 2/3 BLAS builds with zero vertex copy, alongside 4-MRT G-Buffer view overrides and post-world / post-GUI callbacks.
-  - **Standalone (`StandaloneRenderPearlBridge`)**: Runs on vanilla Fabric RenderPearl without Pyroclast, using `TextureRegistry`, `SectionSliceRegistry`, `GbufferTargetManager`, and the 28-byte terrain shadow path (`csm_shadow_28b.vsh`).
+- **Pyroclast Integration (`VulkanShadersTurboExtension`)**: Required (`vulkanturbo >=0.1.0-alpha.1`). Registers via Fabric's `"turboshaders"` entrypoint. Uses the 40-byte `IGNIS_TERRAIN_40B` vertex layout (first 12 bytes = `RGB32_FLOAT` local position) so `UberGpuBuffer` terrain slices feed both rasterization and Tier 2/3 BLAS builds with zero vertex copy, alongside 4-MRT G-Buffer view overrides and post-world / post-GUI callbacks.
+- **Runtime Gate (`StandaloneRenderPearlBridge`)**: Checks `vulkanturbo` presence and RenderPearl Vulkan backend state (`VulkanShaders.kt`), disabling the shader engine (`"requires_pyroclast"`) if Pyroclast is missing or a non-Vulkan backend is active.
 
 ---
 

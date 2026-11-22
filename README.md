@@ -8,7 +8,7 @@
 - <a href="CREDITS.md"><img src="docs/icons/icon-credits.svg" alt="" width="20" height="20" align="middle"></a>&nbsp;&nbsp;[Credits & Notices](CREDITS.md) — Radiante architectural lineage and third-party attributions
 - <a href="AGENTS.md"><img src="docs/icons/hyaloclast-q.svg" alt="" width="20" height="20" align="middle"></a>&nbsp;&nbsp;[Contributor & Agent Rules](AGENTS.md) — clean-room boundaries, `TASTE.md`, ABI invariants, and build checks
 
-> **Version:** `0.2.0-beta.1` (Fabric-only). Targets **Minecraft: Java Edition 26.3** (`~26.3`) on Mojang's **RenderPearl** Vulkan backend. Runs standalone or paired with **Pyroclast** (`vulkanturbo`).
+> **Version:** `0.2.0-beta.2` (Fabric-only). Targets **Minecraft: Java Edition 26.3** (`~26.3`) on Mojang's **RenderPearl** Vulkan backend. Requires **Pyroclast** (`vulkanturbo >=0.1.0-alpha.1`).
 
 **Hyaloclast** (`vulkanshaders` / `IGNIS`) is a Vulkan 1.3+ shader pack, hardware ray-tracing, path-tracing, and frame-generation engine. The native rendering core is written in Rust 2024 (`cdylib`) and bound to the Fabric client through Java 25 Foreign Function & Memory (FFM).
 
@@ -26,9 +26,8 @@ Prebuilt native libraries are packaged for `linux-x86-64`, `linux-aarch64`, `win
 ## Installation
 
 1. Install **Fabric Loader `0.20.1+`** for **Minecraft `26.3`** on **Java 25**.
-2. Place `vulkanshaders-0.2.0-beta.1.jar` (fat JAR or platform-specific JAR) into `<gameDir>/mods/`. `fabric-language-kotlin` (`1.14.2+kotlin.2.4.21`), `fabric-resource-loader-v1`, and `fabric-api-base` are bundled via Jar-in-Jar.
+2. Place both **`vulkanshaders-0.2.0-beta.2.jar`** (fat JAR or platform-specific JAR) and **Pyroclast (`vulkanturbo-0.1.0-alpha.1.jar`+)** into `<gameDir>/mods/`. `fabric-language-kotlin` (`1.14.2+kotlin.2.4.21`), `fabric-resource-loader-v1`, and `fabric-api-base` are bundled via Jar-in-Jar.
 3. Optional companion mods:
-   - **Pyroclast** (`>=0.1.0-alpha.1`) — enables zero-copy `UberGpuBuffer` terrain BLAS sharing (`IGNIS_TERRAIN_40B`) and region multi-draw integration. Hyaloclast also runs standalone on vanilla RenderPearl.
    - **Distant Horizons** (`>=3.0.0`) — detected at runtime via reflection for 3-MRT LOD G-Buffer rendering (Tiers 0–2) and LOD BLAS ray tracing (Tiers 2–3).
    - **Mod Menu** — quick access to Hyaloclast settings.
 4. Incompatible mods (`breaks`/`conflicts` in `fabric.mod.json`): `iris`, `oculus`, `vulkanmod`, `optifabric`, `canvas`.

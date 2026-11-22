@@ -4,7 +4,7 @@ Operating rules for AI agents and human contributors working in **VulkanShaders*
 
 ## 1. Mission & License Framework
 
-**VulkanShaders** (`Hyaloclast`) is a Vulkan 1.3+ shader, ray-tracing, and frame-generation engine for **Minecraft: Java Edition 26.3+** (Fabric-only, RenderPearl Vulkan backend), running standalone or paired with **Pyroclast** (`VulkanTurbo`).
+**VulkanShaders** (`Hyaloclast`) is a Vulkan 1.3+ shader, ray-tracing, and frame-generation engine for **Minecraft: Java Edition 26.3+** (Fabric-only, RenderPearl Vulkan backend), requiring **Pyroclast** (`vulkanturbo`).
 
 - **Project license**: **GPL-3.0-only** ([`LICENSE`](LICENSE)) with **Section 7 Additional Permissions** ([`LICENSE-EXCEPTION.md`](LICENSE-EXCEPTION.md)) permitting linking with proprietary upscaler/frame-gen SDKs (NVIDIA NGX/DLSS/NRD/Reflex, AMD FSR3, Intel XeSS) and independent licensing of `.vsp` shader packs.
 - **Approved lineage**: **Radiante** (`Gabrieli2806`, GPL-3.0 + Section 7) served as an architectural reference for RenderPearl Vulkan backend hooks. Built-in `hyaloclast-sunlit-vanilla.vsp` adapts specific optical/material concepts from **RTX Remix for Minecraft** (Apache-2.0) and **Minecraft Miniature Shader** (MIT), all recorded in [`CREDITS.md`](CREDITS.md) and [`THIRD_PARTY_NOTICES.txt`](THIRD_PARTY_NOTICES.txt).
