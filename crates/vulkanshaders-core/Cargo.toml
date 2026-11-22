@@ -1,0 +1,25 @@
+[package]
+name = "vulkanshaders-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Native Rust Vulkan 1.3+ rendering, Zero-Copy BLAS/TLAS ray tracing, DAG render graph, and FrameGen engine for Hyaloclast (IGNIS)"
+
+[lib]
+name = "vulkanshaders_core"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+vsp-compiler = { path = "../vsp-compiler", features = ["shaderc-backend"] }
+ash.workspace = true
+gpu-allocator.workspace = true
+glam.workspace = true
+bytemuck.workspace = true
+parking_lot.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+bitflags.workspace = true
+blake3.workspace = true
+libloading.workspace = true

@@ -1,0 +1,141 @@
+#version 460
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+struct SharcConfig {
+    uvec2 hashEntriesAddress;
+    uvec2 lockAddress;
+    uvec2 accumulationAddress;
+    uvec2 resolvedAddress;
+    vec4 cameraPosition;
+    vec4 cameraPositionPrev;
+    float sceneScale;
+    float radianceScale;
+    uint accumulationFrameNum;
+    uint staleFrameNumMax;
+    uint capacity;
+    uint frameIndex;
+    uint enableAntiFireflyFilter;
+    uint useLockBuffer;
+    uint debugMode;
+    uint updateDownsampleFactor;
+    uint hasCrumbling;
+    uint _padding;
+};
+
+layout(std140, set = 0, binding = 0) uniform SharcConfigUBO {
+    SharcConfig cfg;
+} uSharc;
+
+layout(buffer_reference, std430, buffer_reference_align = 8) buffer VsSharcHashEntryBuf {
+    uint64_t keys[];
+};
+
+struct VsSharcAccumVoxel {
+    uvec4 accumulatedRadianceAndSamples;
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 16) buffer VsSharcAccumBuf {
+    VsSharcAccumVoxel voxels[];
+};
+
+struct VsSharcResolvedVoxel {
+    vec3 radiance;
+    float sampleWeight;
+    uint age;
+    uint pad0;
+    uint pad1;
+    uint pad2;
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 16) buffer VsSharcResolvedRwBuf {
+    VsSharcResolvedVoxel voxels[];
+};
+
+uint64_t unpackBda64(uvec2 pair) {
+    return uint64_t(pair.x) | (uint64_t(pair.y) << 32ul);
+}
+
+void main() {
+    uint slot = gl_GlobalInvocationID.x;
+    if (slot >= uSharc.cfg.capacity) {
+        return;
+    }
+
+    uint64_t hashAddr = unpackBda64(uSharc.cfg.hashEntriesAddress);
+    uint64_t accumAddr = unpackBda64(uSharc.cfg.accumulationAddress);
+    uint64_t resolvedAddr = unpackBda64(uSharc.cfg.resolvedAddress);
+    if (hashAddr == 0ul || accumAddr == 0ul || resolvedAddr == 0ul) {
+        return;
+    }
+
+    VsSharcHashEntryBuf hashBuf = VsSharcHashEntryBuf(hashAddr);
+    uint64_t key = hashBuf.keys[slot];
+    const uint64_t SHARC_TOMBSTONE = 0xFFFFFFFFFFFFFFFFul;
+    if (key == 0ul || key == SHARC_TOMBSTONE) {
+        return;
+    }
+
+    VsSharcAccumBuf accumBuf = VsSharcAccumBuf(accumAddr);
+    VsSharcResolvedRwBuf resolvedBuf = VsSharcResolvedRwBuf(resolvedAddr);
+
+    uvec4 accum = accumBuf.voxels[slot].accumulatedRadianceAndSamples;
+    if (accum != uvec4(0u)) {
+        accumBuf.voxels[slot].accumulatedRadianceAndSamples = uvec4(0u);
+    }
+
+    VsSharcResolvedVoxel resolved = resolvedBuf.voxels[slot];
+    uint newSamples = accum.w;
+
+    if (newSamples > 0u) {
+        float invScale = 1.0 / max(uSharc.cfg.radianceScale * float(newSamples), 1.0);
+        vec3 frameRadiance = max(vec3(accum.xyz) * invScale, vec3(0.0));
+
+        if (uSharc.cfg.enableAntiFireflyFilter != 0u) {
+            float luma = dot(frameRadiance, vec3(0.2126, 0.7152, 0.0722));
+            float historyLuma = dot(resolved.radiance, vec3(0.2126, 0.7152, 0.0722));
+            float maxAllowedLuma = (resolved.sampleWeight > 1.0)
+                ? max(historyLuma * 6.0 + 0.5, 2.5)
+                : 12.0;
+            if (luma > maxAllowedLuma) {
+                frameRadiance *= maxAllowedLuma / max(luma, 1e-4);
+            }
+        }
+
+        float maxAccum = float(max(uSharc.cfg.accumulationFrameNum, 8u));
+        if (uSharc.cfg.hasCrumbling != 0u) {
+            maxAccum = min(maxAccum, 16.0);
+        }
+
+        float prevWeight = clamp(resolved.sampleWeight, 0.0, maxAccum);
+        float addWeight = min(float(newSamples), 8.0);
+        float nextWeight = min(prevWeight + addWeight, maxAccum);
+        float blend = clamp(addWeight / max(prevWeight + addWeight, 1.0), 1.0 / maxAccum, 1.0);
+
+        resolved.radiance = (prevWeight > 0.0)
+            ? mix(resolved.radiance, frameRadiance, blend)
+            : frameRadiance;
+        resolved.sampleWeight = nextWeight;
+        resolved.age = 0u;
+        resolvedBuf.voxels[slot] = resolved;
+    } else {
+        uint nextAge = resolved.age + 1u;
+        uint maxStale = max(uSharc.cfg.staleFrameNumMax, 32u);
+        float decayedWeight = resolved.sampleWeight * 0.99;
+
+        if (nextAge > maxStale || decayedWeight < 0.25) {
+            // Write tombstone instead of 0ul so open-addressing linear-probing chains stay intact.
+            hashBuf.keys[slot] = SHARC_TOMBSTONE;
+            resolved.radiance = vec3(0.0);
+            resolved.sampleWeight = 0.0;
+            resolved.age = 0u;
+        } else {
+            resolved.sampleWeight = decayedWeight;
+            resolved.age = nextAge;
+        }
+        resolvedBuf.voxels[slot] = resolved;
+    }
+}

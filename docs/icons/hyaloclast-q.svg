@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-label="HYALOCLAST question icon">
+  <title>HYALOCLAST ? icon</title>
+  <style>
+    @keyframes sweep{0%{transform:translateX(-120px)}55%,100%{transform:translateX(300px)}}
+    @keyframes icon-bob{0%,100%{transform:translateY(0)}50%{transform:translateY(-5px)}}
+    .icon-bob{animation:icon-bob 3.2s steps(5,end) infinite}
+    .glint{animation:sweep 4.2s cubic-bezier(.4,0,.2,1) infinite}
+</style>
+  <defs>
+    <path id="q" d="M32 160 L32 192 L64 192 L64 160Z M16 0 L16 16 L16 16 L0 16 L0 48 L32 48 L32 32 L32 32 L64 32 L64 32 L64 64 L64 64 L48 64 L48 80 L48 80 L32 80 L32 128 L64 128 L64 96 L64 96 L80 96 L80 80 L80 80 L96 80 L96 16 L80 16 L80 16 L80 0Z" fill-rule="evenodd"/>
+    <clipPath id="qclip"><use href="#q"/></clipPath>
+    <linearGradient id="face-grad" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2="192">
+      <stop offset="0" stop-color="#FFF2A6"/><stop offset=".18" stop-color="#FFCE47"/><stop offset=".48" stop-color="#FF9624"/><stop offset=".78" stop-color="#EA5E12"/><stop offset="1" stop-color="#BD3808"/>
+    </linearGradient>
+    <linearGradient id="side-grad" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2="204">
+      <stop offset="0" stop-color="#C95214"/><stop offset=".5" stop-color="#94310A"/><stop offset="1" stop-color="#4D1605"/>
+    </linearGradient>
+    <linearGradient id="glint-grad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#FFFBE6" stop-opacity="0"/><stop offset=".5" stop-color="#FFFBE6" stop-opacity=".4"/><stop offset="1" stop-color="#FFFBE6" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="top-bevel" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2="192">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity=".30"/><stop offset=".12" stop-color="#FFFFFF" stop-opacity=".05"/><stop offset=".85" stop-color="#5E1600" stop-opacity="0"/><stop offset="1" stop-color="#4A1000" stop-opacity=".22"/>
+    </linearGradient>
+    <linearGradient id="plate-grad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5BA6F7"/><stop offset=".5" stop-color="#256BC0"/><stop offset="1" stop-color="#123A75"/>
+    </linearGradient>
+    <pattern id="shader-scan" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(-25)"><rect width="8" height="2" fill="#FFF7D0" opacity=".06"/></pattern>
+    <pattern id="voxel-glint" width="64" height="48" patternUnits="userSpaceOnUse">
+      <rect x="4" y="6" width="12" height="6" fill="#FFFBE0" opacity=".15"/><rect x="16" y="6" width="6" height="6" fill="#FFFBE0" opacity=".08"/><rect x="38" y="18" width="10" height="6" fill="#FFF7C2" opacity=".12"/>
+      <rect x="22" y="30" width="12" height="6" fill="#FFFBE0" opacity=".10"/>
+    </pattern>
+
+
+  </defs>
+  <g class="icon-bob">
+  <g transform="translate(90 24) skewX(-6)">
+    <g fill="#2B1308" stroke="#2B1308" stroke-width="16" stroke-linejoin="miter" stroke-miterlimit="3"><use href="#q" transform="translate(-3.60 12.00)"/><use href="#q" transform="translate(-3.00 10.00)"/><use href="#q" transform="translate(-2.40 8.00)"/><use href="#q" transform="translate(-1.80 6.00)"/><use href="#q" transform="translate(-1.20 4.00)"/><use href="#q" transform="translate(-0.60 2.00)"/><use href="#q" transform="translate(-0.00 0.00)"/></g>
+    <g fill="url(#side-grad)"><use href="#q" transform="translate(-3.60 12.00)"/><use href="#q" transform="translate(-3.00 10.00)"/><use href="#q" transform="translate(-2.40 8.00)"/><use href="#q" transform="translate(-1.80 6.00)"/><use href="#q" transform="translate(-1.20 4.00)"/><use href="#q" transform="translate(-0.60 2.00)"/><use href="#q" transform="translate(-0.00 0.00)"/></g>
+    <use href="#q" fill="url(#face-grad)" fill-rule="evenodd"/>
+    <g clip-path="url(#qclip)">
+      <rect x="-30" y="-10" width="200" height="212" fill="url(#voxel-glint)"/>
+      <rect x="-30" y="-10" width="200" height="212" fill="url(#shader-scan)"/>
+      <rect x="-30" y="-10" width="200" height="212" fill="url(#top-bevel)"/>
+      <path d="M-4 0h40l-14 192h-40z" fill="#FFFBE6" opacity=".10"/>
+      <g class="glint"><path d="M0 0h50l-18 192h-50z" fill="url(#glint-grad)"/></g>
+    </g>
+  </g>
+  </g>
+</svg>

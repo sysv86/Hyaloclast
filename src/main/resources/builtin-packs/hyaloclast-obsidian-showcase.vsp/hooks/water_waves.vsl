@@ -1,0 +1,10 @@
+#include <vulkanshaders/v1/common.vsl>
+
+// @hook(stage = "water_waves", priority = 100)
+// Obsidian Showcase - Dynamic amplified ocean and river swells with storm-driven speed boost.
+void os_water_waves(inout float strength, inout float speed, inout float scale) {
+    float storm = clamp(vsWorld.rain, 0.0, 1.0);
+    strength = VS_PARAM_WATER_WAVE_STRENGTH * 1.20 * (1.0 + storm * 0.45);
+    speed = 1.95 + storm * 1.10;
+    scale = 2.15;
+}

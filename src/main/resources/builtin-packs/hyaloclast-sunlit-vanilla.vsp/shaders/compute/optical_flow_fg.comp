@@ -1,0 +1,175 @@
+#version 460
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D uPrevHudlessColor;
+layout(set = 0, binding = 1) uniform sampler2D uCurrHudlessColor;
+layout(set = 0, binding = 2) uniform sampler2D uMotionVectors;
+layout(set = 0, binding = 3) uniform sampler2D uLinearDepth;
+layout(set = 0, binding = 4) uniform sampler2D uUiColor;
+layout(set = 0, binding = 5, rgba16f) uniform writeonly image2D uInterpolatedFrame;
+
+layout(push_constant) uniform OpticalFlowPush {
+    float interpolationFactor; // 0.5 for 2x FrameGen
+    float depthRejectionScale;
+    uint width;
+    uint height;
+} pc;
+
+float luma(vec3 c) {
+    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+vec3 rgbToYCoCg(vec3 c) {
+    return vec3(
+        0.25 * c.r + 0.5 * c.g + 0.25 * c.b,
+        0.5 * c.r - 0.5 * c.b,
+        -0.25 * c.r + 0.5 * c.g - 0.25 * c.b
+    );
+}
+
+vec3 yCoCgToRgb(vec3 ycc) {
+    float tmp = ycc.x - ycc.z;
+    return vec3(tmp + ycc.y, ycc.x + ycc.z, tmp - ycc.y);
+}
+
+// Evaluates 5-point cross patch Sum of Absolute Differences (SAD) at a given step scale
+float evaluatePatchSad(vec2 uv, vec2 flow, vec2 texelStep) {
+    const vec2 CROSS_OFFSETS[5] = vec2[5](
+        vec2( 0.0,  0.0),
+        vec2( 1.0,  0.0),
+        vec2(-1.0,  0.0),
+        vec2( 0.0,  1.0),
+        vec2( 0.0, -1.0)
+    );
+    float sad = 0.0;
+    for (int i = 0; i < 5; ++i) {
+        vec2 off = CROSS_OFFSETS[i] * texelStep;
+        float lCurr = luma(textureLod(uCurrHudlessColor, uv + off, 0.0).rgb);
+        float lPrev = luma(textureLod(uPrevHudlessColor, uv + off - flow, 0.0).rgb);
+        sad += abs(lCurr - lPrev);
+    }
+    return sad;
+}
+
+void main() {
+    uvec2 px = gl_GlobalInvocationID.xy;
+    if (px.x >= pc.width || px.y >= pc.height) {
+        return;
+    }
+
+    vec2 invRes = 1.0 / vec2(float(pc.width), float(pc.height));
+    vec2 uv = (vec2(px) + 0.5) * invRes;
+
+    // 1. Dilate G-Buffer motion vector using closest-depth 5-tap cross neighborhood (foreground edge dilation)
+    const vec2 CROSS_5[5] = vec2[5](
+        vec2( 0.0,  0.0),
+        vec2( 1.0,  0.0),
+        vec2(-1.0,  0.0),
+        vec2( 0.0,  1.0),
+        vec2( 0.0, -1.0)
+    );
+#if defined(VS_ACTIVE_RENDER_TIER) && (VS_ACTIVE_RENDER_TIER >= 3)
+    float bestDepth = 1e9;
+#else
+    float bestDepth = -1.0;
+#endif
+    vec2 dilatedMv = vec2(0.0);
+    for (int i = 0; i < 5; ++i) {
+        vec2 suv = uv + CROSS_5[i] * invRes * 2.0;
+        float d = textureLod(uLinearDepth, suv, 0.0).r;
+#if defined(VS_ACTIVE_RENDER_TIER) && (VS_ACTIVE_RENDER_TIER >= 3)
+        if (d > 0.0 && d < bestDepth) {
+#else
+        if (d > bestDepth) {
+#endif
+            bestDepth = d;
+            dilatedMv = textureLod(uMotionVectors, suv, 0.0).xy;
+        }
+    }
+
+    // 2. Multi-scale coarse-to-fine (scales 4px -> 2px -> 1px) patch block-matching refinement
+    // with early-out when G-Buffer velocity already matches within low SAD threshold.
+    vec2 bestFlow = dilatedMv;
+    float bestSad = evaluatePatchSad(uv, bestFlow, invRes);
+
+    if (bestSad > 0.015) {
+        const vec2 DIAMOND[4] = vec2[4](
+            vec2( 1.0,  0.0),
+            vec2(-1.0,  0.0),
+            vec2( 0.0,  1.0),
+            vec2( 0.0, -1.0)
+        );
+        const float SCALES[3] = float[3](4.0, 2.0, 1.0);
+
+        for (int s = 0; s < 3; ++s) {
+            vec2 stepVec = invRes * SCALES[s];
+            if (s == 0) {
+                float zeroSad = evaluatePatchSad(uv, vec2(0.0), stepVec);
+                if (zeroSad + 0.015 < bestSad) {
+                    bestSad = zeroSad;
+                    bestFlow = vec2(0.0);
+                }
+            }
+            vec2 centerFlow = bestFlow;
+            for (int i = 0; i < 4; ++i) {
+                vec2 cand = centerFlow + DIAMOND[i] * stepVec;
+                float sad = evaluatePatchSad(uv, cand, invRes);
+                if (sad < bestSad) {
+                    bestSad = sad;
+                    bestFlow = cand;
+                }
+            }
+        }
+    }
+
+    // 3. 1-step Lucas-Kanade sub-pixel optical flow gradient refinement
+    float lR = luma(textureLod(uCurrHudlessColor, uv + vec2(invRes.x, 0.0), 0.0).rgb);
+    float lL = luma(textureLod(uCurrHudlessColor, uv - vec2(invRes.x, 0.0), 0.0).rgb);
+    float lU = luma(textureLod(uCurrHudlessColor, uv + vec2(0.0, invRes.y), 0.0).rgb);
+    float lD = luma(textureLod(uCurrHudlessColor, uv - vec2(0.0, invRes.y), 0.0).rgb);
+    vec2 grad = vec2(lR - lL, lU - lD) * 0.5;
+    vec3 currCenter = textureLod(uCurrHudlessColor, uv, 0.0).rgb;
+    float it = luma(currCenter) - luma(textureLod(uPrevHudlessColor, uv - bestFlow, 0.0).rgb);
+    float gradMag2 = dot(grad, grad) + 0.005;
+    vec2 lkDelta = clamp((-it * grad / gradMag2) * invRes, -invRes * 0.75, invRes * 0.75);
+    bestFlow += lkDelta;
+
+    // 4. Bidirectional depth & luminance disocclusion confidence + YCoCg neighborhood clamping
+    float t = clamp(pc.interpolationFactor, 0.0, 1.0);
+    vec2 fwdUv = clamp(uv + bestFlow * (1.0 - t), vec2(0.0), vec2(1.0));
+    vec2 bwdUv = clamp(uv - bestFlow * t, vec2(0.0), vec2(1.0));
+
+    vec3 prevSample = textureLod(uPrevHudlessColor, bwdUv, 0.0).rgb;
+    vec3 currSample = textureLod(uCurrHudlessColor, fwdUv, 0.0).rgb;
+
+    float d0 = textureLod(uLinearDepth, bwdUv, 0.0).r;
+    float d1 = textureLod(uLinearDepth, fwdUv, 0.0).r;
+    float depthAgreement = exp(-abs(d0 - d1) * max(pc.depthRejectionScale, 0.1));
+    float lumaAgreement = exp(-abs(luma(prevSample) - luma(currSample)) * 3.5);
+    float confidence = clamp(depthAgreement * mix(0.6, 1.0, lumaAgreement), 0.0, 1.0);
+
+    vec3 blended = mix(currSample, mix(prevSample, currSample, t), confidence);
+
+    // Clamp interpolated sample to 5-tap YCoCg bounding box around fwdUv/bwdUv to prevent ghosting
+    vec3 yccMin = vec3(1e9);
+    vec3 yccMax = vec3(-1e9);
+    for (int i = 0; i < 5; ++i) {
+        vec2 off = CROSS_5[i] * invRes;
+        vec3 cYcc = rgbToYCoCg(textureLod(uCurrHudlessColor, fwdUv + off, 0.0).rgb);
+        yccMin = min(yccMin, cYcc);
+        yccMax = max(yccMax, cYcc);
+    }
+    vec3 pYcc = rgbToYCoCg(prevSample);
+    yccMin = min(yccMin, pYcc) - vec3(0.04);
+    yccMax = max(yccMax, pYcc) + vec3(0.04);
+    vec3 worldMid = max(yCoCgToRgb(clamp(rgbToYCoCg(blended), yccMin, yccMax)), vec3(0.0));
+
+    // 5. Composite un-interpolated crisp HUD/UI over the interpolated world frame
+    vec4 ui = textureLod(uUiColor, uv, 0.0);
+    vec3 uiDiff = abs(ui.rgb - currCenter);
+    float diffMask = smoothstep(0.004, 0.02, max(uiDiff.r, max(uiDiff.g, uiDiff.b)));
+    float uiMask = (ui.a < 0.999) ? ui.a : diffMask;
+    vec3 finalRgb = mix(worldMid, ui.rgb, uiMask);
+
+    imageStore(uInterpolatedFrame, ivec2(px), vec4(finalRgb, 1.0));
+}

@@ -1,0 +1,94 @@
+#include <vulkanshaders/v1/common.vsl>
+
+float os_waterHash21(vec2 p) {
+    p = fract(p * vec2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+}
+
+// Procedural raindrop impact ripple slope for wet and stormy water surfaces.
+vec2 os_rainRippleSlope(vec2 p, float timeSec) {
+    vec2 cell = floor(p);
+    vec2 local = fract(p) - 0.5;
+    float seed = os_waterHash21(cell);
+    float age = fract(timeSec * 1.22 + seed);
+    vec2 center = (vec2(fract(seed * 17.3), fract(seed * 31.7)) - 0.5) * 0.55;
+    vec2 d = local - center;
+    float dist = length(d);
+    float radius = age * 0.46;
+    float ring = dist - radius;
+    float env = exp(-ring * ring * 95.0) * (1.0 - age) * smoothstep(0.0, 0.08, age);
+    float waveDeriv = cos(ring * 44.0) * env;
+    return (dist > 1e-4) ? (d / dist) * waveDeriv : vec2(0.0);
+}
+
+// @hook(stage = "water_surface", priority = 100)
+// Obsidian Showcase - Full 5-octave trochoidal Gerstner swells with distance-faded high-frequency
+// octaves and raindrop capillary ripples for shimmer-free distant oceans.
+void os_water_surface(inout VsSurface s, in vec3 worldPos, in float waveHeight) {
+    float rain = clamp(vsWorld.rain, 0.0, 1.0);
+    float storm = clamp(vsWorld.rain + vsWorld.thunder * 0.35, 0.0, 1.0);
+    float t = vsWorld.gameTimeSec * (1.85 + storm * 0.80);
+    float strength = clamp(VS_PARAM_WATER_WAVE_STRENGTH, 0.0, 1.0);
+    float amp = strength * (0.125 + 0.21 * storm);
+    vec2 p = worldPos.xz;
+
+    float camDist = length(worldPos - uSharc.cfg.cameraPosition.xyz);
+    float oct2Fade = 1.0 - smoothstep(32.0, 110.0, camDist);
+    float oct3Fade = 1.0 - smoothstep(18.0, 64.0, camDist);
+    float oct4Fade = 1.0 - smoothstep(10.0, 38.0, camDist);
+    float rainFade = 1.0 - smoothstep(12.0, 44.0, camDist);
+    float macroFade = 1.0 - smoothstep(160.0, 460.0, camDist) * 0.65;
+
+    // 5 crossing trochoidal Gerstner-inspired wave octaves (prime-like frequency ratios avoid tiling)
+    vec2 d0 = normalize(vec2( 0.93,  0.37));
+    vec2 d1 = normalize(vec2( 0.51,  0.86));
+    vec2 d2 = normalize(vec2(-0.64,  0.77));
+    vec2 d3 = normalize(vec2( 0.84, -0.54));
+    vec2 d4 = normalize(vec2(-0.35, -0.94));
+
+    float k0 = 0.84; float a0 = 1.00 * macroFade; float ph0 = dot(p, d0) * k0 + t * 0.98;
+    float k1 = 1.68; float a1 = 0.54 * macroFade; float ph1 = dot(p, d1) * k1 + t * 1.34;
+    float k2 = 3.14; float a2 = 0.29 * oct2Fade;  float ph2 = dot(p, d2) * k2 - t * 1.70;
+    float k3 = 5.52; float a3 = (0.15 + 0.11 * storm) * oct3Fade; float ph3 = dot(p, d3) * k3 + t * 2.38;
+    float k4 = 9.45; float a4 = (0.075 + 0.10 * storm) * oct4Fade; float ph4 = dot(p, d4) * k4 - t * 3.25;
+
+    // Trochoidal crest sharpening on primary and secondary swells
+    float w0 = ph0 + 0.32 * sin(ph0);
+    float w1 = ph1 + 0.24 * sin(ph1);
+    float w2 = ph2 + 0.16 * sin(ph2);
+    float dw0 = 1.0 + 0.32 * cos(ph0);
+    float dw1 = 1.0 + 0.24 * cos(ph1);
+    float dw2 = 1.0 + 0.16 * cos(ph2);
+
+    float h = sin(w0) * a0
+            + sin(w1) * a1
+            + sin(w2) * a2
+            + sin(ph3) * a3
+            + sin(ph4) * a4;
+
+    vec2 grad = d0 * (cos(w0) * dw0 * k0 * a0)
+              + d1 * (cos(w1) * dw1 * k1 * a1)
+              + d2 * (cos(w2) * dw2 * k2 * a2)
+              + d3 * (cos(ph3) * k3 * a3)
+              + d4 * (cos(ph4) * k4 * a4);
+
+    // Dual-layer procedural raindrop capillary impact ripples when raining
+    if (rain > 0.02 && rainFade > 0.01) {
+        vec2 r1 = os_rainRippleSlope(p * 1.40, vsWorld.gameTimeSec);
+        vec2 r2 = os_rainRippleSlope(p * 1.95 + vec2(3.7, 5.1), vsWorld.gameTimeSec * 1.20 + 0.41);
+        grad += (r1 + r2 * 0.80) * (rain * 2.55 * rainFade);
+    }
+
+    vec3 slope = vec3(-grad.x * amp, 0.0, -grad.y * amp);
+    if (abs(s.normal.y) > 0.5) {
+        s.normal = normalize(vec3(0.0, 1.0, 0.0) + slope) * sign(s.normal.y);
+    } else {
+        s.normal = normalize(s.normal + slope * 0.38);
+    }
+
+    // Ultra-crisp mirror troughs with delicate micro-capillary roughness on crests & rain chop
+    float crest = clamp(h * 0.42 + 0.5, 0.0, 1.0);
+    s.roughness = mix(0.012, 0.055, crest * (0.26 + 0.74 * rain));
+    s.f0 = 0.02;
+}

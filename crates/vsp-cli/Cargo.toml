@@ -1,0 +1,19 @@
+[package]
+name = "vsp-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Command-line validation, inspection, and SPIR-V precompilation utility for VulkanShaders (.vsp) packages"
+
+[[bin]]
+name = "vsp"
+path = "src/main.rs"
+
+[dependencies]
+vsp-compiler = { path = "../vsp-compiler", features = ["shaderc-backend"] }
+bytemuck.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

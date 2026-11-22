@@ -1,0 +1,19 @@
+[package]
+name = "vulkanshaders-sdk-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Real SDK header, binary, and ABI verification benchmark harness for VulkanShaders (NGX, NRD, FSR3, XeSS)"
+
+[dependencies]
+vulkanshaders-core = { path = "../vulkanshaders-core" }
+serde.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+blake3.workspace = true
+libloading.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

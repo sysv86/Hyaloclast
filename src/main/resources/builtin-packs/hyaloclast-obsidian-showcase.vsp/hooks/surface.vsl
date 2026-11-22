@@ -1,0 +1,109 @@
+#include <vulkanshaders/v1/common.vsl>
+
+// @hook(stage = "surface", priority = 100)
+// Obsidian Showcase - High-contrast LabPBR material calibration across all 15 material IDs
+// to demonstrate RT reflections, SHaRC multi-bounce colored GI, ReSTIR DI emissives, and SSS.
+void os_surface(inout VsSurface s, in uint flags, in uint bounce) {
+    uint materialId = (flags >> 3u) & 15u;
+    float luma = dot(s.albedo, vec3(0.2126, 0.7152, 0.0722));
+
+    if (materialId == 1u) {
+        // STONE / DEEPSLATE / BRICKS: crisp mineral response with subtle carved specular catch
+        s.roughness = clamp(s.roughness, 0.64, 0.84);
+        s.f0 = min(s.f0, 0.042);
+    } else if (materialId == 2u) {
+        // DIRT / GRASS BLOCK / CLAY: grounded matte soil for contrast against glossy materials
+        s.roughness = clamp(s.roughness, 0.84, 0.94);
+        s.f0 = min(s.f0, 0.030);
+    } else if (materialId == 3u) {
+        // WOOD / PLANKS / LOGS: rich oiled-satin timber grain
+        s.roughness = clamp(s.roughness, 0.56, 0.76);
+        s.f0 = min(s.f0, 0.038);
+    } else if (materialId == 4u) {
+        // FOLIAGE / LEAVES / CROPS / FLOWERS: strong botanical translucency for backlit SSS
+        s.subsurface = max(s.subsurface, 0.68);
+        s.roughness = clamp(s.roughness, 0.54, 0.72);
+        s.f0 = min(s.f0, 0.032);
+    } else if (materialId == 5u) {
+        // SAND / GRAVEL: balanced desert albedo with fine mineral sparkle
+        s.albedo *= 0.86;
+        s.roughness = clamp(s.roughness, 0.76, 0.90);
+        s.f0 = min(s.f0, 0.038);
+    } else if (materialId == 6u) {
+        // METAL (iron, gold, copper, netherite, anvil, chain): mirror-polished showcase conductor
+        if (s.metallic < 0.1) {
+            s.metallic = 0.96;
+            s.roughness = clamp(s.roughness * 0.28, 0.08, 0.18);
+            s.f0 = max(s.f0, 0.92);
+        } else {
+            s.metallic = max(s.metallic, 0.96);
+            s.roughness = clamp(s.roughness, 0.08, 0.18);
+            s.f0 = max(s.f0, 0.92);
+        }
+    } else if (materialId == 7u) {
+        // GLASS / ICE: optical dielectric crystal with pronounced glacial ice translucency
+        float blueBias = smoothstep(0.02, 0.16, s.albedo.b - s.albedo.r);
+        s.roughness = min(s.roughness, mix(0.035, 0.11, blueBias * luma));
+        s.f0 = max(s.f0, 0.048);
+        s.subsurface = max(s.subsurface, blueBias * 0.42);
+    } else if (materialId == 9u) {
+        // LAVA: dramatic incandescent molten magma for unmistakable ReSTIR colored bounce & bloom
+        s.roughness = mix(0.74, 0.22, smoothstep(0.14, 0.72, luma));
+        s.emission = max(s.emission, mix(0.85, 3.20, smoothstep(0.10, 0.70, luma)));
+    } else if (materialId == 11u) {
+        // WOOL / CARPET: soft matte textile anchor
+        s.roughness = clamp(s.roughness, 0.88, 0.97);
+        s.f0 = min(s.f0, 0.024);
+    } else if (materialId == 12u) {
+        // GEM / CRYSTAL (diamond, emerald, amethyst, quartz, prismarine): gleaming high-IOR crystal
+        if (s.metallic < 0.1) {
+            s.f0 = clamp(max(s.f0, 0.12), 0.10, 0.18);
+            s.roughness = clamp(s.roughness * 0.35, 0.05, 0.14);
+            s.subsurface = max(s.subsurface, 0.24);
+        }
+    } else if (materialId == 13u) {
+        // SNOW / HONEY / WAX / ORGANIC: luminous subsurface scattering with crisp sheen
+        if (s.metallic < 0.1) {
+            s.subsurface = max(s.subsurface, 0.52);
+            s.roughness = clamp(s.roughness, 0.40, 0.68);
+            s.f0 = clamp(s.f0, 0.036, 0.048);
+        }
+    } else if (materialId == 14u) {
+        // POLISHED STONE / GLAZED TERRACOTTA / CERAMIC: satin-gloss architectural reflections
+        if (s.metallic < 0.1) {
+            s.roughness = clamp(s.roughness * 0.55, 0.14, 0.28);
+            s.f0 = clamp(max(s.f0, 0.062), 0.055, 0.085);
+        }
+    } else if (materialId == 15u) {
+        // SCULK / MAGICAL / ARCANE: dark obsidian-gloss base with vivid bioluminescent veins
+        if (s.metallic < 0.1) {
+            s.roughness = clamp(s.roughness * 0.48, 0.12, 0.26);
+            s.f0 = max(s.f0, 0.080);
+        }
+    }
+
+    // Flag-level overrides
+    if ((flags & 1u) != 0u) {
+        s.subsurface = max(s.subsurface, 0.68);
+        s.roughness = clamp(s.roughness, 0.54, 0.72);
+    }
+    if ((flags & 2u) != 0u && materialId != 9u) {
+        // Water fluid surface
+        s.roughness = min(s.roughness, 0.032);
+        s.f0 = 0.02;
+    }
+    if ((flags & 4u) != 0u && materialId != 9u) {
+        // Dramatic showcase emissives: luminance-masked so metal/wood lantern frames stay mirror-crisp
+        float emitterMask = smoothstep(0.06, 0.50, luma);
+        float baseEmit = mix(0.28, 3.10, emitterMask);
+        if (materialId == 15u) {
+            float sculkPulse = 0.80 + 0.24 * sin(vsWorld.gameTimeSec * 2.6);
+            s.emission = max(s.emission, min(baseEmit * sculkPulse, 3.20));
+        } else {
+            s.emission = max(s.emission, baseEmit);
+            s.roughness = max(s.roughness, 0.34);
+        }
+    }
+
+    s.roughness = max(s.roughness, 0.015);
+}

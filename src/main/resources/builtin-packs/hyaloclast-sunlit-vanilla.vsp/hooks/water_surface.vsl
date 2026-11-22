@@ -1,0 +1,88 @@
+#include <vulkanshaders/v1/common.vsl>
+
+float sv_waterHash21(vec2 p) {
+    p = fract(p * vec2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+}
+
+// Procedural concentric raindrop impact rings on wet water surfaces during rainfall
+vec2 sv_rainRippleSlope(vec2 p, float timeSec) {
+    vec2 cell = floor(p);
+    vec2 local = fract(p) - 0.5;
+    float seed = sv_waterHash21(cell);
+    float age = fract(timeSec * 1.12 + seed);
+    vec2 center = (vec2(fract(seed * 17.3), fract(seed * 31.7)) - 0.5) * 0.54;
+    vec2 d = local - center;
+    float dist = length(d);
+    float radius = age * 0.45;
+    float ring = dist - radius;
+    float env = exp(-ring * ring * 92.0) * (1.0 - age) * smoothstep(0.0, 0.08, age);
+    float waveDeriv = cos(ring * 40.0) * env;
+    return (dist > 1e-4) ? (d / dist) * waveDeriv : vec2(0.0);
+}
+
+// @hook(stage = "water_surface", priority = 100)
+// Sunlit Vanilla - Calm 4-octave crossing Gerstner ripples with distance-faded high-frequency
+// octaves and raindrop rings to keep distant oceans calm and shimmer-free.
+void sv_water_surface(inout VsSurface s, in vec3 worldPos, in float waveHeight) {
+    float rain = clamp(vsWorld.rain, 0.0, 1.0);
+    float t = vsWorld.gameTimeSec * (1.42 + rain * 0.52);
+    float strength = clamp(VS_PARAM_WATER_WAVE_STRENGTH, 0.0, 1.0);
+    float amp = strength * (0.088 + 0.15 * rain);
+    vec2 p = worldPos.xz;
+
+    // Distance-fade high-frequency octaves and rain ripples to eliminate distant ocean shimmer
+    float camDist = length(worldPos - uSharc.cfg.cameraPosition.xyz);
+    float oct2Fade = 1.0 - smoothstep(28.0, 96.0, camDist);
+    float oct3Fade = 1.0 - smoothstep(14.0, 52.0, camDist);
+    float rainFade = 1.0 - smoothstep(12.0, 42.0, camDist);
+    float macroFade = 1.0 - smoothstep(140.0, 420.0, camDist) * 0.65;
+
+    // 4 crossing Gerstner-inspired wave octaves with non-harmonic frequencies to prevent tiling
+    vec2 d0 = normalize(vec2( 0.91,  0.41));
+    vec2 d1 = normalize(vec2( 0.52,  0.85));
+    vec2 d2 = normalize(vec2(-0.66,  0.75));
+    vec2 d3 = normalize(vec2( 0.82, -0.57));
+
+    float k0 = 0.92; float a0 = 1.00 * macroFade; float ph0 = dot(p, d0) * k0 + t * 0.88;
+    float k1 = 1.88; float a1 = 0.48 * macroFade; float ph1 = dot(p, d1) * k1 - t * 1.20;
+    float k2 = 3.45; float a2 = 0.24 * oct2Fade;  float ph2 = dot(p, d2) * k2 + t * 1.58;
+    float k3 = 6.10; float a3 = (0.11 + 0.10 * rain) * oct3Fade; float ph3 = dot(p, d3) * k3 - t * 2.25;
+
+    // Gentle trochoidal crest sharpening on the two primary swells
+    float w0 = ph0 + 0.20 * sin(ph0);
+    float w1 = ph1 + 0.16 * sin(ph1);
+    float dw0 = 1.0 + 0.20 * cos(ph0);
+    float dw1 = 1.0 + 0.16 * cos(ph1);
+
+    float h = sin(w0) * a0
+            + sin(w1) * a1
+            + sin(ph2) * a2
+            + sin(ph3) * a3;
+
+    vec2 grad = d0 * (cos(w0) * dw0 * k0 * a0)
+              + d1 * (cos(w1) * dw1 * k1 * a1)
+              + d2 * (cos(ph2) * k2 * a2)
+              + d3 * (cos(ph3) * k3 * a3);
+
+    // Raindrop impact rings when raining (faded with distance)
+    if (rain > 0.02 && rainFade > 0.01) {
+        vec2 r1 = sv_rainRippleSlope(p * 1.32, vsWorld.gameTimeSec);
+        vec2 r2 = sv_rainRippleSlope(p * 1.82 + vec2(3.7, 5.1), vsWorld.gameTimeSec * 1.16 + 0.37);
+        grad += (r1 + r2 * 0.72) * (rain * 2.05 * rainFade);
+    }
+
+    vec3 slope = vec3(-grad.x * amp, 0.0, -grad.y * amp);
+    if (abs(s.normal.y) > 0.5) {
+        s.normal = normalize(vec3(0.0, 1.0, 0.0) + slope) * sign(s.normal.y);
+    } else {
+        s.normal = normalize(s.normal + slope * 0.30);
+    }
+
+    // Subtle turquoise clarity that keeps vanilla biome water colors recognizable
+    s.albedo = mix(s.albedo, vec3(0.08, 0.44, 0.52), 0.16);
+    float crest = clamp(h * 0.40 + 0.5, 0.0, 1.0);
+    s.roughness = mix(0.016, 0.058, crest * (0.26 + 0.74 * rain));
+    s.f0 = 0.02;
+}

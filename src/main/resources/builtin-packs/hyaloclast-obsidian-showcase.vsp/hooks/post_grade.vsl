@@ -1,0 +1,100 @@
+#include <vulkanshaders/v1/common.vsl>
+
+vec3 os_agx(vec3 x) {
+    const mat3 agxIn = mat3(
+        0.84247906, 0.04232824, 0.04237565,
+        0.07843360, 0.87846864, 0.07843360,
+        0.07922375, 0.07916613, 0.87914297
+    );
+    const mat3 agxOut = mat3(
+         1.19687900, -0.05289685, -0.05297163,
+        -0.09802088,  1.15190313, -0.09804345,
+        -0.09902974, -0.09896118,  1.15107368
+    );
+    vec3 v = max(agxIn * x, vec3(1e-6));
+    v = clamp((log2(v) + 12.47393) / 16.5, 0.0, 1.0);
+    vec3 v2 = v * v;
+    vec3 v4 = v2 * v2;
+    v = 15.5 * v4 * v2
+      - 40.14 * v4 * v
+      + 31.96 * v4
+      - 6.868 * v2 * v
+      + 0.4298 * v2
+      + 0.1191 * v
+      - 0.00232;
+    return clamp(agxOut * v, 0.0, 1.0);
+}
+
+vec3 os_aces(vec3 x) {
+    const float a = 2.51;
+    const float b = 0.03;
+    const float c = 2.43;
+    const float d = 0.59;
+    const float e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+}
+
+vec3 os_pbr_neutral(vec3 color) {
+    const float startCompression = 0.76;
+    const float desaturation = 0.15;
+    float x = min(color.r, min(color.g, color.b));
+    float offset = x < 0.08 ? x - 6.25 * x * x : 0.04;
+    color -= offset;
+    float peak = max(color.r, max(color.g, color.b));
+    if (peak < startCompression) return max(color, vec3(0.0));
+    const float d = 1.0 - startCompression;
+    float newPeak = 1.0 - d * d / (peak + d - startCompression);
+    color *= newPeak / peak;
+    float g = 1.0 - 1.0 / (desaturation * (peak - newPeak) + 1.0);
+    return clamp(mix(color, vec3(newPeak), g), 0.0, 1.0);
+}
+
+// @hook(stage = "post_grade", priority = 100)
+// Obsidian Showcase - Cinematic HDR AgX showcase grade with cobalt-shadow / honey-highlight
+// split-tone, warmth-preserving emissive mask, rich contrast (pow 1.08), and optical vignette (0.075).
+void os_post_grade(inout vec3 hdrColor, in vec2 uv, in VsPostContext post) {
+    vec3 preTone = max(hdrColor * post.exposure, vec3(0.0));
+
+    // Warmth-preserving emissive mask derived from pre-tonemapped HDR radiance so incandescent
+    // torches, lava, and colored ReSTIR emitters retain their chromatic punch through grading.
+    float hdrPeak = max(preTone.r, max(preTone.g, preTone.b));
+    float hdrMin = min(preTone.r, min(preTone.g, preTone.b));
+    float hdrChroma = (hdrPeak > 1e-4) ? ((hdrPeak - hdrMin) / hdrPeak) : 0.0;
+    float warmBias = smoothstep(0.05, 0.45, preTone.r - preTone.b);
+    float emissiveMask = smoothstep(0.85, 2.60, hdrPeak) * smoothstep(0.18, 0.70, hdrChroma);
+    float warmEmissiveMask = emissiveMask * (0.55 + 0.45 * warmBias);
+
+    if (post.toneMapMode == 1u) {
+        hdrColor = os_aces(preTone);
+    } else if (post.toneMapMode == 2u) {
+        hdrColor = os_pbr_neutral(preTone);
+    } else {
+        hdrColor = os_agx(preTone);
+        // AgX EOTF + rich showcase contrast curve (pow 1.08)
+        hdrColor = pow(clamp(hdrColor, 0.0, 1.0), vec3(2.2));
+        hdrColor = pow(hdrColor, vec3(1.08));
+    }
+
+    // Cobalt-shadow / honey-highlight split-tone, moderated over bright colored emissives
+    float luma = dot(hdrColor, vec3(0.2126, 0.7152, 0.0722));
+    float shadowWeight = (1.0 - smoothstep(0.02, 0.36, luma)) * smoothstep(0.0, 0.025, luma);
+    float highlightWeight = smoothstep(0.42, 0.90, luma);
+    vec3 splitTint = vec3(1.0)
+        + vec3(-0.048, -0.010,  0.068) * shadowWeight * (1.0 - emissiveMask * 0.75)
+        + vec3( 0.058,  0.022, -0.042) * highlightWeight * (1.0 - emissiveMask * 0.45);
+    hdrColor = clamp(hdrColor * splitTint, 0.0, 1.0);
+
+    // Warmth-preserving emissive saturation lift + selective scene vibrance
+    float maxCh = max(hdrColor.r, max(hdrColor.g, hdrColor.b));
+    float minCh = min(hdrColor.r, min(hdrColor.g, hdrColor.b));
+    float sat = (maxCh > 1e-4) ? ((maxCh - minCh) / maxCh) : 0.0;
+    float baseVibrance = mix(1.14, 1.04, smoothstep(0.22, 0.82, sat));
+    float emissiveVibrance = mix(baseVibrance, 1.18, warmEmissiveMask);
+    float lumaPost = dot(hdrColor, vec3(0.2126, 0.7152, 0.0722));
+    hdrColor = clamp(mix(vec3(lumaPost), hdrColor, emissiveVibrance), 0.0, 1.0);
+
+    // Subtle cinematic optical vignette (0.075)
+    vec2 centered = uv * 2.0 - 1.0;
+    float vig = 1.0 - dot(centered, centered) * 0.075;
+    hdrColor *= clamp(vig, 0.84, 1.0);
+}

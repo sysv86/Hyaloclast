@@ -1,0 +1,695 @@
+#version 460
+
+#include <vulkanshaders/v1/common.vsl>
+#include <vulkanshaders/v1/lighting.vsl>
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 1) uniform sampler2D gAlbedo;
+layout(set = 0, binding = 2) uniform sampler2D gNormal;
+layout(set = 0, binding = 3) uniform sampler2D gPbr;
+layout(set = 0, binding = 4) uniform sampler2D gDepth;
+layout(set = 0, binding = 5, rgba16f) uniform writeonly image2D outHdrRadiance;
+layout(set = 0, binding = 6) uniform sampler2DArray uShadowCsm;
+layout(std140, set = 0, binding = 7) uniform CsmShadowUBO {
+    mat4 cascadeViewProj[4];
+    vec4 cascadeSplits;
+    vec4 texelSizes;
+} uCsm;
+layout(set = 0, binding = 8) uniform sampler2D uSsgiIndirect;
+layout(set = 0, binding = 9) uniform sampler2D uVolumetricFog;
+layout(set = 0, binding = 10) uniform sampler2D uDhAlbedo;
+layout(set = 0, binding = 11) uniform sampler2D uDhNormal;
+layout(set = 0, binding = 12) uniform sampler2D uDhMaterial;
+layout(set = 0, binding = 13) uniform sampler2D uDhDepth;
+layout(std140, set = 0, binding = 14) uniform DhFrameUBO {
+    mat4 dhInvViewProj;
+    float fadeStart;
+    float fadeEnd;
+    float dhFarClip;
+    uint dhActive;
+} uDh;
+layout(set = 1, binding = 2, std140) uniform SharcConfigUBO {
+    SharcConfig cfg;
+} uSharc;
+layout(set = 1, binding = 3, std430) readonly buffer EmissiveLightSSBO {
+    uint lightCount;
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;
+    VsEmissiveLight lights[];
+} uEmissiveLights;
+
+// Pre-multiplied once per invocation in main() to avoid redundant invProj + invView multiplies.
+mat4 gInvViewProj;
+
+// Workgroup shared-memory tiled light culling (8x8 = 64 threads).
+shared vec3 sTilePosMin[64];
+shared vec3 sTilePosMax[64];
+shared uint sTileLights[64];
+shared uint sTileLightCount;
+
+void vs_dispatch_hook_direct_light(in VsSurface s, in vec3 viewDir, in vec3 lightDir, inout vec3 brdf);
+void vs_dispatch_hook_block_light(inout vec3 radiance, in uint lightKind, in float dist);
+void vs_dispatch_hook_sky(inout vec3 radiance, in vec3 dir, in VsSkyState sky);
+vec4 vs_dispatch_hook_clouds(in vec3 dir, in vec3 cameraPos, in VsSkyState sky);
+void vs_dispatch_hook_water_waves(inout float strength, inout float speed, inout float scale);
+void vs_dispatch_hook_water_surface(inout VsSurface s, in vec3 worldPos, in float waveHeight);
+void vs_dispatch_hook_fog(in float dist, in vec3 dir, inout vec3 scatter, inout vec3 transmittance);
+
+vec3 reconstructCameraRelativePos(vec2 uv, float depth) {
+    vec4 ndc = vec4(uv * 2.0 - 1.0, depth, 1.0);
+    vec4 worldPos = gInvViewProj * ndc;
+    float w = abs(worldPos.w) > 1e-6 ? worldPos.w : (worldPos.w >= 0.0 ? 1e-6 : -1e-6);
+    return worldPos.xyz / w;
+}
+
+vec3 reconstructDhCameraRelativePos(vec2 uv, float depth) {
+    vec4 ndc = vec4(uv * 2.0 - 1.0, depth, 1.0);
+    vec4 worldPos = uDh.dhInvViewProj * ndc;
+    float w = abs(worldPos.w) > 1e-6 ? worldPos.w : (worldPos.w >= 0.0 ? 1e-6 : -1e-6);
+    return worldPos.xyz / w;
+}
+
+float vsInterleavedGradientNoise(vec2 px) {
+    return fract(52.9829189 * fract(dot(px, vec2(0.06711056, 0.00583715))));
+}
+
+vec3 computeGeometricNormal(vec2 uv, vec2 texelSize, vec3 P) {
+    vec2 uvRx = clamp(uv + vec2(texelSize.x, 0.0), vec2(0.0), vec2(1.0));
+    vec2 uvLx = clamp(uv - vec2(texelSize.x, 0.0), vec2(0.0), vec2(1.0));
+    vec2 uvUy = clamp(uv + vec2(0.0, texelSize.y), vec2(0.0), vec2(1.0));
+    vec2 uvDy = clamp(uv - vec2(0.0, texelSize.y), vec2(0.0), vec2(1.0));
+
+    float dRx = textureLod(gDepth, uvRx, 0.0).r;
+    float dLx = textureLod(gDepth, uvLx, 0.0).r;
+    float dUy = textureLod(gDepth, uvUy, 0.0).r;
+    float dDy = textureLod(gDepth, uvDy, 0.0).r;
+
+    vec3 pRx = reconstructCameraRelativePos(uvRx, max(dRx, 1e-5)) - P;
+    vec3 pLx = P - reconstructCameraRelativePos(uvLx, max(dLx, 1e-5));
+    vec3 pUy = reconstructCameraRelativePos(uvUy, max(dUy, 1e-5)) - P;
+    vec3 pDy = P - reconstructCameraRelativePos(uvDy, max(dDy, 1e-5));
+
+    vec3 dPdx = (dot(pRx, pRx) < dot(pLx, pLx)) ? pRx : pLx;
+    vec3 dPdy = (dot(pUy, pUy) < dot(pDy, pDy)) ? pUy : pDy;
+    vec3 n = cross(dPdy, dPdx);
+    float len2 = dot(n, n);
+    if (len2 < 1e-10) {
+        return vec3(0.0, 1.0, 0.0);
+    }
+    n *= inversesqrt(len2);
+    if (dot(n, -P) < 0.0) {
+        n = -n;
+    }
+    return n;
+}
+
+float computeScreenSpaceAO(vec2 uv, vec3 P, vec3 N, vec2 texelSize, float dist, float ign) {
+    if (dist > 48.0) {
+        return 1.0;
+    }
+    const vec2 dirs[4] = vec2[](
+        vec2( 1.0,  1.0),
+        vec2(-1.0,  1.0),
+        vec2( 1.0, -1.0),
+        vec2(-1.0, -1.0)
+    );
+    const float radii[2] = float[](3.5, 8.0);
+    float angle = ign * 6.283185307;
+    float ca = cos(angle);
+    float sa = sin(angle);
+    mat2 rotMat = mat2(ca, -sa, sa, ca);
+
+    float occlusion = 0.0;
+    float weightSum = 0.0;
+    for (int r = 0; r < 2; ++r) {
+        float pxRad = radii[r];
+        for (int i = 0; i < 4; ++i) {
+            vec2 dirRot = rotMat * dirs[i];
+            vec2 suv = uv + dirRot * texelSize * pxRad;
+            if (suv.x < 0.0 || suv.x > 1.0 || suv.y < 0.0 || suv.y > 1.0) continue;
+            float sDepth = textureLod(gDepth, suv, 0.0).r;
+            if (sDepth <= 1e-6) continue;
+            vec3 sp = reconstructCameraRelativePos(suv, sDepth);
+            vec3 delta = sp - P;
+            float dLen = length(delta);
+            if (dLen > 0.02 && dLen < 1.15) {
+                float horizonHeight = dot(delta / dLen, N);
+                float falloff = 1.0 - smoothstep(0.15, 1.15, dLen);
+                occlusion += smoothstep(0.12, 0.72, horizonHeight) * falloff;
+            }
+            weightSum += 1.0;
+        }
+    }
+    float aoFactor = weightSum > 0.0 ? (occlusion / weightSum) : 0.0;
+    return clamp(1.0 - aoFactor * 0.54, 0.58, 1.0);
+}
+
+float computeContactShadow(vec3 P, vec3 N, vec3 L, float dist, float jitter) {
+    float ndotl = dot(N, L);
+    if (ndotl <= 0.01) {
+        return 0.0;
+    }
+    const float CONTACT_MAX_DIST = 48.0;
+#ifdef VS_HIGH_END_GPU
+    const int STEPS = 14;
+#else
+    const int STEPS = 8;
+#endif
+    if (dist > CONTACT_MAX_DIST) {
+        return 1.0;
+    }
+
+    float maxLen = clamp(0.65 + dist * 0.024, 0.65, 1.50);
+    float shadow = 1.0;
+
+    for (int i = 0; i < STEPS; ++i) {
+        float frac = (float(i) + jitter) / float(STEPS);
+        float t = (0.12 + 0.88 * frac) * maxLen;
+        vec3 marchPos = P + N * 0.08 + L * t;
+        vec4 clip = vsWorld.curViewProj * vec4(marchPos, 1.0);
+        if (abs(clip.w) < 1e-5) continue;
+        vec3 ndc = clip.xyz / clip.w;
+        vec2 suv = ndc.xy * 0.5 + 0.5;
+        if (suv.x <= 0.0 || suv.x >= 1.0 || suv.y <= 0.0 || suv.y >= 1.0) continue;
+
+        float sceneDepth = textureLod(gDepth, suv, 0.0).r;
+        if (sceneDepth <= 1e-6) continue;
+
+        if (sceneDepth > ndc.z + 0.00035) {
+            vec3 hitPos = reconstructCameraRelativePos(suv, sceneDepth);
+            float thickness = length(marchPos) - length(hitPos);
+            if (thickness > 0.08 && thickness < 1.10) {
+                float fade = smoothstep(0.10, 0.35, frac) * (1.0 - smoothstep(0.72, 1.0, frac));
+                shadow = mix(1.0, 0.28, clamp(fade * 1.15, 0.35, 1.0));
+                break;
+            }
+        }
+    }
+    return shadow;
+}
+
+float sampleCsmCascadePcf(int cascade, vec3 P, vec3 N, vec3 L, float ign, out bool outInBounds) {
+    float ndotl = clamp(dot(N, L), 0.0, 1.0);
+    float sinTheta = sqrt(max(1.0 - ndotl * ndotl, 0.0));
+
+    // Derive true world-space texel size from the orthographic matrix X-row norm so normal-offset
+    // bias scales accurately across all four cascades without acne or peter-panning.
+    mat4 vp = uCsm.cascadeViewProj[cascade];
+    float invExtent = max(length(vec3(vp[0][0], vp[1][0], vp[2][0])), 1e-5);
+    float baseTexel = uCsm.texelSizes.x > 0.0 ? uCsm.texelSizes.x : (1.0 / 2048.0);
+    float worldTexel = (2.0 / invExtent) * baseTexel;
+    float normalBias = clamp(worldTexel * (0.75 + 1.45 * sinTheta), 0.015, 0.45);
+
+    vec4 shadowClip = vp * vec4(P + N * normalBias, 1.0);
+    if (abs(shadowClip.w) < 1e-6) {
+        outInBounds = false;
+        return 1.0;
+    }
+    vec3 shadowNdc = shadowClip.xyz / shadowClip.w;
+    vec2 shadowUv = shadowNdc.xy * 0.5 + 0.5;
+    if (shadowUv.x <= 0.003 || shadowUv.x >= 0.997 || shadowUv.y <= 0.003 || shadowUv.y >= 0.997
+        || shadowNdc.z <= 0.0 || shadowNdc.z >= 1.0) {
+        outInBounds = false;
+        return 1.0;
+    }
+    outInBounds = true;
+
+    float texel = uCsm.texelSizes[cascade] > 0.0 ? uCsm.texelSizes[cascade] : baseTexel;
+    float radius = texel * (1.85 + float(cascade) * 0.35);
+    float depthBias = (0.00018 + 0.00032 * sinTheta) * (1.0 + float(cascade) * 0.35);
+    float receiverDepth = shadowNdc.z - depthBias;
+    float layer = float(cascade);
+
+    // Precomputed 8-tap Vogel disk rotated once per pixel by IGN angle.
+    const vec2 VOGEL_DISK_8[8] = vec2[8](
+        vec2( 0.250000,  0.000000),
+        vec2(-0.319290,  0.292496),
+        vec2( 0.048873, -0.556876),
+        vec2( 0.402445,  0.524918),
+        vec2(-0.738514, -0.130759),
+        vec2( 0.699687, -0.444903),
+        vec2(-0.234004,  0.870484),
+        vec2(-0.446246, -0.859281)
+    );
+    float rot = ign * 6.283185307;
+    float cRot = cos(rot);
+    float sRot = sin(rot);
+    mat2 rotMat = mat2(cRot, -sRot, sRot, cRot);
+
+    float lit = 0.0;
+    for (int i = 0; i < 8; ++i) {
+        vec2 offset = (rotMat * VOGEL_DISK_8[i]) * radius;
+        vec2 suv = clamp(shadowUv + offset, vec2(0.0005), vec2(0.9995));
+        float blocker = textureLod(uShadowCsm, vec3(suv, layer), 0.0).r;
+        lit += (receiverDepth <= blocker) ? 1.0 : 0.0;
+    }
+    return lit * 0.125;
+}
+
+float evaluateCsmShadow(vec3 P, vec3 N, vec3 L, float distToCam, float ign) {
+    float maxDist = uCsm.cascadeSplits.w;
+    if (maxDist <= 0.0 || distToCam > maxDist) {
+        return computeContactShadow(P, N, L, distToCam, ign);
+    }
+    int c = 3;
+    if (distToCam < uCsm.cascadeSplits.x) {
+        c = 0;
+    } else if (distToCam < uCsm.cascadeSplits.y) {
+        c = 1;
+    } else if (distToCam < uCsm.cascadeSplits.z) {
+        c = 2;
+    }
+
+    // IGN-dithered cascade selection in the blend zone eliminates double-cascade PCF.
+    if (c < 3) {
+        float splitEnd = uCsm.cascadeSplits[c];
+        float blendWidth = splitEnd * 0.16;
+        if (distToCam > splitEnd - blendWidth) {
+            float t = clamp((distToCam - (splitEnd - blendWidth)) / max(blendWidth, 1e-4), 0.0, 1.0);
+            float alpha = t * t * (3.0 - 2.0 * t);
+            if (ign < alpha) {
+                c = c + 1;
+            }
+        }
+    }
+
+    bool inBounds = false;
+    float shadow = sampleCsmCascadePcf(c, P, N, L, ign, inBounds);
+    if (!inBounds && c < 3) {
+        c = c + 1;
+        shadow = sampleCsmCascadePcf(c, P, N, L, ign, inBounds);
+    }
+
+    float farFadeStart = maxDist * 0.88;
+    if (distToCam > farFadeStart) {
+        float farT = clamp((distToCam - farFadeStart) / max(maxDist - farFadeStart, 1e-4), 0.0, 1.0);
+        shadow = mix(shadow, 1.0, farT * farT * (3.0 - 2.0 * farT));
+    }
+
+    bool skipContact = (shadow < 0.05 && distToCam < uCsm.cascadeSplits.x * 0.5);
+    if (!skipContact && shadow > 0.02 && distToCam < 48.0) {
+        float contact = computeContactShadow(P, N, L, distToCam, ign);
+        shadow = min(shadow, mix(1.0, contact, 0.7));
+    }
+    return shadow;
+}
+
+vec3 sampleSsgiBilateral(vec2 uv, vec2 texelSize, float centerDepth) {
+    const vec2 offsets[4] = vec2[4](
+        vec2(-0.5, -0.5), vec2(0.5, -0.5), vec2(-0.5, 0.5), vec2(0.5, 0.5)
+    );
+    vec3 accum = vec3(0.0);
+    float weightSum = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        vec2 suv = clamp(uv + offsets[i] * texelSize * 1.5, vec2(0.001), vec2(0.999));
+        float tapDepth = textureLod(gDepth, suv, 0.0).r;
+        if (tapDepth <= 1e-6) continue;
+        float relD = abs(centerDepth - tapDepth) / max(centerDepth, 1e-4);
+        float w = exp(-relD * 14.0);
+        accum += max(textureLod(uSsgiIndirect, suv, 0.0).rgb, vec3(0.0)) * w;
+        weightSum += w;
+    }
+    if (weightSum > 1e-4) {
+        return accum / weightSum;
+    }
+    return max(textureLod(uSsgiIndirect, uv, 0.0).rgb, vec3(0.0));
+}
+
+vec3 shadeGbufferSurface(
+    vec2 uv,
+    vec2 texelSize,
+    float ign,
+    vec3 P,
+    float centerDepth,
+    float distToCam,
+    vec3 rayDir,
+    vec3 V,
+    vec4 albedoSample,
+    vec4 normSample,
+    vec4 pbrSample,
+    bool hasTerrainGbuffer,
+    bool isDhPixel,
+    int dimId,
+    vec3 sunDir,
+    VsSkyState skyState,
+    bool submerged
+) {
+    vec3 N;
+    if (hasTerrainGbuffer) {
+        vec3 decodedN = normSample.xyz * 2.0 - 1.0;
+        N = dot(decodedN, decodedN) > 1e-4 ? normalize(decodedN) : (isDhPixel ? vec3(0.0, 1.0, 0.0) : computeGeometricNormal(uv, texelSize, P));
+    } else {
+        N = computeGeometricNormal(uv, texelSize, P);
+    }
+
+    bool isWater = normSample.a > 1.0;
+    float roughness = hasTerrainGbuffer ? clamp(isWater ? normSample.a - 1.0 : normSample.a, 0.04, 1.0) : 0.68;
+    float metallic = hasTerrainGbuffer ? clamp(pbrSample.r, 0.0, 1.0) : 0.0;
+    float emission = hasTerrainGbuffer ? clamp(pbrSample.g * 4.0, 0.0, 4.0) : 0.0;
+    float skyLight = hasTerrainGbuffer ? vsUnpackNibbleHi(pbrSample.b) : 0.85;
+    float blockLight = hasTerrainGbuffer ? vsUnpackNibbleLo(pbrSample.b) : 0.0;
+    float f0Enc = vsUnpackNibbleHi(pbrSample.a);
+    float f0 = hasTerrainGbuffer ? max(0.9 * f0Enc * f0Enc, 0.02) : 0.04;
+    float subsurface = hasTerrainGbuffer ? vsUnpackNibbleLo(pbrSample.a) : 0.0;
+
+    vec3 baseLinear = pow(max(albedoSample.rgb, vec3(0.0)), vec3(2.2));
+    VsSurface s = VsSurface(baseLinear, N, roughness, metallic, emission, 1.0, subsurface, f0);
+    // @hook ao_filter
+    // @hook indirect_gi
+    // @hook volumetric_media
+
+    // Smooth sunset-to-moonlight cross-fade with zero twilight dead zone; natural moon arc.
+    vec3 moonDir = normalize(-sunDir);
+    float dayFactor = (dimId == 0) ? smoothstep(-0.10, 0.16, sunDir.y) : 0.0;
+    float sunWeight = (dimId == 0) ? smoothstep(-0.08, 0.08, sunDir.y) : 0.0;
+    float moonWeight = (dimId == 0) ? smoothstep(-0.08, 0.08, moonDir.y) : 0.0;
+    vec3 L = (sunWeight >= moonWeight) ? sunDir : moonDir;
+    float sunset = clamp(1.0 - abs(sunDir.y) * 3.6, 0.0, 1.0) * smoothstep(-0.14, 0.08, sunDir.y);
+
+    float ssao = (isDhPixel || isWater || emission > 0.05 || distToCam > 48.0)
+        ? 1.0
+        : computeScreenSpaceAO(uv, P, s.normal, texelSize, distToCam, ign);
+
+    if (!hasTerrainGbuffer) {
+        float heldDist = distance(P, vsWorld.heldLightPosition.xyz);
+        float heldAtten = exp(-heldDist * 0.12) * clamp(vsWorld.heldLight, 0.0, 1.0);
+        uint heldKind = uint(clamp(vsWorld.heldLightPosition.w + 0.5, 0.0, 9.0));
+        vec3 heldRadiance = vec3(1.0);
+        if (heldAtten > 1e-4) {
+            vs_dispatch_hook_block_light(heldRadiance, heldKind, heldDist);
+        }
+        vec3 heldTint = vec3(1.0) + heldRadiance * (heldAtten * 0.85 * clamp(VS_PARAM_TORCH_INTENSITY, 0.3, 2.5));
+        return s.albedo * heldTint * mix(0.82, 1.0, ssao);
+    }
+
+    vec3 worldApprox = P + uSharc.cfg.cameraPosition.xyz;
+    if (isWater) {
+        float waveStrength = 0.35;
+        float waveSpeed = 1.75;
+        float waveScale = 2.1;
+        vs_dispatch_hook_water_waves(waveStrength, waveSpeed, waveScale);
+        float waveHeight = sin(worldApprox.x * waveScale + vsWorld.gameTimeSec * waveSpeed) * waveStrength;
+        vs_dispatch_hook_water_surface(s, worldApprox, waveHeight);
+    } else if (!isDhPixel && dimId == 0 && vsWorld.rain > 0.01) {
+        vsApplyRainWetness(s, worldApprox, skyLight, vsWorld.rain, clamp(VS_PARAM_WETNESS_STRENGTH, 0.0, 1.0));
+    }
+
+    float sunIntensity = clamp(VS_PARAM_SUN_INTENSITY, 0.5, 8.0);
+    vec3 dayLightColor = mix(vec3(1.00, 0.95, 0.87), vec3(1.05, 0.58, 0.28), sunset) * (0.58 + sunIntensity * 0.34);
+    vec3 nightLightColor = vec3(0.14, 0.21, 0.38);
+    vec3 directColor = (dimId == 1) ? vec3(0.0)
+        : (dimId == 2) ? vec3(0.32, 0.28, 0.48)
+        : (dayLightColor * sunWeight + nightLightColor * moonWeight) * (1.0 - vsWorld.rain * 0.66);
+
+    float skyVis = smoothstep(0.06, 0.92, skyLight);
+    float directSkyVis = (submerged && !isWater && skyLight > 0.02)
+        ? max(skyVis, 0.38 * max(dayFactor, 0.25))
+        : skyVis;
+    bool needsSunShadow = (dot(directColor, directColor) > 1e-6) && (directSkyVis > 0.02)
+        && (dot(s.normal, L) > 0.0 || s.subsurface > 0.01 || isWater);
+    float shadowVis = (!needsSunShadow) ? 0.0
+        : (isDhPixel ? 1.0 : evaluateCsmShadow(P, s.normal, L, distToCam, ign));
+    float shadowTerm = mix(0.12, shadowVis, directSkyVis);
+
+    vec3 brdf = needsSunShadow
+        ? evaluateCookTorrance(s.albedo, s.normal, V, L, s.roughness, s.metallic, s.f0)
+        : vec3(0.0);
+    if (needsSunShadow) {
+        vs_dispatch_hook_direct_light(s, V, L, brdf);
+    }
+
+    // Apply SSAO to ambient/indirect only (never direct sunlight).
+    vec3 direct = brdf * 1.35 * directColor * directSkyVis * shadowTerm;
+    if (submerged && !isWater && dayFactor > 0.05 && directSkyVis > 0.10) {
+        vec3 causticRgb = vsWaterCausticsRgb(worldApprox, L, vsWorld.gameTimeSec)
+            * exp(-distToCam * 0.08) * max(dot(s.normal, L), 0.0);
+        direct *= (vec3(1.0) + causticRgb * 1.10);
+    }
+
+    vec3 skyAmbHook = vec3(0.0);
+    vs_dispatch_hook_sky(skyAmbHook, s.normal, skyState);
+    vec3 caveFloor = (dimId == 1) ? (vsBiomeFogTint() * 0.35) : vec3(0.024, 0.028, 0.040);
+    vec3 diffuseAlbedo = s.albedo * (1.0 - s.metallic * 0.85);
+    vec3 ambient = diffuseAlbedo * mix(caveFloor, skyAmbHook * 0.44, (dimId == 1) ? 0.35 : skyVis) * ssao;
+
+    vec3 specIbl = vec3(0.0);
+    if (!isWater && (s.metallic > 0.05 || s.roughness < 0.65)) {
+        vec3 R = reflect(-V, s.normal);
+        vec3 reflEnv = vec3(0.0);
+        vs_dispatch_hook_sky(reflEnv, R, skyState);
+        if (submerged) {
+            reflEnv = mix(vsWaterTint(vec3(0.0), max(skyLight, 0.25), dayFactor) * 2.2, reflEnv * vec3(0.45, 0.82, 0.96), 0.55);
+        }
+        float NoV = clamp(dot(s.normal, V), 0.0, 1.0);
+        vec3 F0 = mix(vec3(s.f0), s.albedo, s.metallic);
+        vec3 F = F0 + (vec3(1.0) - F0) * pow(1.0 - NoV, 5.0);
+        float gloss = clamp(1.0 - s.roughness, 0.0, 1.0);
+        float iblVis = max(directSkyVis, 0.18);
+        specIbl = reflEnv * F * (gloss * gloss * 0.55 + s.metallic * 0.25) * iblVis * ssao;
+    }
+
+    if (!isDhPixel && VS_ACTIVE_RENDER_TIER == 1) {
+        vec3 ssgiBounce = sampleSsgiBilateral(uv, texelSize, centerDepth);
+        float giScale = clamp(VS_PARAM_GI_BOUNCE_STRENGTH, 0.2, 2.0);
+        ambient = ambient * 0.55 + (diffuseAlbedo / 3.14159265) * ssgiBounce * (1.15 * giScale) * ssao;
+    }
+
+    // Dynamic emissive point lights culled per 8x8 workgroup tile in shared memory.
+    float torchParam = clamp(VS_PARAM_TORCH_INTENSITY, 0.3, 2.5);
+    vec3 dynamicLights = vec3(0.0);
+    uint totalSceneLights = isDhPixel ? 0u : min(uEmissiveLights.lightCount, 64u);
+    uint tileLightCount = isDhPixel ? 0u : sTileLightCount;
+    if (tileLightCount > 0u) {
+        VsSurface lightSurf = isWater ? vsWaterGlintSurface(s) : s;
+        for (uint li = 0u; li < tileLightCount; ++li) {
+            VsEmissiveLight light = uEmissiveLights.lights[sTileLights[li]];
+            vec3 rad = vsEmissiveRadiance(light, lightSurf, P, V, uSharc.cfg.cameraPosition.xyz) * torchParam;
+            if (isWater) {
+                rad = min(rad * 0.35, vec3(0.32));
+            }
+            dynamicLights += rad;
+        }
+    }
+
+    float blockEnergy = pow(clamp(blockLight, 0.0, 1.0), 1.35);
+    vec3 blockRadiance = vec3(1.0);
+    float blockDist = mix(6.0, 0.4, blockEnergy);
+    vs_dispatch_hook_block_light(blockRadiance, 0u, blockDist);
+    float blockFallbackWeight = (totalSceneLights > 0u) ? vsBlockLightFallback(P) : 1.0;
+
+    vec3 heldFallback = vec3(0.0);
+    if (totalSceneLights == 0u && vsWorld.heldLight > 0.01 && !isDhPixel) {
+        float heldRadius = max(vsWorld.heldLight * 14.0, 0.001);
+        vec3 toHeld = vsWorld.heldLightPosition.xyz - P;
+        float heldDistance = max(length(toHeld), 0.001);
+        float heldAtten = clamp(1.0 - heldDistance / heldRadius, 0.0, 1.0)
+            * (1.0 / (1.0 + heldDistance * heldDistance * 0.12))
+            * max(dot(s.normal, toHeld / heldDistance) * 0.65 + 0.35, 0.15) * vsWorld.heldLight;
+        float heldEnergy = pow(clamp(heldAtten, 0.0, 1.0), 1.35);
+        uint heldKind = uint(clamp(vsWorld.heldLightPosition.w + 0.5, 0.0, 9.0));
+        vec3 hCol = vec3(1.0);
+        if (heldEnergy > 1e-4) {
+            vs_dispatch_hook_block_light(hCol, heldKind, heldDistance);
+            heldFallback = s.albedo * hCol * (heldEnergy * 1.25 * torchParam);
+        }
+    }
+
+    vec3 blockFallback = s.albedo * blockRadiance * (blockEnergy * 1.25 * torchParam * blockFallbackWeight);
+    if (isWater) {
+        blockFallback *= 0.25;
+        heldFallback *= 0.25;
+    }
+    vec3 torchLight = dynamicLights + blockFallback + heldFallback;
+    vec3 emissiveGlow = s.albedo * s.emission * 2.1;
+
+    vec3 colorHdr = direct + ambient + specIbl + torchLight + emissiveGlow;
+
+    if (isWater) {
+        vec3 R = reflect(-V, s.normal);
+        vec3 reflSky = vec3(0.0);
+        vs_dispatch_hook_sky(reflSky, R, skyState);
+        vec4 reflClouds = vs_dispatch_hook_clouds(R, uSharc.cfg.cameraPosition.xyz, skyState);
+        reflSky = reflSky * reflClouds.a + reflClouds.rgb;
+
+        float NoV = clamp(dot(s.normal, V), 0.0, 1.0);
+        // Physical dielectric water F0 = 0.02 (no artificial 0.14 floor) for clearer shallow water.
+        float fresnel = 0.02 + 0.98 * pow(1.0 - NoV, 5.0);
+        vec3 waterBody = (direct + ambient + torchLight) * mix(vec3(0.55, 0.74, 0.94), vec3(0.84, 0.97, 1.08), dayFactor);
+        colorHdr = mix(waterBody, reflSky * max(skyVis, 0.22), clamp(fresnel, 0.02, 0.96));
+
+        vec3 H = normalize(V + L);
+        float glintExp = mix(320.0, 48.0, clamp(s.roughness * 8.0, 0.0, 1.0));
+        float glint = pow(max(dot(s.normal, H), 0.0), glintExp) * shadowTerm * skyVis;
+        colorHdr += directColor * glint * 3.0 + dynamicLights;
+    }
+
+    return colorHdr;
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(outHdrRadiance);
+    uint lid = gl_LocalInvocationIndex;
+    bool inBounds = (pixel.x < size.x && pixel.y < size.y);
+
+    gInvViewProj = vsWorld.invView * vsWorld.invProj;
+
+    vec2 texelSize = 1.0 / vec2(size);
+    vec2 uv = (vec2(pixel) + 0.5) * texelSize;
+    float mcDepth = inBounds ? textureLod(gDepth, uv, 0.0).r : 0.0;
+    float dhDepth = (inBounds && uDh.dhActive != 0u) ? textureLod(uDhDepth, uv, 0.0).r : 0.0;
+    bool hasMc = inBounds && (mcDepth > 1e-6);
+    bool hasDh = inBounds && (uDh.dhActive != 0u) && (dhDepth > 1e-6);
+    bool isDhPixel = !hasMc && hasDh;
+
+    vec3 P = hasMc
+        ? reconstructCameraRelativePos(uv, mcDepth)
+        : (isDhPixel ? reconstructDhCameraRelativePos(uv, dhDepth) : vec3(0.0));
+
+    // Workgroup-wide 3D AABB reduction and parallel light culling (all 64 threads participate).
+    sTilePosMin[lid] = hasMc ? P : vec3(1e9);
+    sTilePosMax[lid] = hasMc ? P : vec3(-1e9);
+    if (lid == 0u) {
+        sTileLightCount = 0u;
+    }
+    barrier();
+
+    for (uint stride = 32u; stride > 0u; stride >>= 1u) {
+        if (lid < stride) {
+            sTilePosMin[lid] = min(sTilePosMin[lid], sTilePosMin[lid + stride]);
+            sTilePosMax[lid] = max(sTilePosMax[lid], sTilePosMax[lid + stride]);
+        }
+        barrier();
+    }
+
+    uint totalLights = min(uEmissiveLights.lightCount, 64u);
+    vec3 tileMin = sTilePosMin[0];
+    vec3 tileMax = sTilePosMax[0];
+    if (tileMin.x <= tileMax.x && lid < totalLights) {
+        VsEmissiveLight light = uEmissiveLights.lights[lid];
+        vec3 lPos = light.posRadius.xyz;
+        float lRad = clamp(light.posRadius.w, 0.5, 48.0);
+        vec3 closest = clamp(lPos, tileMin, tileMax);
+        vec3 diff = lPos - closest;
+        if (dot(diff, diff) < lRad * lRad) {
+            uint idx = atomicAdd(sTileLightCount, 1u);
+            sTileLights[idx] = lid;
+        }
+    }
+    barrier();
+
+    if (!inBounds) {
+        return;
+    }
+
+    int dimId = vsDimensionId();
+    vec3 sunDir = dot(vsWorld.sunDir, vsWorld.sunDir) > 1e-6
+        ? normalize(vsWorld.sunDir)
+        : normalize(vec3(0.4, 0.85, 0.2));
+    VsSkyState skyState = VsSkyState(sunDir, vsWorld.rain, vsWorld.thunder, vsWorld.gameTimeSec);
+    bool submerged = vsWorld.eyeInFluid == 1;
+
+    if (!hasMc && !hasDh) {
+        vec3 rayDelta = reconstructCameraRelativePos(uv, 0.25) - reconstructCameraRelativePos(uv, 0.90);
+        vec3 rayDir = dot(rayDelta, rayDelta) > 1e-8 ? normalize(rayDelta) : vec3(0.0, 0.0, -1.0);
+        vec3 procSky = vec3(0.0);
+        vs_dispatch_hook_sky(procSky, rayDir, skyState);
+
+        vec4 clouds = vs_dispatch_hook_clouds(rayDir, uSharc.cfg.cameraPosition.xyz, skyState);
+        procSky = procSky * clouds.a + clouds.rgb;
+        if (submerged) {
+            float daySky = (dimId == 0) ? smoothstep(-0.10, 0.24, sunDir.y) : 0.0;
+            procSky = vsWaterTint(vec3(0.0), 1.0, daySky);
+        } else {
+            vec4 skyVolFog = textureLod(uVolumetricFog, uv, 0.0);
+            procSky += clamp(skyVolFog.rgb, vec3(0.0), vec3(1.5)) * 0.65;
+        }
+
+        imageStore(outHdrRadiance, pixel, vec4(max(procSky, vec3(0.0)), 1.0));
+        return;
+    }
+
+    float ign = vsInterleavedGradientNoise(vec2(pixel) + float(vsWorld.frameIndex & 63) * 5.588238);
+    vec3 fromEye = P - vsWorld.invView[3].xyz;
+    float distToCam = length(fromEye);
+    vec3 rayDir = distToCam > 1e-5 ? (fromEye / distToCam) : vec3(0.0, 0.0, -1.0);
+    vec3 V = -rayDir;
+
+    vec4 albedoSample = isDhPixel ? textureLod(uDhAlbedo, uv, 0.0) : textureLod(gAlbedo, uv, 0.0);
+    vec4 normSample = isDhPixel ? textureLod(uDhNormal, uv, 0.0) : textureLod(gNormal, uv, 0.0);
+    vec4 pbrSample = isDhPixel ? textureLod(uDhMaterial, uv, 0.0) : textureLod(gPbr, uv, 0.0);
+    bool hasTerrainGbuffer = isDhPixel ? true : (normSample.a > 0.01);
+
+    vec3 colorHdr = shadeGbufferSurface(
+        uv, texelSize, ign, P, mcDepth, distToCam, rayDir, V,
+        albedoSample, normSample, pbrSample, hasTerrainGbuffer, isDhPixel,
+        dimId, sunDir, skyState, submerged
+    );
+
+    // Smooth blend in the vanilla-to-DH transition zone when both vanilla and DH geometry exist.
+    if (hasMc && hasDh && uDh.fadeEnd > uDh.fadeStart && distToCam > uDh.fadeStart) {
+        float blendT = smoothstep(uDh.fadeStart, uDh.fadeEnd, distToCam);
+        if (blendT > 0.001) {
+            vec3 dhP = reconstructDhCameraRelativePos(uv, dhDepth);
+            float dhDist = length(dhP - vsWorld.invView[3].xyz);
+            vec3 dhColor = shadeGbufferSurface(
+                uv, texelSize, ign, dhP, dhDepth, dhDist, rayDir, V,
+                textureLod(uDhAlbedo, uv, 0.0),
+                textureLod(uDhNormal, uv, 0.0),
+                textureLod(uDhMaterial, uv, 0.0),
+                true, true, dimId, sunDir, skyState, submerged
+            );
+            colorHdr = mix(colorHdr, dhColor, blendT);
+        }
+    }
+
+    float dayFactor = (dimId == 0) ? smoothstep(-0.10, 0.16, sunDir.y) : 0.0;
+    if (submerged) {
+        vec3 waterFogTint = vsWaterTint(vec3(0.0), 1.0, dayFactor);
+        colorHdr = vsWaterTransmission(colorHdr, waterFogTint, distToCam);
+    } else {
+        float activeDepth = isDhPixel ? dhDepth : mcDepth;
+        vec4 volFog = vec4(0.0, 0.0, 0.0, 1.0);
+        float fogWeightSum = 0.0;
+        const vec2 fogOffsets[4] = vec2[4](
+            vec2(-0.5, -0.5), vec2(0.5, -0.5), vec2(-0.5, 0.5), vec2(0.5, 0.5)
+        );
+        for (int fi = 0; fi < 4; ++fi) {
+            vec2 fuv = clamp(uv + fogOffsets[fi] * texelSize * 1.5, vec2(0.001), vec2(0.999));
+            float tapDepth = isDhPixel ? textureLod(uDhDepth, fuv, 0.0).r : textureLod(gDepth, fuv, 0.0).r;
+            if (tapDepth <= 1e-6) continue;
+            float relD = abs(activeDepth - tapDepth) / max(activeDepth, 1e-4);
+            float fw = exp(-relD * 12.0);
+            vec4 tapFog = textureLod(uVolumetricFog, fuv, 0.0);
+            tapFog.a = (tapFog.a > 0.0) ? clamp(tapFog.a, 0.34, 1.0) : 1.0;
+            volFog += tapFog * fw;
+            fogWeightSum += fw;
+        }
+        if (fogWeightSum > 1e-4) {
+            volFog /= fogWeightSum;
+        } else {
+            volFog = textureLod(uVolumetricFog, uv, 0.0);
+            volFog.a = (volFog.a > 0.0) ? clamp(volFog.a, 0.34, 1.0) : 1.0;
+        }
+        vec3 fogScatter = clamp(volFog.rgb, vec3(0.0), vec3(2.5));
+        vec3 fogTransmittance = vec3(clamp(volFog.a, 0.34, 1.0));
+        vs_dispatch_hook_fog(distToCam, rayDir, fogScatter, fogTransmittance);
+        colorHdr = colorHdr * fogTransmittance + fogScatter;
+
+        // Seamless far-horizon atmospheric fade for DH terrain into procedural sky + clouds.
+        if (isDhPixel && uDh.dhFarClip > 16.0) {
+            float farFade = smoothstep(0.78 * uDh.dhFarClip, 0.98 * uDh.dhFarClip, distToCam);
+            if (farFade > 0.001) {
+                vec3 horizonSky = vec3(0.0);
+                vs_dispatch_hook_sky(horizonSky, rayDir, skyState);
+                vec4 horizonClouds = vs_dispatch_hook_clouds(rayDir, uSharc.cfg.cameraPosition.xyz, skyState);
+                horizonSky = horizonSky * horizonClouds.a + horizonClouds.rgb;
+                colorHdr = mix(colorHdr, horizonSky, farFade);
+            }
+        }
+    }
+
+    imageStore(outHdrRadiance, pixel, vec4(max(colorHdr, vec3(0.0)), 1.0));
+}

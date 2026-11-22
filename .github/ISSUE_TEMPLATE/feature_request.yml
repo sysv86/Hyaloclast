@@ -1,0 +1,28 @@
+name: Feature Request
+description: Propose a VSP pipeline feature, shader hook, or compatibility improvement for VulkanShaders.
+title: "[feature] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or missing capability
+      description: What rendering, shader pack, or compatibility limitation does this solve?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed approach
+      description: Describe the design cleanly (follow TASTE.md for any UI changes; do not paste competitor mod code).
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Policy check
+      options:
+        - label: This proposal does not rely on copying code from Sodium (PolyForm Shield), OptiFine, or incompatible sources.
+          required: true

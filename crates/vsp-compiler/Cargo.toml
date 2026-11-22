@@ -1,0 +1,25 @@
+[package]
+name = "vsp-compiler"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Vulkan Shader Package (.vsp) manifest parser, isolated VSL hook preprocessor, GLSL/RT->SPIR-V 1.6 compiler, and rspirv reflection/linker"
+
+[features]
+default = ["shaderc-backend"]
+shaderc-backend = ["dep:shaderc"]
+
+[dependencies]
+naga.workspace = true
+shaderc = { workspace = true, optional = true }
+rspirv.workspace = true
+spirv.workspace = true
+toml.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+blake3.workspace = true
+tracing.workspace = true
+bytemuck.workspace = true

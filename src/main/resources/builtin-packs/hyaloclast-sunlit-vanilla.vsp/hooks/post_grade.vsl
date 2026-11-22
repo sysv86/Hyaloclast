@@ -1,0 +1,95 @@
+#include <vulkanshaders/v1/common.vsl>
+
+vec3 sv_agx(vec3 x) {
+    const mat3 agxIn = mat3(
+        0.84247906, 0.04232824, 0.04237565,
+        0.07843360, 0.87846864, 0.07843360,
+        0.07922375, 0.07916613, 0.87914297
+    );
+    const mat3 agxOut = mat3(
+         1.19687900, -0.05289685, -0.05297163,
+        -0.09802088,  1.15190313, -0.09804345,
+        -0.09902974, -0.09896118,  1.15107368
+    );
+    vec3 v = max(agxIn * x, vec3(1e-6));
+    v = clamp((log2(v) + 12.47393) / 16.5, 0.0, 1.0);
+    vec3 v2 = v * v;
+    vec3 v4 = v2 * v2;
+    v = 15.5 * v4 * v2
+      - 40.14 * v4 * v
+      + 31.96 * v4
+      - 6.868 * v2 * v
+      + 0.4298 * v2
+      + 0.1191 * v
+      - 0.00232;
+    return clamp(agxOut * v, 0.0, 1.0);
+}
+
+vec3 sv_aces(vec3 x) {
+    const float a = 2.51;
+    const float b = 0.03;
+    const float c = 2.43;
+    const float d = 0.59;
+    const float e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+}
+
+// Khronos PBR Neutral tone mapper with softened toe (0.015 instead of 0.04) so caves
+// and night scenes retain clean shadow detail while keeping faithful Minecraft hues.
+vec3 sv_pbr_neutral(vec3 color) {
+    const float toe = 0.015;
+    const float startCompression = 0.80 - toe;
+    const float desaturation = 0.14;
+    float x = min(color.r, min(color.g, color.b));
+    float offset = x < (2.0 * toe) ? (x - (x * x) / (4.0 * toe)) : toe;
+    color = max(color - offset, vec3(0.0));
+    float peak = max(color.r, max(color.g, color.b));
+    if (peak < startCompression) return color;
+    const float d = 1.0 - startCompression;
+    float newPeak = 1.0 - d * d / (peak + d - startCompression);
+    color *= newPeak / peak;
+    float g = 1.0 - 1.0 / (desaturation * (peak - newPeak) + 1.0);
+    // Subtle warm highlight rolloff to keep sunlit stone, clouds, and torches inviting.
+    vec3 warmPeak = vec3(newPeak) * vec3(1.018, 1.004, 0.982);
+    return clamp(mix(color, warmPeak, g), 0.0, 1.0);
+}
+
+// @hook(stage = "post_grade", priority = 100)
+// Sunlit Vanilla - Pleasant, balanced grade with clean shadow readability, subtle warm
+// highlight rolloff, vibrant-yet-faithful vanilla foliage/sky saturation, and minimal vignette.
+void sv_post_grade(inout vec3 hdrColor, in vec2 uv, in VsPostContext post) {
+    hdrColor = max(hdrColor * post.exposure * 1.03, vec3(0.0));
+
+    if (post.toneMapMode == 1u) {
+        hdrColor = sv_aces(hdrColor);
+    } else if (post.toneMapMode == 2u) {
+        hdrColor = sv_pbr_neutral(hdrColor);
+    } else {
+        hdrColor = sv_agx(hdrColor);
+        hdrColor = pow(clamp(hdrColor, 0.0, 1.0), vec3(2.2));
+        hdrColor = pow(hdrColor, vec3(1.015));
+    }
+
+    // Gentle warm-highlight / clean-cool-shadow split harmony
+    float luma = dot(hdrColor, vec3(0.2126, 0.7152, 0.0722));
+    float shadowWeight = (1.0 - smoothstep(0.02, 0.34, luma)) * smoothstep(0.0, 0.025, luma);
+    float highlightWeight = smoothstep(0.44, 0.92, luma);
+    vec3 splitTint = vec3(1.0)
+        + vec3(-0.014, -0.001, 0.020) * shadowWeight
+        + vec3( 0.026,  0.010, -0.016) * highlightWeight;
+    hdrColor = clamp(hdrColor * splitTint, 0.0, 1.0);
+
+    // Vibrant-yet-faithful selective vibrance favoring muted foliage and sky tones
+    float maxCh = max(hdrColor.r, max(hdrColor.g, hdrColor.b));
+    float minCh = min(hdrColor.r, min(hdrColor.g, hdrColor.b));
+    float sat = (maxCh > 1e-4) ? ((maxCh - minCh) / maxCh) : 0.0;
+    float foliageSkyMask = smoothstep(0.02, 0.25, max(hdrColor.g, hdrColor.b) - hdrColor.r * 0.75);
+    float vibranceGain = mix(1.11, 1.03, smoothstep(0.22, 0.82, sat)) + foliageSkyMask * 0.03;
+    float lumaPost = dot(hdrColor, vec3(0.2126, 0.7152, 0.0722));
+    hdrColor = clamp(mix(vec3(lumaPost), hdrColor, vibranceGain), 0.0, 1.0);
+
+    // Minimal optical vignette so screen edges stay bright and playable
+    vec2 centered = uv * 2.0 - 1.0;
+    float vig = 1.0 - dot(centered, centered) * 0.025;
+    hdrColor *= clamp(vig, 0.93, 1.0);
+}

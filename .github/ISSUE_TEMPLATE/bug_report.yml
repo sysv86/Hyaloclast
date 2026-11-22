@@ -1,0 +1,84 @@
+name: Bug Report
+description: Report a crash, shader compilation failure, or rendering defect in Hyaloclast (VulkanShaders).
+title: "[bug] "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Provide enough technical detail to reproduce the issue. Reports missing logs
+        or GPU/driver information may be closed as incomplete.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the bug, affected shader pack (e.g. Sunlit Vanilla, Obsidian Showcase, or custom .vsp), and expected behavior.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: render_tier
+    attributes:
+      label: Active Render Tier
+      options:
+        - "Tier 0 — Raster G-Buffer + CSM"
+        - "Tier 1 — Compute GI"
+        - "Tier 2 — Hybrid RayQuery"
+        - "Tier 3 — Full Path Tracing"
+        - "Unknown / Crash before world load"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: upscaler
+    attributes:
+      label: Upscaler / Denoiser / Frame Generation
+      options:
+        - "None / Built-in TSR & SVGF"
+        - "NVIDIA DLSS (SR / RR / FG)"
+        - "NVIDIA NRD"
+        - "AMD FSR3"
+        - "Intel XeSS"
+        - "Multiple / Other"
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Launch Minecraft 26.3 with Hyaloclast + Pyroclast (+ Distant Horizons if used)
+        2. Select shader pack and tier / upscaler settings
+        3. Observe crash, log error, or visual artifact
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment (Minecraft, mod versions, loader, OS, GPU & driver)
+      description: Include Minecraft version, Hyaloclast & Pyroclast versions/commits, Fabric Loader version, OS, GPU model, and Vulkan driver version.
+      placeholder: "MC 26.3 | Fabric 0.20.1 | Hyaloclast 0.2.0-beta.1 | Pyroclast 0.1.0-alpha.1 | Linux x86_64 | RTX 4070 (565.xx)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / Crash report / Diagnostic output
+      description: Paste relevant sections of `logs/latest.log`, crash report, Shader Error Log output, or `vulkanshaders-sdk-bench` output.
+      render: text
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-submission checklist
+      options:
+        - label: I searched existing issues and confirmed this is not a duplicate.
+          required: true
+        - label: I attached real logs and did not paste decompiled Minecraft or third-party mod code.
+          required: true

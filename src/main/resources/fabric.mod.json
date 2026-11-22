@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "id": "vulkanshaders",
+  "version": "${version}",
+  "name": "Hyaloclast",
+  "description": "Next-generation Vulkan 1.3+ shader, ray-tracing, path-tracing, and frame-generation engine for Minecraft: Java Edition 26.3+ (codename: IGNIS, internal: VulkanShaders).",
+  "authors": [
+    "VulkanShaders contributors"
+  ],
+  "contact": {
+    "homepage": "https://github.com/vulkanshaders/hyaloclast",
+    "sources": "https://github.com/vulkanshaders/hyaloclast"
+  },
+  "license": "GPL-3.0-only",
+  "custom": {
+    "credits": "Radiante (Gabrieli2806; contributors: Maximiliano-Santana, SinanAkkoyun — https://github.com/Gabrieli2806/Radiante) served as an important architectural reference and GPL-3.0 + Section 7 exception lineage."
+  },
+  "environment": "client",
+  "entrypoints": {
+    "client": [
+      {
+        "adapter": "kotlin",
+        "value": "dev.vulkanshaders.VulkanShaders"
+      }
+    ],
+    "turboshaders": [
+      {
+        "adapter": "kotlin",
+        "value": "dev.vulkanshaders.bridge.VulkanShadersTurboExtension"
+      }
+    ]
+  },
+  "mixins": [
+    {
+      "config": "vulkanshaders.mixins.json",
+      "environment": "client"
+    }
+  ],
+  "depends": {
+    "fabricloader": ">=0.20.1",
+    "minecraft": "~26.3",
+    "java": ">=25",
+    "fabric-language-kotlin": ">=1.14.2+kotlin.2.4.21",
+    "fabric-resource-loader-v1": ">=3.1.0"
+  },
+  "suggests": {
+    "modmenu": "*",
+    "distanthorizons": ">=3.0.0",
+    "pyroclast": ">=0.1.0-alpha.1"
+  },
+  "breaks": {
+    "iris": "*",
+    "oculus": "*",
+    "vulkanmod": "*",
+    "optifabric": "*",
+    "canvas": "*"
+  },
+  "conflicts": {
+    "iris": "*",
+    "oculus": "*",
+    "vulkanmod": "*",
+    "optifabric": "*",
+    "canvas": "*"
+  }
+}

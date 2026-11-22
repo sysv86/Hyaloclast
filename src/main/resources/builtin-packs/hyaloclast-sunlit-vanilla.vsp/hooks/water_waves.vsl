@@ -1,0 +1,16 @@
+#include <vulkanshaders/v1/common.vsl>
+
+// Gentle slow-breathing swell modulation so shoreline and ocean waves feel alive without jitter
+float sv_waveBreath(float timeSec) {
+    return 0.94 + 0.06 * sin(timeSec * 0.35);
+}
+
+// @hook(stage = "water_waves", priority = 100)
+// Sunlit Vanilla - Smooth rhythmic wave strength, speed, and scale for calm vanilla water.
+void sv_water_waves(inout float strength, inout float speed, inout float scale) {
+    float storm = clamp(vsWorld.rain, 0.0, 1.0);
+    float breath = sv_waveBreath(vsWorld.gameTimeSec);
+    strength = VS_PARAM_WATER_WAVE_STRENGTH * (0.95 + storm * 0.38) * breath;
+    speed = 1.48 + storm * 0.72;
+    scale = 2.10;
+}

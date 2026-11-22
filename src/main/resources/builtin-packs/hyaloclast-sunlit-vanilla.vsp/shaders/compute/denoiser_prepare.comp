@@ -1,0 +1,136 @@
+#version 460
+
+#include <vulkanshaders/v1/common.vsl>
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// Set 0 bindings:
+// b0 = WorldUBO (declared in common.vsl)
+layout(set = 0, binding = 1) uniform sampler2D inRawRadiance;
+layout(set = 0, binding = 2) uniform sampler2D inSharpRadiance;
+layout(set = 0, binding = 3) uniform sampler2D inNormalRough;
+layout(set = 0, binding = 4) uniform sampler2D inDepth;
+layout(set = 0, binding = 5) uniform sampler2D inAlbedo;
+layout(set = 0, binding = 6, rgba16f) uniform writeonly image2D outDiff;
+layout(set = 0, binding = 7, rgba16f) uniform writeonly image2D outSpec;
+layout(set = 0, binding = 8, rgba16f) uniform writeonly image2D outNormalRough;
+layout(set = 0, binding = 9, r32f) uniform writeonly image2D outViewZ;
+layout(set = 0, binding = 10, r16f) uniform writeonly image2D outHitDist;
+layout(set = 0, binding = 11) uniform sampler2D inMaterial;
+
+layout(push_constant) uniform DenoiserPreparePush {
+    uint isTier3;
+    uint width;
+    uint height;
+    uint nrdEncoding;
+} pc;
+
+vec3 sanitizeColor(vec3 c) {
+    return (any(isnan(c)) || any(isinf(c))) ? vec3(0.0) : max(c, vec3(0.0));
+}
+
+vec3 reblurSignal(vec3 rgb) {
+    float rb = (rgb.r + rgb.b) * 0.5;
+    return vec3((rb + rgb.g) * 0.5, (rgb.r - rgb.b) * 0.5, (rgb.g - rb) * 0.5);
+}
+
+float reblurHitDistance(float hitDistance, float viewZ, float roughness) {
+    // Match the REBLUR 4.18 hit-distance parameters set by the host.
+    float lobe = sqrt(roughness) * (1.0 - exp2(-200.0 * roughness * roughness));
+    float scale = (3.0 + 0.1 * abs(viewZ)) * (20.0 - 19.0 * lobe);
+    return clamp(hitDistance / scale, 0.0, 1.0);
+}
+
+vec4 reblurNormalRoughness(vec3 normal, float roughness) {
+    uint normalEncoding = (pc.nrdEncoding >> 8u) & 255u;
+    uint roughnessEncoding = (pc.nrdEncoding >> 16u) & 255u;
+    float packedRoughness = roughnessEncoding == 0u ? roughness * roughness
+        : roughnessEncoding == 2u ? sqrt(roughness) : roughness;
+    if (normalEncoding == 2u) {
+        vec2 oct = normal.xy / dot(abs(normal), vec3(1.0));
+        vec2 rotated = vec2(oct.x + oct.y, oct.y - oct.x);
+        float signedRoughness = max(packedRoughness, 1.5 / 512.0) * (normal.z < 0.0 ? -1.0 : 1.0);
+        return vec4(vec3(rotated, signedRoughness) * 0.5 + 0.5, 0.0);
+    }
+    bool unorm = normalEncoding == 0u || normalEncoding == 3u;
+    return vec4(unorm ? normal * 0.5 + 0.5 : normal, packedRoughness);
+}
+
+void main() {
+    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    if (px.x >= int(pc.width) || px.y >= int(pc.height)) {
+        return;
+    }
+
+    vec2 uv = (vec2(px) + 0.5) / vec2(float(max(pc.width, 1u)), float(max(pc.height, 1u)));
+    vec4 rawRad = texelFetch(inRawRadiance, px, 0);
+    vec4 sharpRad = texelFetch(inSharpRadiance, px, 0);
+    vec4 normRough = texelFetch(inNormalRough, px, 0);
+    float depthSample = texelFetch(inDepth, px, 0).r;
+    vec3 albedoRaw = sanitizeColor(texelFetch(inAlbedo, px, 0).rgb);
+
+    bool isTier3 = pc.isTier3 != 0u;
+    bool reblur = pc.nrdEncoding != 0u;
+    bool isSky = false;
+    float viewZ = 65536.0;
+    if (isTier3) {
+        if (depthSample <= 0.0 || depthSample >= 65536.0) {
+            isSky = true;
+            viewZ = 65536.0;
+        } else {
+            viewZ = depthSample;
+        }
+    } else {
+        if (depthSample <= 1e-6) {
+            isSky = true;
+            viewZ = 65536.0;
+        } else {
+            vec4 ndc = vec4(uv * 2.0 - 1.0, depthSample, 1.0);
+            vec4 viewPos = vsWorld.invProj * ndc;
+            float w = abs(viewPos.w) > 1e-6 ? viewPos.w : (viewPos.w >= 0.0 ? 1e-6 : -1e-6);
+            viewZ = max(abs(viewPos.z / w), 0.01);
+        }
+    }
+
+    if (isSky) {
+        vec3 skyCol = sanitizeColor(rawRad.rgb);
+        imageStore(outDiff, px, vec4(reblur ? reblurSignal(skyCol) : skyCol, 0.0));
+        imageStore(outSpec, px, vec4(0.0));
+        vec3 skyNormal = vec3(0.0, 1.0, 0.0);
+        imageStore(outNormalRough, px, reblur ? reblurNormalRoughness(skyNormal, 1.0) : vec4(skyNormal, 1.0));
+        imageStore(outViewZ, px, vec4(65536.0, 0.0, 0.0, 0.0));
+        imageStore(outHitDist, px, vec4(0.0));
+        return;
+    }
+
+    vec3 rawRgb = sanitizeColor(rawRad.rgb);
+    vec3 sharpRgb = sanitizeColor(sharpRad.rgb);
+    vec3 diffRgb = max(rawRgb - sharpRgb, vec3(0.0));
+
+    vec3 albedoLin = isTier3 ? albedoRaw : pow(albedoRaw, vec3(2.2));
+    vec3 demodDiff = clamp(diffRgb / max(albedoLin, vec3(0.035)), vec3(0.0), vec3(32.0));
+
+    vec3 rawN = normRough.xyz * 2.0 - 1.0;
+    vec3 N = dot(rawN, rawN) > 1e-6 ? normalize(rawN) : vec3(0.0, 1.0, 0.0);
+    float rough = normRough.a > 1.0
+        ? clamp(normRough.a - 1.0, 0.02, 1.0)
+        : clamp(normRough.a, 0.02, 1.0);
+
+    float diffHitDist = (isTier3 && rawRad.a > 0.0) ? clamp(rawRad.a, 0.01, 256.0) : clamp(viewZ * 0.5, 0.1, 64.0);
+    float specHitDist = (isTier3 && sharpRad.a > 0.0) ? clamp(sharpRad.a, 0.01, 256.0) : clamp(viewZ * 0.5, 0.1, 64.0);
+    float primaryHitDist = (specHitDist > 0.0 && rough < 0.35) ? specHitDist : diffHitDist;
+
+    if (reblur) {
+        imageStore(outDiff, px, vec4(reblurSignal(demodDiff), reblurHitDistance(diffHitDist, viewZ, 1.0)));
+        imageStore(outSpec, px, vec4(reblurSignal(sharpRgb), reblurHitDistance(specHitDist, viewZ, rough)));
+    } else {
+        vec4 material = texelFetch(inMaterial, px, 0);
+        float f0Enc = vsUnpackNibbleHi(material.a);
+        float f0 = max(0.9 * f0Enc * f0Enc, 0.02);
+        imageStore(outDiff, px, vec4(albedoLin * (1.0 - material.r), 1.0));
+        imageStore(outSpec, px, vec4(mix(vec3(f0), albedoLin, material.r), 1.0));
+    }
+    imageStore(outNormalRough, px, reblur ? reblurNormalRoughness(N, rough) : vec4(N, rough));
+    imageStore(outViewZ, px, vec4(viewZ, 0.0, 0.0, 0.0));
+    imageStore(outHitDist, px, vec4(primaryHitDist, 0.0, 0.0, 0.0));
+}

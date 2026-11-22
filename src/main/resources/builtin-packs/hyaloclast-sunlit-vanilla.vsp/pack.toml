@@ -1,0 +1,241 @@
+[pack]
+id = "hyaloclast-sunlit-vanilla"
+name = "Sunlit Vanilla"
+version = "1.0.0"
+author = "VulkanShaders (Hyaloclast)"
+description = "Playable, vanilla-faithful Hyaloclast shader pack with eye-pleasing daylight palette, smooth foliage breeze, animated Gerstner water ripples and raindrop rings, drifting 16-block voxel clouds with a high cirrus veil, warm hearth torch flicker, subtle cold-biome night aurora, and Kasten-Young sunrise and sunset warmth."
+
+[capabilities]
+tiers = [0, 1, 2, 3]
+pbr_labpbr = true
+hdr_output = true
+
+[pipeline]
+mode = "extend"
+gbuffer_mrt_count = 4
+
+[targets.volumetric_fog]
+format = "rgba16f"
+scale = 0.5
+temporal = false
+
+[[passes]]
+id = "volumetric_fog_pass"
+kind = "compute"
+shader = "shaders/compute/volumetric_fog.comp"
+min_tier = 0
+max_tier = 2
+replaces = "volumetric_fog_pass"
+reads = ["mc_main_depth", "shadow_csm"]
+writes = ["volumetric_fog"]
+scale = 0.5
+
+[hooks]
+vertex_displace = "hooks/vertex_displace.vsl"
+surface = "hooks/surface.vsl"
+direct_light = "hooks/direct_light.vsl"
+block_light = "hooks/block_light.vsl"
+water_waves = "hooks/water_waves.vsl"
+water_surface = "hooks/water_surface.vsl"
+sky = "hooks/sky.vsl"
+clouds = "hooks/clouds.vsl"
+fog = "hooks/fog.vsl"
+post_grade = "hooks/post_grade.vsl"
+
+[settings.sun_intensity]
+label = "Sun Intensity"
+category = "Lighting"
+description = "Direct solar irradiance multiplier for sunlight and sky lighting."
+type = "float"
+default = 2.75
+min = 0.5
+max = 8.0
+step = 0.1
+runtime = true
+
+[settings.fog_density]
+label = "Atmospheric Fog Density"
+category = "Atmosphere"
+description = "Base density of distance and volumetric atmospheric fog."
+type = "float"
+default = 0.0016
+min = 0.0
+max = 0.03
+step = 0.0005
+runtime = true
+
+[settings.water_wave_strength]
+label = "Water Wave Strength"
+category = "Water"
+description = "Amplitude of animated surface waves and normal perturbation on water."
+type = "float"
+default = 0.28
+min = 0.0
+max = 1.0
+step = 0.05
+runtime = true
+
+[settings.tone_mapping]
+label = "Tone Mapping"
+category = "Post"
+description = "HDR-to-display tone mapping curve applied during final color grading."
+type = "enum"
+default = "pbr_neutral"
+options = ["agx", "aces", "pbr_neutral"]
+runtime = true
+
+[settings.torch_intensity]
+label = "Torch & Dynamic Light Strength"
+category = "Lighting"
+description = "Emission multiplier for torches, lanterns, and dynamic block lights."
+type = "float"
+default = 1.15
+min = 0.3
+max = 2.5
+step = 0.05
+runtime = true
+
+[settings.godrays_intensity]
+label = "RT Volumetric God Rays"
+category = "Atmosphere"
+description = "Strength of hardware-traced volumetric light shafts through air and fog."
+type = "float"
+default = 0.55
+min = 0.0
+max = 2.0
+step = 0.05
+runtime = true
+
+[settings.gi_bounce_strength]
+label = "Path-Traced GI Bounce"
+category = "Lighting"
+description = "Intensity of indirect multi-bounce global illumination."
+type = "float"
+default = 0.95
+min = 0.2
+max = 2.0
+step = 0.05
+runtime = true
+min_tier = 1
+max_tier = 3
+
+[settings.wetness_strength]
+label = "Rain Wetness & Puddles"
+category = "Water"
+description = "Surface darkening, specular sheen, and puddle reflection strength during rain."
+type = "float"
+default = 0.60
+min = 0.0
+max = 1.0
+step = 0.05
+runtime = true
+
+[settings.pom_depth]
+label = "Parallax Occlusion Depth"
+category = "Performance"
+description = "Height-map parallax occlusion depth on PBR textures (0 disables POM for best FPS)."
+type = "float"
+default = 0.0
+min = 0.0
+max = 0.08
+step = 0.005
+runtime = true
+
+[settings.pt_max_bounces]
+label = "Path Tracing Max Bounces"
+category = "Performance"
+description = "Maximum indirect ray bounce depth for Tier 3 path tracing. Higher values increase GPU cost."
+type = "int"
+default = 2
+min = 1
+max = 4
+step = 1
+runtime = false
+min_tier = 3
+max_tier = 3
+
+[settings.enable_wind]
+label = "Foliage Wind"
+category = "Atmosphere"
+description = "Enables vertex wind sway animation on leaves, grass, and crops."
+type = "bool"
+default = true
+runtime = false
+
+[resources.blue_noise]
+path = "resources/blue_noise_64x64.png"
+format = "RGBA8_UNORM"
+filter = "nearest"
+wrap = "repeat"
+
+[presets.low]
+label = "Low"
+description = "Performance-focused Sunlit Vanilla profile with foliage wind disabled, lighter mist and god rays, and minimal bounce depth."
+order = 0
+
+[presets.low.values]
+sun_intensity = 2.6
+fog_density = 0.0012
+water_wave_strength = 0.2
+tone_mapping = "pbr_neutral"
+torch_intensity = 1.05
+godrays_intensity = 0.25
+gi_bounce_strength = 0.65
+wetness_strength = 0.35
+pom_depth = 0.0
+pt_max_bounces = 1
+enable_wind = false
+
+[presets.medium]
+label = "Medium"
+description = "Balanced visuals and frame rate with smooth foliage breeze, gentle valley mist, and single-bounce path tracing."
+order = 1
+
+[presets.medium.values]
+sun_intensity = 2.7
+fog_density = 0.0014
+water_wave_strength = 0.25
+tone_mapping = "pbr_neutral"
+torch_intensity = 1.1
+godrays_intensity = 0.45
+gi_bounce_strength = 0.85
+wetness_strength = 0.5
+pom_depth = 0.0
+pt_max_bounces = 1
+enable_wind = true
+
+[presets.high]
+label = "High"
+description = "Default Sunlit Vanilla profile with PBR Neutral color fidelity, soft volumetric shafts, calm water ripples, and two-bounce path tracing."
+order = 2
+
+[presets.high.values]
+sun_intensity = 2.75
+fog_density = 0.0016
+water_wave_strength = 0.28
+tone_mapping = "pbr_neutral"
+torch_intensity = 1.15
+godrays_intensity = 0.55
+gi_bounce_strength = 0.95
+wetness_strength = 0.60
+pom_depth = 0.0
+pt_max_bounces = 2
+enable_wind = true
+
+[presets.ultra]
+label = "Ultra"
+description = "Maximum visual fidelity with parallax occlusion mapping, richer sunlit haze, livelier water, and four-bounce path tracing."
+order = 3
+
+[presets.ultra.values]
+sun_intensity = 2.9
+fog_density = 0.0020
+water_wave_strength = 0.35
+tone_mapping = "pbr_neutral"
+torch_intensity = 1.2
+godrays_intensity = 0.80
+gi_bounce_strength = 1.15
+wetness_strength = 0.75
+pom_depth = 0.03
+pt_max_bounces = 4
+enable_wind = true

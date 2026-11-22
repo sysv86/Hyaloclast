@@ -1,0 +1,31 @@
+#include <vulkanshaders/v1/common.vsl>
+
+// @hook(stage = "vertex_displace", priority = 100)
+// Obsidian Showcase - Expressive multi-frequency storm-reactive foliage wind gusts
+// demonstrating real-time procedural vertex animation across leaves, grass, and crops.
+void os_vertex_displace(inout vec3 localPos, in VsVertexInput v) {
+    if (!VS_SPEC_ENABLE_WIND || (v.materialFlags & 1u) == 0u) {
+        return;
+    }
+
+    float storm = clamp(vsWorld.rain, 0.0, 1.0);
+    float t = vsWorld.gameTimeSec;
+
+    // Slow rolling macro gust front traveling across the landscape
+    float gustWave = sin(t * (0.95 + storm * 0.85) + localPos.x * 0.14 - localPos.z * 0.11);
+    float gustEnvelope = 0.72 + 0.42 * smoothstep(-0.2, 0.9, gustWave) + storm * 0.65;
+
+    // Multi-frequency sway: primary branch sweep + secondary cross-breeze + high-frequency leaf flutter
+    float speed = 2.15 + storm * 1.65;
+    float pPrimary = t * speed + localPos.x * 0.72 + localPos.z * 0.54 + localPos.y * 0.30;
+    float pSecondary = t * (speed * 1.82) - localPos.x * 1.15 + localPos.z * 1.38 + localPos.y * 0.45;
+    float pFlutter = t * (5.4 + storm * 3.2) + localPos.x * 3.1 + localPos.z * 2.7 + localPos.y * 2.3;
+
+    float swayX = (sin(pPrimary) * 0.056 + cos(pSecondary) * 0.024 + sin(pFlutter) * (0.008 + storm * 0.010)) * gustEnvelope;
+    float swayZ = (cos(pPrimary * 0.88 + 0.6) * 0.040 + sin(pSecondary * 1.12) * 0.018 + cos(pFlutter * 1.15) * (0.006 + storm * 0.008)) * gustEnvelope;
+    float liftY = (sin(pPrimary * 2.0 + 0.4) * 0.010 + cos(pFlutter) * 0.004) * (0.65 + storm * 0.75);
+
+    localPos.x += swayX;
+    localPos.y += liftY;
+    localPos.z += swayZ;
+}

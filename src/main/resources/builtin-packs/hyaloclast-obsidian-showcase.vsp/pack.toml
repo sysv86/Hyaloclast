@@ -1,0 +1,216 @@
+[pack]
+id = "hyaloclast-obsidian-showcase"
+name = "Obsidian Showcase"
+version = "1.0.0"
+author = "VulkanShaders (Hyaloclast)"
+description = "Pure Hyaloclast Vulkan engine technology showcase (not tuned for casual gameplay): demonstrates Tier 0-3 rendering, RT/PT multi-bounce SHaRC GI, ReSTIR DI colored block lights, mirror-polished LabPBR metals and wet rain puddles, Parallax Occlusion Mapping (POM), 10-step volumetric cumulus with cirrus and 4-curtain animated aurora, dense valley mist and crepuscular Mie god rays, 5-octave trochoidal Gerstner water with raindrop ripples, storm-reactive foliage wind, and cinematic HDR AgX split-toned grading."
+extends = "hyaloclast-sunlit-vanilla"
+
+[capabilities]
+tiers = [0, 1, 2, 3]
+pbr_labpbr = true
+hdr_output = true
+
+[hooks]
+vertex_displace = "hooks/vertex_displace.vsl"
+surface = "hooks/surface.vsl"
+direct_light = "hooks/direct_light.vsl"
+block_light = "hooks/block_light.vsl"
+water_waves = "hooks/water_waves.vsl"
+water_surface = "hooks/water_surface.vsl"
+sky = "hooks/sky.vsl"
+clouds = "hooks/clouds.vsl"
+fog = "hooks/fog.vsl"
+post_grade = "hooks/post_grade.vsl"
+
+[settings.sun_intensity]
+label = "Sun Intensity"
+category = "Lighting"
+description = "Direct solar irradiance multiplier for sunlight and sky lighting."
+type = "float"
+default = 3.3
+min = 0.5
+max = 8.0
+step = 0.1
+runtime = true
+
+[settings.fog_density]
+label = "Atmospheric Fog Density"
+category = "Atmosphere"
+description = "Base density of distance and volumetric atmospheric fog."
+type = "float"
+default = 0.0030
+min = 0.0
+max = 0.03
+step = 0.0005
+runtime = true
+
+[settings.water_wave_strength]
+label = "Water Wave Strength"
+category = "Water"
+description = "Amplitude of animated surface waves and normal perturbation on water."
+type = "float"
+default = 0.45
+min = 0.0
+max = 1.0
+step = 0.05
+runtime = true
+
+[settings.tone_mapping]
+label = "Tone Mapping"
+category = "Post"
+description = "HDR-to-display tone mapping curve applied during final color grading."
+type = "enum"
+default = "agx"
+options = ["agx", "aces", "pbr_neutral"]
+runtime = true
+
+[settings.torch_intensity]
+label = "Torch & Dynamic Light Strength"
+category = "Lighting"
+description = "Emission multiplier for torches, lanterns, and dynamic block lights."
+type = "float"
+default = 1.45
+min = 0.3
+max = 2.5
+step = 0.05
+runtime = true
+
+[settings.godrays_intensity]
+label = "RT Volumetric God Rays"
+category = "Atmosphere"
+description = "Strength of hardware-traced volumetric light shafts through air and fog."
+type = "float"
+default = 1.35
+min = 0.0
+max = 2.0
+step = 0.05
+runtime = true
+
+[settings.gi_bounce_strength]
+label = "Path-Traced GI Bounce"
+category = "Lighting"
+description = "Intensity of indirect multi-bounce global illumination."
+type = "float"
+default = 1.25
+min = 0.2
+max = 2.0
+step = 0.05
+runtime = true
+min_tier = 1
+max_tier = 3
+
+[settings.wetness_strength]
+label = "Rain Wetness & Puddles"
+category = "Water"
+description = "Surface darkening, specular sheen, and puddle reflection strength during rain."
+type = "float"
+default = 0.90
+min = 0.0
+max = 1.0
+step = 0.05
+runtime = true
+
+[settings.pom_depth]
+label = "Parallax Occlusion Depth"
+category = "Performance"
+description = "Height-map parallax occlusion depth on PBR textures (0 disables POM for best FPS)."
+type = "float"
+default = 0.03
+min = 0.0
+max = 0.08
+step = 0.005
+runtime = true
+
+[settings.pt_max_bounces]
+label = "Path Tracing Max Bounces"
+category = "Performance"
+description = "Maximum indirect ray bounce depth for Tier 3 path tracing. Higher values increase GPU cost."
+type = "int"
+default = 3
+min = 1
+max = 4
+step = 1
+runtime = false
+min_tier = 3
+max_tier = 3
+
+[settings.enable_wind]
+label = "Foliage Wind"
+category = "Atmosphere"
+description = "Enables vertex wind sway animation on leaves, grass, and crops."
+type = "bool"
+default = true
+runtime = false
+
+[presets.low]
+label = "Low"
+description = "Lighter engine showcase profile with foliage wind disabled, reduced fog and shafts, and single-bounce path tracing."
+order = 0
+
+[presets.low.values]
+sun_intensity = 2.9
+fog_density = 0.0020
+water_wave_strength = 0.30
+tone_mapping = "agx"
+torch_intensity = 1.25
+godrays_intensity = 0.75
+gi_bounce_strength = 0.85
+wetness_strength = 0.65
+pom_depth = 0.0
+pt_max_bounces = 1
+enable_wind = false
+
+[presets.medium]
+label = "Medium"
+description = "Balanced showcase profile enabling foliage wind, subtle parallax occlusion, crepuscular rays, and two-bounce GI."
+order = 1
+
+[presets.medium.values]
+sun_intensity = 3.1
+fog_density = 0.0025
+water_wave_strength = 0.38
+tone_mapping = "agx"
+torch_intensity = 1.35
+godrays_intensity = 1.05
+gi_bounce_strength = 1.05
+wetness_strength = 0.80
+pom_depth = 0.015
+pt_max_bounces = 2
+enable_wind = true
+
+[presets.high]
+label = "High"
+description = "Default Obsidian Showcase profile with POM relief, strong volumetric shafts, rich SHaRC multi-bounce GI, and mirror-wet puddles."
+order = 2
+
+[presets.high.values]
+sun_intensity = 3.3
+fog_density = 0.0030
+water_wave_strength = 0.45
+tone_mapping = "agx"
+torch_intensity = 1.45
+godrays_intensity = 1.35
+gi_bounce_strength = 1.25
+wetness_strength = 0.90
+pom_depth = 0.03
+pt_max_bounces = 3
+enable_wind = true
+
+[presets.ultra]
+label = "Ultra"
+description = "Uncompromised technology showcase with deep POM relief, maximum four-bounce path tracing, intense god rays, and near-mirror wet puddles."
+order = 3
+
+[presets.ultra.values]
+sun_intensity = 3.6
+fog_density = 0.0036
+water_wave_strength = 0.55
+tone_mapping = "agx"
+torch_intensity = 1.65
+godrays_intensity = 1.65
+gi_bounce_strength = 1.45
+wetness_strength = 0.98
+pom_depth = 0.045
+pt_max_bounces = 4
+enable_wind = true

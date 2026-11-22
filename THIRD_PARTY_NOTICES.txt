@@ -1,0 +1,21 @@
+VulkanShaders (Hyaloclast) — Third-Party Notices & Attributions
+===============================================================
+
+1. Radiante
+   Author: Gabrieli2806
+   Contributors: Maximiliano-Santana, SinanAkkoyun
+   Repository: https://github.com/Gabrieli2806/Radiante
+   Modrinth: https://modrinth.com/project/radiante
+   License: GNU General Public License v3.0 (GPL-3.0) with Section 7 Additional Permissions
+   Notes:
+     Radiante served as an important architectural reference for VulkanShaders (Hyaloclast),
+     including Minecraft 26.3 RenderPearl Vulkan backend hook architecture (instance/device
+     extension merging, reentrant queue lock synchronization, and VK_NV_low_latency2 pacing).
+     VulkanShaders carries over Radiante's GPL-3.0 license (LICENSE) and Section 7 additional
+     permissions framework (LICENSE-EXCEPTION.md). Radiante originated as a fork of Radiance
+     and its MCVR renderer (GPL-3.0).
+
+2. Built-in Shader Pack (hyaloclast-sunlit-vanilla.vsp)
+   For built-in shader pack third-party notices (RTX Remix for Minecraft — Apache-2.0, NVIDIA;
+   Minecraft Miniature Shader — MIT, Mateus A. Kreuch), see:
+   src/main/resources/builtin-packs/hyaloclast-sunlit-vanilla.vsp/THIRD_PARTY_NOTICES.txt

@@ -1,0 +1,101 @@
+#include <vulkanshaders/v1/common.vsl>
+
+float os_fogMiePhase(float cosTheta, float g) {
+    float g2 = g * g;
+    float denom = max(1.0 + g2 - 2.0 * g * cosTheta, 1e-4);
+    return (1.0 - g2) / (12.56637061 * pow(denom, 1.5));
+}
+
+// @hook(stage = "fog", priority = 100)
+// Obsidian Showcase - Dense valley-pooling height mist anchored to true world altitude,
+// dramatic crepuscular Mie god rays (g = 0.78), and full underwater/lava fluid optics.
+void os_fog(in float dist, in vec3 dir, inout vec3 scatter, inout vec3 transmittance) {
+    // Preserve physical underwater & lava optical media across all render tiers
+    if (vsWorld.eyeInFluid == 1) {
+        vec3 sunDirW = normalize(vsWorld.sunDir + vec3(0.0, 1e-5, 0.0));
+        float dayW = smoothstep(-0.10, 0.22, sunDirW.y);
+        vec3 absorb = exp(-max(dist, 0.0) * vec3(0.28, 0.085, 0.048));
+        float fwd = os_fogMiePhase(dot(dir, sunDirW), 0.74);
+        vec3 deepWaterCol = mix(vec3(0.005, 0.022, 0.044), vec3(0.018, 0.120, 0.175), dayW);
+        vec3 causticGlow = vec3(0.09, 0.26, 0.30) * (fwd * 0.26 * dayW * smoothstep(-0.1, 0.6, dir.y));
+        transmittance *= absorb;
+        scatter += (deepWaterCol + causticGlow) * (vec3(1.0) - absorb);
+        return;
+    }
+    if (vsWorld.eyeInFluid == 2) {
+        float lavaFactor = exp(-max(dist, 0.0) * 0.52);
+        transmittance *= lavaFactor;
+        scatter += vec3(0.88, 0.24, 0.03) * (1.0 - lavaFactor);
+        return;
+    }
+
+    vec3 sunDir = normalize(vsWorld.sunDir + vec3(0.0, 1e-5, 0.0));
+    float dayFactor = smoothstep(-0.10, 0.22, sunDir.y);
+    float twilight = smoothstep(-0.16, 0.04, sunDir.y) * (1.0 - smoothstep(0.10, 0.34, sunDir.y));
+    float cosTheta = dot(dir, sunDir);
+    float godrayScale = clamp(VS_PARAM_GODRAYS_INTENSITY, 0.0, 2.0);
+    float mieCrepuscular = os_fogMiePhase(cosTheta, 0.78);
+
+    // Tiers 0..2: enhance froxel volumetric_fog pass with showcase crepuscular Mie shafts
+    if (VS_ACTIVE_RENDER_TIER <= 2) {
+        if (vsDimensionId() == 0) {
+            float sunAlign = clamp(mieCrepuscular * 0.32, 0.0, 1.6) * dayFactor * (1.0 - vsWorld.rain * 0.65);
+            vec3 shaftTint = mix(vec3(1.08, 0.96, 0.80), vec3(1.36, 0.64, 0.28), twilight);
+            scatter *= mix(vec3(0.96, 0.99, 1.05), shaftTint, clamp(sunAlign * 0.65, 0.0, 0.85));
+            scatter += shaftTint * (mieCrepuscular * 0.045 * godrayScale * dayFactor * (1.0 - vsWorld.rain * 0.70))
+                * clamp(1.0 - dot(transmittance, vec3(0.3333)), 0.0, 1.0);
+        }
+        return;
+    }
+
+    int dimId = vsDimensionId();
+    float biomeDensity = vsBiomeFogDensityScale();
+
+    if (dimId == 1) {
+        // Nether: dense smoldering ember-ash mist
+        float d = clamp(VS_PARAM_FOG_DENSITY * 4.2 * biomeDensity, 0.005, 0.052);
+        float factor = clamp(exp(-max(dist - 8.0, 0.0) * d * 0.46), 0.14, 1.0);
+        vec3 netherFog = vsHasBiomeTelemetry() ? vsBiomeFogTint() : vec3(0.30, 0.075, 0.03);
+        transmittance *= factor;
+        scatter += netherFog * (1.0 - factor);
+        return;
+    }
+
+    if (dimId == 2) {
+        // The End: deep obsidian-violet void mist
+        float d = clamp(VS_PARAM_FOG_DENSITY * 1.6 * biomeDensity, 0.0012, 0.022);
+        float factor = clamp(exp(-max(dist - 22.0, 0.0) * d * 0.25), 0.22, 1.0);
+        transmittance *= factor;
+        scatter += vec3(0.024, 0.014, 0.048) * (1.0 - factor);
+        return;
+    }
+
+    // Overworld Tier 3: dense valley-pooling height mist + dramatic crepuscular Mie god rays
+    float bHum = vsBiomeHumidity();
+    float baseDensity = clamp(VS_PARAM_FOG_DENSITY, 0.0, 0.03) * biomeDensity
+        * (1.0 + vsWorld.rain * 0.92 + vsWorld.thunder * 0.36);
+
+    float camY = (dot(uSharc.cfg.cameraPosition.xyz, uSharc.cfg.cameraPosition.xyz) > 1e-4)
+        ? uSharc.cfg.cameraPosition.y
+        : (64.0 + vsWorld.cameraPosFrac.y);
+    float rayEndY = camY + dir.y * dist;
+    float valleyPool = exp(-clamp((rayEndY - 68.0) * 0.024, -0.55, 2.6));
+    float valleyBoost = mix(1.05, 1.52, clamp(bHum * 0.5 + twilight * 0.5, 0.0, 1.0));
+    float effectiveDist = max(dist - 16.0, 0.0) * valleyPool * valleyBoost;
+    float factor = clamp(exp(-effectiveDist * baseDensity * 0.092), 0.22, 1.0);
+
+    vec3 baseMist = mix(vec3(0.36, 0.56, 0.84), vsBiomeFogTint(), vsHasBiomeTelemetry() ? 0.50 : 0.0);
+    vec3 dayMist = mix(baseMist, vec3(1.04, 0.50, 0.22), twilight * 0.80);
+    vec3 nightMist = mix(vec3(0.012, 0.022, 0.048), vsBiomeFogTint() * 0.06, vsHasBiomeTelemetry() ? 0.35 : 0.0);
+    vec3 fogTint = mix(nightMist, dayMist, dayFactor);
+
+    // Dramatic crepuscular forward-scattered Mie god rays (g = 0.78) + broad golden halo
+    float mieBroad = os_fogMiePhase(cosTheta, 0.34);
+    vec3 shaftTint = mix(vec3(1.14, 0.96, 0.72), vec3(1.42, 0.54, 0.18), twilight);
+    fogTint += shaftTint * (mieCrepuscular * 0.26 + mieBroad * 0.07) * (0.45 + 0.65 * godrayScale)
+        * dayFactor * (1.0 - vsWorld.rain * 0.68);
+
+    fogTint = mix(fogTint, vec3(0.16, 0.20, 0.26) * mix(0.16, 1.0, dayFactor), vsWorld.rain * 0.78);
+    transmittance *= factor;
+    scatter += fogTint * (1.0 - factor);
+}

@@ -1,0 +1,246 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: hyaloclast-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust Workspace (fmt, clippy, test, vsp-cli)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets -- -D clippy::correctness
+
+      - name: Run Rust workspace tests
+        run: cargo test --workspace --locked
+
+      - name: Validate built-in shader packs with vsp-cli
+        run: |
+          set -euo pipefail
+          cargo run --locked -p vsp-cli -- check src/main/resources/builtin-packs/hyaloclast-sunlit-vanilla.vsp --tier 0
+          cargo run --locked -p vsp-cli -- check src/main/resources/builtin-packs/hyaloclast-sunlit-vanilla.vsp --tier 3
+          cargo run --locked -p vsp-cli -- check src/main/resources/builtin-packs/hyaloclast-obsidian-showcase.vsp --tier 0
+          cargo run --locked -p vsp-cli -- check src/main/resources/builtin-packs/hyaloclast-obsidian-showcase.vsp --tier 3
+
+  sdk-bench:
+    name: Proprietary SDK & ABI Verification
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run SDK bench unit tests
+        run: cargo test --locked -p vulkanshaders-sdk-bench
+
+      - name: Run vendor SDK contract tests
+        run: cargo test --locked -p vulkanshaders-core --test vendor_sdk_contract_test
+
+      - name: Verify proprietary SDK headers, binaries, and FFI/FFM contracts
+        run: cargo run --locked -p vulkanshaders-sdk-bench -- verify --repo-root . --download
+
+  natives:
+    name: Native Core (${{ matrix.platform_dir }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform_dir: linux-x86-64
+            target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            lib_name: libvulkanshaders_core.so
+            cross_arm64: false
+          - platform_dir: linux-aarch64
+            target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            lib_name: libvulkanshaders_core.so
+            cross_arm64: true
+          - platform_dir: win32-x86-64
+            target: x86_64-pc-windows-msvc
+            os: windows-latest
+            lib_name: vulkanshaders_core.dll
+            cross_arm64: false
+          - platform_dir: macos-aarch64
+            target: aarch64-apple-darwin
+            os: macos-14
+            lib_name: libvulkanshaders_core.dylib
+            cross_arm64: false
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install Linux aarch64 cross-compilation toolchain
+        if: matrix.cross_arm64
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu binutils-aarch64-linux-gnu
+
+      - name: Build native release cdylib
+        shell: bash
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: |
+          set -euo pipefail
+          cargo build --release --locked --target ${{ matrix.target }} -p vulkanshaders-core
+
+      - name: Strip and stage native library
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="target/${{ matrix.target }}/release/${{ matrix.lib_name }}"
+          DEST_DIR="staged-natives/${{ matrix.platform_dir }}"
+          mkdir -p "$DEST_DIR"
+          cp "$SRC" "$DEST_DIR/${{ matrix.lib_name }}"
+          if [ "${{ matrix.platform_dir }}" = "linux-x86-64" ]; then
+            strip --strip-unneeded "$DEST_DIR/${{ matrix.lib_name }}"
+          elif [ "${{ matrix.platform_dir }}" = "linux-aarch64" ]; then
+            aarch64-linux-gnu-strip --strip-unneeded "$DEST_DIR/${{ matrix.lib_name }}"
+          elif [ "${{ matrix.platform_dir }}" = "macos-aarch64" ]; then
+            strip -x "$DEST_DIR/${{ matrix.lib_name }}"
+          fi
+
+      - name: Upload staged native artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.platform_dir }}
+          path: staged-natives/${{ matrix.platform_dir }}/${{ matrix.lib_name }}
+          retention-days: 7
+
+  smoke:
+    name: Smoke Harness (packs, lang, Fabric-only, Vulkan validation)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run Hyaloclast smoke harness
+        run: python3 dev/smoke/smoke.py --ci
+
+  gradle:
+    name: Fabric Mod (JDK 25 test, fat JAR & per-platform JARs)
+    needs: [natives, smoke]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all staged native binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          path: prebuilt-natives
+          merge-multiple: false
+
+      - name: Normalize prebuilt-natives layout
+        run: |
+          set -euo pipefail
+          for platform in linux-x86-64 linux-aarch64 win32-x86-64 macos-aarch64; do
+            if [ -d "prebuilt-natives/native-$platform" ]; then
+              mkdir -p "prebuilt-natives/$platform"
+              mv "prebuilt-natives/native-$platform"/* "prebuilt-natives/$platform/"
+              rmdir "prebuilt-natives/native-$platform"
+            fi
+          done
+          find prebuilt-natives -maxdepth 2 -type f | sort
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build sibling Pyroclast compileOnly dependency
+        run: |
+          set -euo pipefail
+          rm -rf ../Pyroclast
+          git clone --depth 1 https://github.com/sysv86/Pyroclast.git ../Pyroclast
+          (cd ../Pyroclast && chmod +x gradlew && ./gradlew jar --no-daemon)
+
+      - name: Run Kotlin unit tests
+        run: ./gradlew test -Pvs.cargo=false --no-daemon
+
+      - name: Build fat Fabric JAR (all platforms)
+        run: |
+          set -euo pipefail
+          mkdir -p ci-jars
+          ./gradlew build -Pvs.cargo=false -Pvs.distribution=modrinth -Pvs.nativePlatform=all --no-daemon
+          cp build/libs/*.jar ci-jars/
+
+      - name: Build per-platform Fabric JARs
+        run: |
+          set -euo pipefail
+          for platform in linux-x86-64 linux-aarch64 win32-x86-64 macos-aarch64; do
+            ./gradlew jar -Pvs.cargo=false -Pvs.distribution=modrinth -Pvs.nativePlatform="$platform" --no-daemon
+            cp build/libs/*-"$platform"-*.jar ci-jars/
+          done
+
+      - name: Upload test reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vulkanshaders-test-reports
+          path: build/reports/tests/
+          retention-days: 7
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: vulkanshaders-jars
+          path: ci-jars/*.jar
+          retention-days: 14

@@ -1,0 +1,375 @@
+#include <vulkanshaders/v1/common.vsl>
+
+// Kasten-Young optical air-mass transmittance with Ozone Chappuis absorption band.
+vec3 os_atmosphereTransmittance(float elevation, float mieCoeff) {
+    float h = clamp(elevation, 0.0, 1.0);
+    if (h <= 0.001) {
+        return vec3(0.0);
+    }
+    float zenithDeg = degrees(acos(h));
+    float airMass = 1.0 / max(h + 0.15 * pow(max(93.885 - zenithDeg, 0.5), -1.253), 0.05);
+    vec3 rayleighExt = vec3(0.132, 0.318, 0.595);
+    vec3 ozoneExt = vec3(0.024, 0.052, 0.007);
+    vec3 totalExt = rayleighExt + ozoneExt + vec3(mieCoeff);
+    return exp(-totalExt * airMass);
+}
+
+float os_hash21(vec2 p) {
+    p = fract(p * vec2(127.1, 311.7));
+    p += dot(p, p + 34.53);
+    return fract(p.x * p.y);
+}
+
+float os_noise2D(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    return mix(
+        mix(os_hash21(i), os_hash21(i + vec2(1.0, 0.0)), u.x),
+        mix(os_hash21(i + vec2(0.0, 1.0)), os_hash21(i + vec2(1.0, 1.0)), u.x),
+        u.y
+    );
+}
+
+float os_starHash(vec3 p) {
+    p = fract(p * vec3(443.8975, 397.2973, 491.1871));
+    p += dot(p.zxy, p.yxz + 19.19);
+    return fract(p.x * p.y * p.z);
+}
+
+float os_skyNoise3(vec3 p) {
+    vec3 i = floor(p);
+    vec3 f = fract(p);
+    vec3 u = f * f * (3.0 - 2.0 * f);
+    float n000 = os_starHash(i + vec3(0.0, 0.0, 0.0));
+    float n100 = os_starHash(i + vec3(1.0, 0.0, 0.0));
+    float n010 = os_starHash(i + vec3(0.0, 1.0, 0.0));
+    float n110 = os_starHash(i + vec3(1.0, 1.0, 0.0));
+    float n001 = os_starHash(i + vec3(0.0, 0.0, 1.0));
+    float n101 = os_starHash(i + vec3(1.0, 0.0, 1.0));
+    float n011 = os_starHash(i + vec3(0.0, 1.0, 1.0));
+    float n111 = os_starHash(i + vec3(1.0, 1.0, 1.0));
+    return mix(
+        mix(mix(n000, n100, u.x), mix(n010, n110, u.x), u.y),
+        mix(mix(n001, n101, u.x), mix(n011, n111, u.x), u.y),
+        u.z
+    );
+}
+
+// World-up celestial tangent basis so square sun and moon stay aligned to the horizon.
+void os_celestialBasis(vec3 bodyDir, out vec3 rightVec, out vec3 upVec) {
+    vec3 refUp = abs(bodyDir.y) < 0.985 ? vec3(0.0, 1.0, 0.0) : vec3(0.0, 0.0, 1.0);
+    rightVec = normalize(cross(refUp, bodyDir));
+    upVec = normalize(cross(bodyDir, rightVec));
+}
+
+float os_roundedSquareSdf(vec2 p, float halfExtent, float cornerRadius) {
+    vec2 q = abs(p) - vec2(halfExtent - cornerRadius);
+    return length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0) - cornerRadius;
+}
+
+float os_hgPhase(float cosTheta, float g) {
+    float g2 = g * g;
+    float denom = max(1.0 + g2 - 2.0 * g * cosTheta, 1e-4);
+    return (1.0 - g2) / (12.56637061 * pow(denom, 1.5));
+}
+
+// Full-strength 4-curtain animated emerald -> cyan -> violet-magenta aurora borealis.
+vec3 os_evaluateAurora(vec3 dir, float timeSec) {
+    if (dir.y <= 0.04) {
+        return vec3(0.0);
+    }
+    vec3 accum = vec3(0.0);
+    float elevationMask = smoothstep(0.04, 0.22, dir.y) * smoothstep(0.94, 0.34, dir.y);
+    float t = timeSec * 0.16;
+
+    for (int i = 0; i < 4; ++i) {
+        float fi = float(i);
+        float shellH = 0.92 + fi * 0.27;
+        vec2 uv = dir.xz / max(dir.y + 0.17, 0.21) * shellH;
+
+        float wave = sin(uv.x * 1.48 + t * (1.15 + fi * 0.22) + sin(uv.y * 1.25 - t * 0.72)) * 0.58;
+        float ribbonCoord = uv.y + wave + fi * 0.36 - 0.52;
+        float ribbonCore = exp(-abs(ribbonCoord) * (4.4 - fi * 0.42));
+
+        // Vertical magnetic field striations shimmering along each curtain
+        float striation = os_noise2D(vec2(uv.x * 5.4 + t * 0.90, uv.y * 1.85 - t * 0.38 + fi * 3.1));
+        float fineShimmer = 0.54 + 0.46 * sin(uv.x * 14.5 + striation * 6.2 - timeSec * 0.95 + fi * 1.7);
+        float density = ribbonCore * smoothstep(0.24, 0.86, striation) * fineShimmer;
+
+        // Physical altitude emission spectrum: emerald lower edge -> cyan mid -> violet-magenta crown
+        float altFrac = fi / 3.0;
+        vec3 colLow = vec3(0.05, 0.98, 0.50);
+        vec3 colMid = vec3(0.06, 0.78, 0.92);
+        vec3 colTop = vec3(0.68, 0.18, 0.94);
+        vec3 curtainCol = altFrac < 0.5
+            ? mix(colLow, colMid, altFrac * 2.0)
+            : mix(colMid, colTop, (altFrac - 0.5) * 2.0);
+
+        accum += curtainCol * density * (0.34 - fi * 0.045);
+    }
+
+    return accum * elevationMask;
+}
+
+// @hook(stage = "sky", priority = 100)
+// Obsidian Showcase - Physical Kasten-Young air-mass transmittance, dual-lobe Mie solar aureole,
+// rich golden-hour/twilight scattering, iconic beveled square sun & cratered moon, Milky Way,
+// and full-strength 4-curtain animated aurora on clear nights and in The End.
+void os_sky(inout vec3 radiance, in vec3 dir, in VsSkyState sky) {
+    int dimId = vsDimensionId();
+
+    // --- THE NETHER (dimId == 1): Smoldering volcanic ember-ash atmosphere ---
+    if (dimId == 1) {
+        vec3 bTint = vsHasBiomeTelemetry() ? vsBiomeFogTint() : vec3(0.32, 0.08, 0.035);
+        float horizonBand = exp(-abs(dir.y) * 4.6);
+        float upperGlow = smoothstep(0.14, 0.95, dir.y);
+
+        vec3 drift = vec3(sky.gameTimeSec * 0.07, -sky.gameTimeSec * 0.035, sky.gameTimeSec * 0.05);
+        float ashWisp = os_skyNoise3(dir * 5.2 + drift) * 0.65 + os_skyNoise3(dir * 11.5 - drift * 1.4) * 0.35;
+        float emberPocket = smoothstep(0.54, 0.88, ashWisp);
+
+        vec3 basaltZenith = bTint * 0.24 + vec3(0.028, 0.008, 0.006);
+        vec3 emberZenith = bTint * 0.62 + vec3(0.18, 0.038, 0.009);
+        vec3 ceilingCol = mix(basaltZenith, emberZenith, emberPocket * (0.48 + 0.52 * upperGlow));
+        vec3 horizonCol = bTint * 1.30 + vec3(0.22, 0.056, 0.014) * (0.82 + 0.42 * emberPocket);
+        vec3 abyssFloor = bTint * 0.22 + vec3(0.045, 0.011, 0.005);
+
+        vec3 netherSky = mix(ceilingCol, horizonCol, horizonBand);
+        netherSky = mix(abyssFloor, netherSky, smoothstep(-0.32, 0.04, dir.y));
+        radiance = max(netherSky, vec3(0.012, 0.004, 0.003));
+        return;
+    }
+
+    // --- THE END (dimId == 2): Obsidian-violet void nebula, orbital ring & 4-curtain aurora ---
+    if (dimId == 2) {
+        float up = abs(dir.y);
+        vec3 horizonVoid = vec3(0.028, 0.016, 0.062);
+        vec3 zenithVoid = vec3(0.005, 0.004, 0.016);
+        vec3 baseVoid = mix(horizonVoid, zenithVoid, pow(up, 0.60));
+
+        vec3 ringAxis = normalize(vec3(0.28, 0.88, -0.38));
+        float ringPlane = abs(dot(dir, ringAxis));
+        float ringCore = exp(-ringPlane * 16.0);
+        float ringHalo = exp(-ringPlane * 4.5);
+        float ringNoise = os_skyNoise3(dir * 7.5 + vec3(0.0, sky.gameTimeSec * 0.010, 0.0));
+        float ringBands = smoothstep(0.24, 0.84, ringNoise);
+        vec3 ringCol = mix(vec3(0.18, 0.08, 0.38), vec3(0.44, 0.26, 0.72), ringCore) * (0.55 + 0.45 * ringBands);
+
+        float neb1 = os_skyNoise3(dir * 3.8 + vec3(1.4, -0.6, 2.1));
+        float neb2 = os_skyNoise3(dir * 8.2 + vec3(-2.3, 1.7, 0.9));
+        float nebulaMask = smoothstep(0.40, 0.86, neb1 * 0.65 + neb2 * 0.35) * (0.35 + 0.65 * ringHalo);
+        vec3 nebulaCol = mix(vec3(0.16, 0.05, 0.34), vec3(0.05, 0.18, 0.30), clamp(dir.x * 0.5 + 0.5, 0.0, 1.0));
+
+        // Full-strength 4-curtain animated End aurora
+        vec3 endAurora = os_evaluateAurora(normalize(vec3(dir.x, abs(dir.y) + 0.10, dir.z)), sky.gameTimeSec * 0.85) * 0.92;
+
+        vec3 starCell = floor(dir * 270.0);
+        float sVal = os_starHash(starCell);
+        float starThresh = mix(0.9964, 0.9920, ringCore);
+        float stars = smoothstep(starThresh, 0.9995, sVal) * (0.52 + 0.48 * sin(sky.gameTimeSec * 1.8 + sVal * 95.0));
+        vec3 starTint = mix(vec3(0.76, 0.66, 1.0), vec3(0.68, 0.94, 1.0), fract(sVal * 41.7));
+
+        radiance = baseVoid
+            + ringCol * (ringCore * 0.30 + ringHalo * 0.10)
+            + nebulaCol * nebulaMask * 0.36
+            + endAurora
+            + starTint * stars * (0.62 + 0.45 * ringCore);
+        return;
+    }
+
+    // --- OVERWORLD: Physical Kasten-Young + Rayleigh/Mie/Ozone showcase atmosphere ---
+    vec3 sunDir = normalize(sky.sunDir + vec3(0.0, 1e-5, 0.0));
+    float up = clamp(dir.y, 0.0, 1.0);
+    float horizonBlend = pow(1.0 - up, 3.0);
+    float lowHorizon = pow(1.0 - up, 6.2);
+
+    float sunEl = sunDir.y;
+    float dayFactor = smoothstep(-0.08, 0.24, sunEl);
+    float noonFactor = smoothstep(0.24, 0.68, sunEl);
+    float goldenFactor = smoothstep(-0.03, 0.10, sunEl) * (1.0 - smoothstep(0.16, 0.40, sunEl));
+    float twilightFactor = smoothstep(-0.18, -0.02, sunEl) * (1.0 - smoothstep(0.04, 0.19, sunEl));
+    float blueHourFactor = smoothstep(-0.26, -0.09, sunEl) * (1.0 - smoothstep(-0.04, 0.06, sunEl));
+
+    float bTemp = vsBiomeTemperature();
+    float bHum = vsBiomeHumidity();
+    float aridFactor = smoothstep(0.65, 0.95, bTemp) * (1.0 - smoothstep(0.15, 0.55, bHum));
+    float coldFactor = 1.0 - smoothstep(0.05, 0.38, bTemp);
+    float humidFactor = smoothstep(0.62, 0.95, bHum);
+
+    // High-contrast cerulean zenith & luminous sky-blue horizon
+    vec3 noonZenith = vec3(0.052, 0.228, 0.685);
+    vec3 noonHorizon = vec3(0.40, 0.66, 0.96);
+
+    // Golden hour: rich sapphire zenith meeting warm honey-apricot horizon
+    vec3 goldenZenith = vec3(0.056, 0.172, 0.525);
+    vec3 goldenHorizon = vec3(0.84, 0.62, 0.44);
+
+    noonZenith = mix(noonZenith, vec3(0.046, 0.196, 0.560), aridFactor * 0.58);
+    noonHorizon = mix(noonHorizon, vec3(0.76, 0.66, 0.48), aridFactor * 0.50);
+    noonZenith = mix(noonZenith, vec3(0.048, 0.192, 0.610), coldFactor * 0.48);
+    noonHorizon = mix(noonHorizon, vec3(0.50, 0.68, 0.94), coldFactor * 0.40);
+    noonHorizon = mix(noonHorizon, vec3(0.38, 0.66, 0.76), humidFactor * 0.36);
+
+    vec3 dayZenith = mix(goldenZenith, noonZenith, noonFactor);
+    vec3 dayHorizon = mix(goldenHorizon, noonHorizon, noonFactor);
+
+    vec3 nightZenith = vec3(0.0024, 0.0054, 0.0175);
+    vec3 nightHorizon = vec3(0.011, 0.022, 0.050);
+
+    vec3 zenith = mix(nightZenith, dayZenith, dayFactor);
+    vec3 horizon = mix(nightHorizon, dayHorizon, dayFactor);
+
+    // Blue hour: deep Ozone Chappuis sapphire zenith & indigo-violet horizon
+    zenith = mix(zenith, vec3(0.015, 0.036, 0.125), blueHourFactor * 0.80);
+    horizon = mix(horizon, vec3(0.10, 0.13, 0.27), blueHourFactor * 0.74);
+
+    // Rich sunrise/sunset scattering: fiery amber-coral solar side + rose-violet Belt of Venus
+    vec2 dirXz = normalize(vec2(dir.x, dir.z) + vec2(1e-5, 0.0));
+    vec2 sunXz = normalize(vec2(sunDir.x, sunDir.z) + vec2(1e-5, 0.0));
+    float sunAzimuth = clamp(dot(dirXz, sunXz) * 0.5 + 0.5, 0.0, 1.0);
+
+    vec3 antiSolarBelt = vec3(0.34, 0.18, 0.40);
+    vec3 solarHorizon = vec3(1.32, 0.46, 0.13);
+    vec3 sunsetHorizon = mix(antiSolarBelt, solarHorizon, pow(sunAzimuth, 1.40));
+    vec3 ozoneZenith = vec3(0.046, 0.068, 0.255);
+
+    float warmSkyMix = clamp(twilightFactor * 0.92 + goldenFactor * 0.38, 0.0, 0.94);
+    horizon = mix(horizon, sunsetHorizon, warmSkyMix);
+    zenith = mix(zenith, ozoneZenith, twilightFactor * 0.66);
+
+    // Storm darkening
+    float overcast = clamp(sky.rain * 0.84 + sky.thunder * 0.30, 0.0, 1.0);
+    vec3 stormZenith = vec3(0.095, 0.12, 0.17) * mix(0.14, 1.0, dayFactor);
+    vec3 stormHorizon = vec3(0.17, 0.20, 0.26) * mix(0.16, 1.0, dayFactor);
+    zenith = mix(zenith, stormZenith, overcast * 0.82);
+    horizon = mix(horizon, stormHorizon, overcast * 0.80);
+
+    vec3 skyCol = mix(zenith, horizon, horizonBlend);
+    float sunRimGlow = pow(sunAzimuth, 2.8) * lowHorizon * (twilightFactor * 0.68 + goldenFactor * 0.36) * (1.0 - overcast * 0.85);
+    skyCol += vec3(1.18, 0.50, 0.16) * sunRimGlow;
+
+    vec3 lowerGround = mix(horizon * 0.44, zenith * 0.35, 0.30);
+    skyCol = mix(lowerGround, skyCol, smoothstep(-0.24, 0.015, dir.y));
+
+    // --- KASTEN-YOUNG SOLAR TRANSMITTANCE + DUAL-LOBE MIE AUREOLE & SQUARE SUN ---
+    float mieCoeff = mix(0.068, 0.142, aridFactor * 0.6 + humidFactor * 0.4);
+    vec3 sunTrans = os_atmosphereTransmittance(max(sunEl, 0.012), mieCoeff);
+    float sunDot = dot(dir, sunDir);
+    float sunCos = max(sunDot, 0.0);
+    float sunVis = smoothstep(-0.08, 0.03, sunEl) * (1.0 - overcast * 0.90);
+
+    vec3 sunTint = mix(
+        vec3(1.22, 0.48, 0.14),
+        max(sunTrans * 1.58, vec3(0.46, 0.32, 0.18)),
+        smoothstep(0.0, 0.26, max(sunEl, 0.0))
+    );
+
+    // Dual-lobe Henyey-Greenstein Mie solar aureole (broad atmospheric glow + tight forward corona)
+    float broadAureole = os_hgPhase(sunCos, 0.74) * 0.36;
+    float tightCorona = os_hgPhase(sunCos, 0.95) * 0.18 + pow(sunCos, 68.0) * 0.48;
+    skyCol += sunTint * (broadAureole + tightCorona) * sunVis;
+
+    if (sunDot > 0.2 && sunVis > 0.001) {
+        vec3 sunRight;
+        vec3 sunUp;
+        os_celestialBasis(sunDir, sunRight, sunUp);
+        vec2 sunProj = vec2(dot(dir, sunRight), dot(dir, sunUp)) / max(sunDot, 1e-4);
+
+        const float SUN_HALF = 0.046;
+        const float SUN_BEVEL = 0.0055;
+        float sunSdf = os_roundedSquareSdf(sunProj, SUN_HALF, SUN_BEVEL);
+        float sunDisc = 1.0 - smoothstep(-0.0032, 0.0032, sunSdf);
+        float innerCore = 1.0 - smoothstep(-0.004, 0.004, os_roundedSquareSdf(sunProj, SUN_HALF * 0.72, SUN_BEVEL * 0.6));
+        vec2 sunPx = floor((sunProj / SUN_HALF) * 4.0);
+        float gran = 0.94 + 0.06 * os_starHash(vec3(sunPx, 7.0));
+        vec3 discColor = mix(sunTint * 7.8, mix(sunTint, vec3(1.0, 0.98, 0.92), 0.55) * 12.5, innerCore) * gran;
+
+        float squareHalo = exp(-max(sunSdf, 0.0) * 32.0) * 0.95;
+        skyCol += (discColor * sunDisc + sunTint * squareHalo) * sunVis;
+    }
+
+    // --- CRATERED SQUARE MOON & LUNAR HALO ---
+    vec3 moonDir = normalize(vec3(-sunDir.x, max(-sunDir.y, 0.10), -sunDir.z));
+    float moonDot = dot(dir, moonDir);
+    float moonCos = max(moonDot, 0.0);
+    float nightVis = (1.0 - smoothstep(-0.10, 0.14, sunEl)) * (1.0 - overcast * 0.86);
+
+    if (nightVis > 0.005) {
+        float lunarHalo = pow(moonCos, 36.0) * 0.11 + pow(moonCos, 160.0) * 0.20;
+        float ring22 = exp(-pow((moonCos - 0.927) * 26.0, 2.0)) * 0.018;
+        skyCol += vec3(0.38, 0.54, 0.88) * (lunarHalo + ring22) * nightVis;
+
+        if (moonDot > 0.2) {
+            vec3 moonRight;
+            vec3 moonUp;
+            os_celestialBasis(moonDir, moonRight, moonUp);
+            vec2 moonProj = vec2(dot(dir, moonRight), dot(dir, moonUp)) / max(moonDot, 1e-4);
+
+            const float MOON_HALF = 0.038;
+            const float MOON_BEVEL = 0.0045;
+            float moonSdf = os_roundedSquareSdf(moonProj, MOON_HALF, MOON_BEVEL);
+            float moonDisc = 1.0 - smoothstep(-0.0028, 0.0028, moonSdf);
+
+            if (moonDisc > 0.001) {
+                vec2 mUv = moonProj / MOON_HALF;
+                vec2 mPx = floor((mUv * 0.5 + 0.5) * 8.0) / 8.0;
+                float mare1 = os_skyNoise3(vec3(mPx * 3.6 + vec2(1.7, 4.2), 2.0));
+                float mare2 = os_skyNoise3(vec3(mPx * 7.2 + vec2(5.1, 1.3), 5.0));
+                float mariaMask = smoothstep(0.42, 0.72, mare1 * 0.70 + mare2 * 0.30);
+                float edgeRim = smoothstep(0.62, 0.98, max(abs(mUv.x), abs(mUv.y)));
+
+                vec3 highlandCol = vec3(0.86, 0.92, 1.00);
+                vec3 mariaCol = vec3(0.44, 0.52, 0.70);
+                vec3 moonAlbedo = mix(highlandCol, mariaCol, mariaMask * 0.72) * mix(1.0, 0.82, edgeRim * 0.65);
+
+                skyCol += moonAlbedo * (moonDisc * 2.45 * nightVis);
+            }
+        }
+    }
+
+    // --- FULL-STRENGTH 4-CURTAIN ANIMATED NIGHT AURORA + MILKY WAY + STARFIELD ---
+    if (nightVis > 0.04 && dir.y > 0.03) {
+        float horizonVis = smoothstep(0.03, 0.24, dir.y);
+
+        // Full-strength 4-curtain emerald/cyan/violet-magenta aurora borealis
+        vec3 aurora = os_evaluateAurora(dir, sky.gameTimeSec);
+        skyCol += aurora * nightVis * 1.15;
+
+        // Tilted Milky Way galactic plane
+        vec3 galAxis = normalize(vec3(0.42, 0.58, -0.70));
+        float galDist = abs(dot(dir, galAxis));
+        float galBand = exp(-galDist * 5.2);
+        float galCloud = os_skyNoise3(dir * 5.8 + vec3(2.1, -1.3, 0.7)) * 0.65
+                       + os_skyNoise3(dir * 13.4 + vec3(-0.8, 3.2, 1.9)) * 0.35;
+        float dustRift = smoothstep(0.32, 0.68, os_skyNoise3(dir * 9.5 + vec3(4.0, 1.1, -2.5)));
+        float milkyWay = galBand * smoothstep(0.32, 0.86, galCloud) * (1.0 - dustRift * 0.52 * exp(-galDist * 14.0));
+        vec3 mwCol = mix(vec3(0.024, 0.032, 0.062), vec3(0.056, 0.062, 0.098), galCloud);
+        skyCol += mwCol * (milkyWay * 0.90 * nightVis * horizonVis);
+
+        // Two-layer twinkling starfield
+        vec3 starGrid1 = floor(dir * 290.0);
+        float h1 = os_starHash(starGrid1);
+        float star1 = smoothstep(0.9960, 0.9995, h1);
+        float twinkle1 = 0.62 + 0.38 * sin(sky.gameTimeSec * (2.2 + fract(h1 * 17.3) * 2.2) + h1 * 140.0);
+        float tempPick = fract(h1 * 53.7);
+        vec3 starTint1 = (tempPick < 0.33)
+            ? vec3(0.72, 0.85, 1.00)
+            : (tempPick < 0.72)
+                ? vec3(0.96, 0.98, 1.00)
+                : vec3(1.00, 0.86, 0.66);
+
+        vec3 starGrid2 = floor(dir * 460.0);
+        float h2 = os_starHash(starGrid2);
+        float thresh2 = mix(0.9976, 0.9936, galBand);
+        float star2 = smoothstep(thresh2, 0.9997, h2) * 0.45;
+        float twinkle2 = 0.74 + 0.26 * sin(sky.gameTimeSec * 1.6 + h2 * 88.0);
+        vec3 starTint2 = mix(vec3(0.78, 0.88, 1.0), vec3(1.0, 0.92, 0.80), fract(h2 * 29.1));
+
+        float moonClear = 1.0 - smoothstep(0.996, 0.999, moonCos);
+        skyCol += (starTint1 * star1 * twinkle1 * 0.88 + starTint2 * star2 * twinkle2 * 0.58)
+            * nightVis * horizonVis * moonClear;
+    }
+
+    radiance = max(skyCol, vec3(0.0));
+}

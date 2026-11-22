@@ -1,0 +1,244 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+concurrency:
+  group: hyaloclast-release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    name: Verify Rust, Packs, SDK Contracts & Smoke Harness
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Set up Python 3
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Verify workspace, built-in packs, and proprietary SDK contracts
+        run: |
+          set -euo pipefail
+          cargo test --workspace --locked
+          cargo run --locked -p vsp-cli -- check src/main/resources/builtin-packs/hyaloclast-sunlit-vanilla.vsp --tier 0
+          cargo run --locked -p vsp-cli -- check src/main/resources/builtin-packs/hyaloclast-sunlit-vanilla.vsp --tier 3
+          cargo run --locked -p vsp-cli -- check src/main/resources/builtin-packs/hyaloclast-obsidian-showcase.vsp --tier 0
+          cargo run --locked -p vsp-cli -- check src/main/resources/builtin-packs/hyaloclast-obsidian-showcase.vsp --tier 3
+          cargo run --locked -p vulkanshaders-sdk-bench -- verify --repo-root . --download
+
+      - name: Run smoke harness
+        run: python3 dev/smoke/smoke.py --ci
+
+  natives:
+    name: Build & Strip Native Binaries (${{ matrix.platform_dir }})
+    needs: [verify]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform_dir: linux-x86-64
+            target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            lib_name: libvulkanshaders_core.so
+            cli_name: vsp-cli
+            cross_arm64: false
+          - platform_dir: linux-aarch64
+            target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            lib_name: libvulkanshaders_core.so
+            cli_name: vsp-cli
+            cross_arm64: true
+          - platform_dir: win32-x86-64
+            target: x86_64-pc-windows-msvc
+            os: windows-latest
+            lib_name: vulkanshaders_core.dll
+            cli_name: vsp-cli.exe
+            cross_arm64: false
+          - platform_dir: macos-aarch64
+            target: aarch64-apple-darwin
+            os: macos-14
+            lib_name: libvulkanshaders_core.dylib
+            cli_name: vsp-cli
+            cross_arm64: false
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Install Linux aarch64 cross-compilation toolchain
+        if: matrix.cross_arm64
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu binutils-aarch64-linux-gnu
+
+      - name: Build release native core and vsp-cli
+        shell: bash
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: |
+          set -euo pipefail
+          cargo build --release --locked --target ${{ matrix.target }} -p vulkanshaders-core -p vsp-cli
+
+      - name: Strip and stage release binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC_DIR="target/${{ matrix.target }}/release"
+          OUT_DIR="release-natives/${{ matrix.platform_dir }}"
+          mkdir -p "$OUT_DIR"
+          cp "$SRC_DIR/${{ matrix.lib_name }}" "$OUT_DIR/${{ matrix.lib_name }}"
+          cp "$SRC_DIR/${{ matrix.cli_name }}" "$OUT_DIR/${{ matrix.cli_name }}"
+          if [ "${{ matrix.platform_dir }}" = "linux-x86-64" ]; then
+            strip --strip-unneeded "$OUT_DIR/${{ matrix.lib_name }}"
+            strip --strip-unneeded "$OUT_DIR/${{ matrix.cli_name }}"
+          elif [ "${{ matrix.platform_dir }}" = "linux-aarch64" ]; then
+            aarch64-linux-gnu-strip --strip-unneeded "$OUT_DIR/${{ matrix.lib_name }}"
+            aarch64-linux-gnu-strip --strip-unneeded "$OUT_DIR/${{ matrix.cli_name }}"
+          elif [ "${{ matrix.platform_dir }}" = "macos-aarch64" ]; then
+            strip -x "$OUT_DIR/${{ matrix.lib_name }}"
+            strip -x "$OUT_DIR/${{ matrix.cli_name }}"
+          fi
+
+      - name: Upload platform native artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-native-${{ matrix.platform_dir }}
+          path: release-natives/${{ matrix.platform_dir }}/*
+          retention-days: 7
+
+  package-and-publish:
+    name: Package Fat + Per-Platform Fabric JARs & Publish Release
+    needs: [natives]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download platform native binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-native-*
+          path: downloaded-natives
+          merge-multiple: false
+
+      - name: Stage prebuilt-natives and standalone CLI binaries
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for platform in linux-x86-64 linux-aarch64 win32-x86-64 macos-aarch64; do
+            SRC="downloaded-natives/release-native-$platform"
+            mkdir -p "prebuilt-natives/$platform"
+            for f in "$SRC"/*; do
+              base="$(basename "$f")"
+              case "$base" in
+                vsp-cli*)
+                  cp "$f" "dist/${platform}-${base}"
+                  ;;
+                *)
+                  cp "$f" "prebuilt-natives/$platform/$base"
+                  cp "$f" "dist/${platform}-${base}"
+                  ;;
+              esac
+            done
+          done
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build sibling Pyroclast compileOnly dependency
+        run: |
+          set -euo pipefail
+          rm -rf ../Pyroclast
+          git clone --depth 1 https://github.com/sysv86/Pyroclast.git ../Pyroclast
+          (cd ../Pyroclast && chmod +x gradlew && ./gradlew jar --no-daemon)
+
+      - name: Run Kotlin unit tests and build fat Fabric JAR
+        run: |
+          set -euo pipefail
+          ./gradlew test build -Pvs.cargo=false -Pvs.distribution=modrinth -Pvs.nativePlatform=all --no-daemon
+          cp build/libs/*.jar dist/
+
+      - name: Build per-platform Fabric JARs
+        run: |
+          set -euo pipefail
+          for platform in linux-x86-64 linux-aarch64 win32-x86-64 macos-aarch64; do
+            ./gradlew jar -Pvs.cargo=false -Pvs.distribution=modrinth -Pvs.nativePlatform="$platform" --no-daemon
+            cp build/libs/*-"$platform"-*.jar dist/
+          done
+
+      - name: Generate SHA-256 checksums
+        run: |
+          set -euo pipefail
+          (cd dist && sha256sum * > SHA256SUMS.txt)
+
+      - name: Sign release artifacts
+        env:
+          GPG_KEY: ${{ secrets.SIGNING_GPG_PRIVATE_KEY }}
+          GPG_PASS: ${{ secrets.SIGNING_GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          set +x
+          if [ -z "$GPG_KEY" ]; then
+            echo "SIGNING_GPG_PRIVATE_KEY secret is not configured; skipping signature step." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          GNUPGHOME="$(mktemp -d)"
+          export GNUPGHOME
+          chmod 700 "$GNUPGHOME"
+          printf '%s' "$GPG_KEY" | gpg --batch --import --quiet
+          for f in dist/*; do
+            case "$f" in
+              *.asc) continue ;;
+            esac
+            if [ -n "$GPG_PASS" ]; then
+              printf '%s' "$GPG_PASS" | gpg --batch --yes --pinentry-mode loopback --passphrase-fd 0 --armor --detach-sign "$f"
+            else
+              gpg --batch --yes --armor --detach-sign "$f"
+            fi
+          done
+          rm -rf "$GNUPGHOME"
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

@@ -1,0 +1,964 @@
+#version 460
+#extension GL_EXT_ray_query : require
+
+#include <vulkanshaders/v1/common.vsl>
+#include <vulkanshaders/v1/lighting.vsl>
+#include <vulkanshaders/v1/restir.vsl>
+
+#if VS_ACTIVE_RENDER_TIER >= 2
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 1) uniform sampler2D gAlbedo;
+layout(set = 0, binding = 2) uniform sampler2D gNormal;
+layout(set = 0, binding = 3) uniform sampler2D gPbr;
+layout(set = 0, binding = 4) uniform sampler2D gDepth;
+layout(set = 0, binding = 5, rgba16f) uniform writeonly image2D outHdrRadiance;
+layout(set = 0, binding = 6) uniform sampler2D gVelocity;
+layout(set = 0, binding = 7) uniform sampler2D uVolumetricFog;
+layout(set = 0, binding = 8, rgba16f) uniform writeonly image2D outSharpRadiance;
+layout(set = 0, binding = 9) uniform sampler2D uDhAlbedo;
+layout(set = 0, binding = 10) uniform sampler2D uDhNormal;
+layout(set = 0, binding = 11) uniform sampler2D uDhMaterial;
+layout(set = 0, binding = 12) uniform sampler2D uDhDepth;
+layout(std140, set = 0, binding = 13) uniform DhFrameUBO {
+    mat4 dhInvViewProj;
+    float fadeStart;
+    float fadeEnd;
+    float dhFarClip;
+    uint dhActive;
+} uDh;
+
+layout(set = 1, binding = 0) uniform accelerationStructureEXT topLevelAS;
+layout(set = 1, binding = 1, std430) readonly buffer InstanceMetaSSBO {
+    VsInstanceMeta instances[];
+} uInstanceMeta;
+layout(set = 1, binding = 2, std140) uniform SharcConfigUBO {
+    SharcConfig cfg;
+} uSharc;
+layout(set = 1, binding = 3, std430) readonly buffer EmissiveLightSSBO {
+    uvec4 header;
+    VsEmissiveLight lights[];
+} uEmissiveLights;
+layout(set = 1, binding = 4, std430) buffer RestirReservoirSSBO {
+    VsRestirReservoir cells[];
+} uReservoirs;
+layout(set = 2, binding = 0) uniform sampler2D uBindlessTextures[];
+
+void vs_dispatch_hook_surface(inout VsSurface s, in uint flags, in uint bounce);
+void vs_dispatch_hook_direct_light(in VsSurface s, in vec3 viewDir, in vec3 lightDir, inout vec3 brdf);
+void vs_dispatch_hook_block_light(inout vec3 radiance, in uint lightKind, in float dist);
+void vs_dispatch_hook_sky(inout vec3 radiance, in vec3 dir, in VsSkyState sky);
+vec4 vs_dispatch_hook_clouds(in vec3 dir, in vec3 cameraPos, in VsSkyState sky);
+void vs_dispatch_hook_water_waves(inout float strength, inout float speed, inout float scale);
+void vs_dispatch_hook_water_surface(inout VsSurface s, in vec3 worldPos, in float waveHeight);
+void vs_dispatch_hook_fog(in float dist, in vec3 dir, inout vec3 scatter, inout vec3 transmittance);
+
+uint loadVertexMaterialFlagsFast(VsInstanceMeta meta, uint vertIdx) {
+    uint64_t baseAddr = vsPackU64(meta.vertexBda);
+    if (baseAddr == 0ul) {
+        return meta.materialFlags;
+    }
+    if (meta.layerOrdinal == 4u) {
+        uint stride = max(meta.vertexStride, 28u);
+        VsRawUintBuf vb = VsRawUintBuf(baseAddr + uint64_t(vertIdx) * uint64_t(stride));
+        uint vertexFlags = (vb.data[6] >> 16u) & 0x7Fu;
+        return vertexFlags != 0u ? vertexFlags : meta.materialFlags;
+    }
+    if (meta.layerOrdinal == 3u || meta.layerOrdinal == 5u) {
+        return 0u;
+    }
+    if (meta.vertexStride < 40u || meta.layerOrdinal >= 3u) {
+        return meta.materialFlags;
+    }
+    VsRawUintBuf vb = VsRawUintBuf(baseAddr + uint64_t(vertIdx) * uint64_t(meta.vertexStride));
+    uint vertexFlags = (vb.data[7] >> 24u) & 0x7Fu;
+    return vertexFlags != 0u ? vertexFlags : meta.materialFlags;
+}
+
+const uint SKIP_WATER = 0u;
+const uint WATER_ONLY = 1u;
+const uint INCLUDE_WATER = 2u;
+
+#ifdef VS_HIGH_END_GPU
+const float VS_RQ_SUN_SHADOW_DIST = 320.0;
+const float VS_RQ_SECONDARY_SUN_DIST = 256.0;
+const float VS_RQ_GI_DIST = 128.0;
+const float VS_RQ_REFLECTION_DIST = 256.0;
+const float VS_RQ_GLASS_DIST = 192.0;
+const uint VS_RQ_RESTIR_CANDIDATES = 16u;
+#else
+const float VS_RQ_SUN_SHADOW_DIST = 196.0;
+const float VS_RQ_SECONDARY_SUN_DIST = 192.0;
+const float VS_RQ_GI_DIST = 64.0;
+const float VS_RQ_REFLECTION_DIST = 128.0;
+const float VS_RQ_GLASS_DIST = 96.0;
+const uint VS_RQ_RESTIR_CANDIDATES = 8u;
+#endif
+
+bool evaluateCandidateAlpha(rayQueryEXT rq, uint waterMode, bool skipGlass) {
+    uint instIdx = rayQueryGetIntersectionInstanceCustomIndexEXT(rq, false);
+    if (instIdx >= uInstanceMeta.instances.length()) {
+        return waterMode != WATER_ONLY;
+    }
+    VsInstanceMeta meta = uInstanceMeta.instances[instIdx];
+    if (meta.layerOrdinal == 0u || vsPackU64(meta.vertexBda) == 0ul) {
+        return waterMode != WATER_ONLY;
+    }
+
+    uint primId = rayQueryGetIntersectionPrimitiveIndexEXT(rq, false);
+    uvec3 idx = vsLoadTriangleIndices(meta, primId);
+
+    uint matFlags0 = loadVertexMaterialFlagsFast(meta, idx.x);
+    bool water = vsIsWater(matFlags0);
+    if (water || waterMode == WATER_ONLY) {
+        return water && waterMode != SKIP_WATER;
+    }
+    if (meta.layerOrdinal == 4u) {
+        return true;
+    }
+
+    vec2 bary = rayQueryGetIntersectionBarycentricsEXT(rq, false);
+    vec2 uv0, uv1, uv2;
+    vec4 c0, c1, c2;
+    uint mf0, mf1, mf2;
+    vsLoadVertexAlphaOnly(meta, idx.x, uv0, c0, mf0);
+    vsLoadVertexAlphaOnly(meta, idx.y, uv1, c1, mf1);
+    vsLoadVertexAlphaOnly(meta, idx.z, uv2, c2, mf2);
+
+    float w0 = 1.0 - bary.x - bary.y;
+    vec2 hitUv = uv0 * w0 + uv1 * bary.x + uv2 * bary.y;
+    vec4 hitColor = c0 * w0 + c1 * bary.x + c2 * bary.y;
+
+    float alpha = textureLod(uBindlessTextures[nonuniformEXT(meta.bindlessAlbedoSlot)], hitUv, 0.0).a * hitColor.a;
+    uint materialId = (matFlags0 >> 3u) & 15u;
+    bool isGlass = (materialId == 7u) || (meta.layerOrdinal == 2u && alpha < 0.95);
+    if (isGlass) {
+        if (skipGlass) {
+            return false;
+        }
+        return alpha > 0.02;
+    }
+    return alpha >= 0.5;
+}
+
+bool traceVisibilityRay(vec3 origin, vec3 dir, float tMin, float tMax) {
+    rayQueryEXT rq;
+    rayQueryInitializeEXT(
+        rq,
+        topLevelAS,
+        gl_RayFlagsTerminateOnFirstHitEXT,
+        0xF7,
+        origin,
+        tMin,
+        dir,
+        tMax
+    );
+    while (rayQueryProceedEXT(rq)) {
+        if (rayQueryGetIntersectionTypeEXT(rq, false) == gl_RayQueryCandidateIntersectionTriangleEXT) {
+            if (evaluateCandidateAlpha(rq, SKIP_WATER, true)) {
+                rayQueryConfirmIntersectionEXT(rq);
+            }
+        }
+    }
+    return rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionNoneEXT;
+}
+
+vec3 traceSunTransmittance(vec3 origin, vec3 dir, float tMin, float tMax) {
+    rayQueryEXT rq;
+    rayQueryInitializeEXT(
+        rq,
+        topLevelAS,
+        gl_RayFlagsTerminateOnFirstHitEXT,
+        0xF7,
+        origin,
+        tMin,
+        dir,
+        tMax
+    );
+    vec3 transmittance = vec3(1.0);
+    while (rayQueryProceedEXT(rq)) {
+        if (rayQueryGetIntersectionTypeEXT(rq, false) == gl_RayQueryCandidateIntersectionTriangleEXT) {
+            uint instIdx = rayQueryGetIntersectionInstanceCustomIndexEXT(rq, false);
+            if (instIdx >= uInstanceMeta.instances.length()) {
+                rayQueryConfirmIntersectionEXT(rq);
+                rayQueryTerminateEXT(rq);
+                return vec3(0.0);
+            }
+            VsInstanceMeta meta = uInstanceMeta.instances[instIdx];
+            if (meta.layerOrdinal == 0u || vsPackU64(meta.vertexBda) == 0ul) {
+                rayQueryConfirmIntersectionEXT(rq);
+                rayQueryTerminateEXT(rq);
+                return vec3(0.0);
+            }
+            uint primId = rayQueryGetIntersectionPrimitiveIndexEXT(rq, false);
+            uvec3 idx = vsLoadTriangleIndices(meta, primId);
+            uint matFlags0 = loadVertexMaterialFlagsFast(meta, idx.x);
+            if (vsIsWater(matFlags0)) {
+                continue;
+            }
+            if (meta.layerOrdinal == 4u) {
+                rayQueryConfirmIntersectionEXT(rq);
+                rayQueryTerminateEXT(rq);
+                return vec3(0.0);
+            }
+            vec2 bary = rayQueryGetIntersectionBarycentricsEXT(rq, false);
+            vec2 uv0, uv1, uv2;
+            vec4 c0, c1, c2;
+            uint mf0, mf1, mf2;
+            vsLoadVertexAlphaOnly(meta, idx.x, uv0, c0, mf0);
+            vsLoadVertexAlphaOnly(meta, idx.y, uv1, c1, mf1);
+            vsLoadVertexAlphaOnly(meta, idx.z, uv2, c2, mf2);
+            float w0 = 1.0 - bary.x - bary.y;
+            vec2 hitUv = uv0 * w0 + uv1 * bary.x + uv2 * bary.y;
+            vec4 hitColor = c0 * w0 + c1 * bary.x + c2 * bary.y;
+            vec4 texel = textureLod(uBindlessTextures[nonuniformEXT(meta.bindlessAlbedoSlot)], hitUv, 0.0) * hitColor;
+            float alpha = texel.a;
+            uint materialId = (matFlags0 >> 3u) & 15u;
+            bool isGlass = (materialId == 7u) || (meta.layerOrdinal == 2u && alpha < 0.95);
+            if (isGlass) {
+                if (alpha > 0.02) {
+                    vec3 glassTint = pow(max(texel.rgb, vec3(0.0)), vec3(2.2));
+                    transmittance *= mix(vec3(1.0), glassTint, clamp(alpha * 0.82, 0.12, 0.82));
+                }
+                continue;
+            }
+            if (alpha >= 0.5) {
+                rayQueryConfirmIntersectionEXT(rq);
+                rayQueryTerminateEXT(rq);
+                return vec3(0.0);
+            }
+        }
+    }
+    if (rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionNoneEXT) {
+        return vec3(0.0);
+    }
+    return transmittance;
+}
+
+vec3 directLocalLight(VsEmissiveLight light, VsSurface s, vec3 geomN, vec3 p, vec3 V) {
+    vec3 radiance = vsEmissiveRadiance(light, s, p, V, uSharc.cfg.cameraPosition.xyz) * clamp(VS_PARAM_TORCH_INTENSITY, 0.3, 2.5);
+    if (dot(radiance, radiance) < 1e-10) return vec3(0.0);
+    vec3 shadowOrigin = p + geomN * 0.015;
+    vec3 shadowDir;
+    float end = vsEmissiveShadowRange(light, shadowOrigin, shadowDir);
+    return end <= 0.005 || traceVisibilityRay(shadowOrigin, shadowDir, 0.005, end)
+        ? radiance : vec3(0.0);
+}
+
+bool traceClosestHitSurface(
+    vec3 origin,
+    vec3 dir,
+    float tMin,
+    float tMax,
+    uint waterMode,
+    bool skipGlass,
+    out float outHitT,
+    out vec3 outHitPosRel,
+    out VsSurface outSurface,
+    out vec2 outLight,
+    out vec3 outWaterNormal
+) {
+    outWaterNormal = vec3(0.0);
+    rayQueryEXT rq;
+    rayQueryInitializeEXT(
+        rq,
+        topLevelAS,
+        gl_RayFlagsNoneEXT,
+        waterMode == WATER_ONLY ? 0x02 : 0xF7,
+        origin,
+        tMin,
+        dir,
+        tMax
+    );
+    while (rayQueryProceedEXT(rq)) {
+        if (rayQueryGetIntersectionTypeEXT(rq, false) == gl_RayQueryCandidateIntersectionTriangleEXT) {
+            if (evaluateCandidateAlpha(rq, waterMode, skipGlass)) {
+                rayQueryConfirmIntersectionEXT(rq);
+            }
+        }
+    }
+
+    if (rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionNoneEXT) {
+        outHitT = tMax;
+        outHitPosRel = origin + dir * tMax;
+        outLight = vec2(1.0, 0.0);
+        return false;
+    }
+
+    outHitT = rayQueryGetIntersectionTEXT(rq, true);
+    outHitPosRel = origin + dir * outHitT;
+    outLight = vec2(1.0, 0.0);
+
+    uint instIdx = rayQueryGetIntersectionInstanceCustomIndexEXT(rq, true);
+    uint primId = rayQueryGetIntersectionPrimitiveIndexEXT(rq, true);
+    vec2 bary = rayQueryGetIntersectionBarycentricsEXT(rq, true);
+
+    outSurface = VsSurface(vec3(0.5), -dir, 0.85, 0.0, 0.0, 1.0, 0.0, 0.04);
+    if (instIdx >= uInstanceMeta.instances.length()) {
+        return true;
+    }
+
+    VsInstanceMeta meta = uInstanceMeta.instances[instIdx];
+    if (vsPackU64(meta.vertexBda) == 0ul) {
+        return true;
+    }
+
+    uvec3 idx = vsLoadTriangleIndices(meta, primId);
+    VsDecodedVertex v0 = vsLoadVertex(meta, idx.x);
+    VsDecodedVertex v1 = vsLoadVertex(meta, idx.y);
+    VsDecodedVertex v2 = vsLoadVertex(meta, idx.z);
+
+    float w0 = 1.0 - bary.x - bary.y;
+    vec2 hitUv = v0.uv0 * w0 + v1.uv0 * bary.x + v2.uv0 * bary.y;
+    vec4 hitColor = v0.color * w0 + v1.color * bary.x + v2.color * bary.y;
+
+    mat4x3 o2w = rayQueryGetIntersectionObjectToWorldEXT(rq, true);
+    vec3 geomN = normalize(mat3(o2w) * cross(v1.pos - v0.pos, v2.pos - v0.pos));
+    if (dot(geomN, dir) > 0.0) {
+        geomN = -geomN;
+    }
+    vec3 interpN = normalize(mat3(o2w) * (v0.normal * w0 + v1.normal * bary.x + v2.normal * bary.y));
+    if ((meta.layerOrdinal != 4u && meta.vertexStride < 36u) || dot(interpN, geomN) < 0.0) {
+        interpN = geomN;
+    }
+    vec4 interpT = v0.tangent * w0 + v1.tangent * bary.x + v2.tangent * bary.y;
+    vec3 rawInterpT = mat3(o2w) * interpT.xyz;
+    interpT.xyz = dot(rawInterpT, rawInterpT) > 1e-8 ? normalize(rawInterpT) : vec3(0.0);
+
+    uint flags = v0.materialFlags;
+    bool water = vsIsWater(flags);
+    if (water) outWaterNormal = geomN;
+    vec4 texel;
+    if (meta.layerOrdinal == 4u) {
+        vec4 lodTint = unpackUnorm4x8(meta.bindlessNormalSlot != 0u ? meta.bindlessNormalSlot : 0xFFFFFFFFu);
+        texel = hitColor * lodTint;
+    } else if (water) {
+        texel = hitColor;
+    } else {
+        texel = textureLod(uBindlessTextures[nonuniformEXT(meta.bindlessAlbedoSlot)], hitUv, 0.0) * hitColor;
+    }
+    vec3 albedoLin = pow(max(texel.rgb, vec3(0.0)), vec3(2.2));
+    outLight = clamp((vec2(v0.uv2.yx) * w0 + vec2(v1.uv2.yx) * bary.x
+        + vec2(v2.uv2.yx) * bary.y) / 240.0, 0.0, 1.0);
+
+    outSurface.albedo = albedoLin;
+    outSurface.normal = interpN;
+    outSurface.roughness = water ? 0.05 : 0.78;
+    outSurface.metallic = 0.0;
+    outSurface.emission = !water && (flags & 4u) != 0u ? 1.45 : 0.0;
+    outSurface.ao = 1.0;
+    outSurface.subsurface = ((flags & 1u) != 0u) ? 0.56 : 0.0;
+    outSurface.f0 = water ? 0.02 : 0.04;
+
+    // Run surface hook BEFORE LabPBR so authored LabPBR _s textures are never overwritten.
+    if (!water) vs_dispatch_hook_surface(outSurface, flags, 1u);
+
+    bool hasNorm = !water && meta.layerOrdinal != 4u && meta.bindlessNormalSlot != 0u;
+    bool hasSpec = !water && meta.layerOrdinal != 4u && meta.bindlessSpecularSlot != 0u;
+    if (hasNorm || hasSpec) {
+        float mipLod = clamp(log2(max(outHitT * 0.08, 1.0)), 0.0, 3.0);
+        vec4 nSample = hasNorm ? textureLod(uBindlessTextures[nonuniformEXT(meta.bindlessNormalSlot)], hitUv, mipLod) : vec4(0.5, 0.5, 1.0, 1.0);
+        vec4 sSample = hasSpec ? textureLod(uBindlessTextures[nonuniformEXT(meta.bindlessSpecularSlot)], hitUv, mipLod) : vec4(0.0, 0.04, 0.0, 1.0);
+        vsApplyLabPbr(nSample, sSample, interpN, interpT, hasNorm, hasSpec, outSurface);
+    }
+
+    return true;
+}
+
+vec3 reconstructCameraRelativePos(vec2 uv, float depth) {
+    vec4 ndc = vec4(uv * 2.0 - 1.0, depth, 1.0);
+    vec4 viewPos = vsWorld.invProj * ndc;
+    float w = abs(viewPos.w) > 1e-6 ? viewPos.w : (viewPos.w >= 0.0 ? 1e-6 : -1e-6);
+    viewPos /= w;
+    return (vsWorld.invView * vec4(viewPos.xyz, 1.0)).xyz;
+}
+
+vec3 reconstructDhCameraRelativePos(vec2 uv, float depth) {
+    vec4 ndc = vec4(uv * 2.0 - 1.0, depth, 1.0);
+    vec4 worldPos = uDh.dhInvViewProj * ndc;
+    float w = abs(worldPos.w) > 1e-6 ? worldPos.w : (worldPos.w >= 0.0 ? 1e-6 : -1e-6);
+    return worldPos.xyz / w;
+}
+
+vec3 shadeSecondaryHit(
+    ivec2 pixel,
+    vec3 hitPosRel,
+    vec3 rayDir,
+    VsSurface hitSurf,
+    vec2 hitLight,
+    vec3 sunDir,
+    vec3 directColor,
+    VsSkyState skyState,
+    bool useCache
+) {
+    vec3 hitWorldAbs = hitPosRel + uSharc.cfg.cameraPosition.xyz;
+    vec3 cachedRad = vec3(0.0);
+    float cachedWeight = 0.0;
+    bool hasCached = useCache && sharcResolveLookup(uSharc.cfg, hitWorldAbs, hitSurf.normal, cachedRad, cachedWeight);
+
+    uint downsample = max(uSharc.cfg.updateDownsampleFactor, 1u);
+    bool isUpdatePixel = (((uint(pixel.x) * 3u + uint(pixel.y) * 5u + uint(vsWorld.frameIndex)) % downsample) == 0u);
+    if (hasCached && cachedWeight >= 12.0 && !isUpdatePixel) {
+        return min(cachedRad, vec3(5.0));
+    }
+
+    float hitSkyLight = hitLight.x;
+    float effSkyVis = !useCache && hitSkyLight > 0.02
+        ? max(smoothstep(0.04, 0.85, hitSkyLight), 0.42)
+        : smoothstep(0.04, 0.85, hitSkyLight);
+    float ndotl = max(dot(hitSurf.normal, sunDir), 0.0);
+    float vis = (ndotl > 0.0 && effSkyVis > 0.02 && dot(directColor, directColor) > 1e-6)
+        ? (traceVisibilityRay(hitPosRel + hitSurf.normal * 0.022 + sunDir * 0.004, sunDir, 0.006, VS_RQ_SECONDARY_SUN_DIST) ? 1.0 : 0.0)
+        : 0.0;
+
+    vec3 brdf = vec3(0.0);
+    if (vis > 0.0) {
+        brdf = evaluateCookTorrance(hitSurf.albedo, hitSurf.normal, -rayDir, sunDir, hitSurf.roughness, hitSurf.metallic, hitSurf.f0);
+        vs_dispatch_hook_direct_light(hitSurf, -rayDir, sunDir, brdf);
+    }
+
+    vec3 skyAmb = vec3(0.0);
+    vs_dispatch_hook_sky(skyAmb, hitSurf.normal, skyState);
+
+    vec3 specIbl = vec3(0.0);
+    if (hitSurf.metallic > 0.05 || hitSurf.roughness < 0.60) {
+        vec3 R = reflect(rayDir, hitSurf.normal);
+        vec3 reflSky = vec3(0.0);
+        vs_dispatch_hook_sky(reflSky, R, skyState);
+        float NoV = clamp(dot(hitSurf.normal, -rayDir), 0.0, 1.0);
+        vec3 F0 = mix(vec3(hitSurf.f0), hitSurf.albedo, hitSurf.metallic);
+        vec3 F = F0 + (vec3(1.0) - F0) * pow(1.0 - NoV, 5.0);
+        float gloss = clamp(1.0 - hitSurf.roughness, 0.0, 1.0);
+        specIbl = reflSky * F * (gloss * gloss * 0.50 + hitSurf.metallic * 0.30) * max(effSkyVis, 0.18) * hitSurf.ao;
+    }
+
+    vec3 localBounce = vec3(0.0);
+    if (hitLight.y > 0.02) {
+        float lvl = pow(hitLight.y, 1.45);
+        vec3 bCol = vec3(1.0);
+        vs_dispatch_hook_block_light(bCol, 0u, mix(6.0, 0.4, lvl));
+        localBounce = hitSurf.albedo * bCol * (lvl * 0.72 * clamp(VS_PARAM_TORCH_INTENSITY, 0.3, 2.5));
+    }
+
+    vec3 multiBounce = hasCached ? (hitSurf.albedo * (1.0 - hitSurf.metallic) * cachedRad * 0.35 * hitSurf.ao) : vec3(0.0);
+    vec3 computedRad = brdf * directColor * vis * effSkyVis
+                     + hitSurf.albedo * (1.0 - hitSurf.metallic * 0.85) * skyAmb * 0.24 * max(hitSkyLight, 0.08) * hitSurf.ao
+                     + specIbl
+                     + hitSurf.albedo * hitSurf.emission * 2.0
+                     + localBounce
+                     + multiBounce;
+
+    computedRad = min(computedRad, vec3(5.0));
+    if (useCache && (isUpdatePixel || !hasCached)) {
+        sharcAccumulate(uSharc.cfg, hitWorldAbs, hitSurf.normal, computedRad);
+    }
+    return hasCached ? mix(computedRad, cachedRad, clamp(cachedWeight / 32.0, 0.0, 0.65)) : computedRad;
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(outHdrRadiance);
+    if (pixel.x >= size.x || pixel.y >= size.y) {
+        return;
+    }
+
+    vec2 uv = (vec2(pixel) + 0.5) / vec2(size);
+    float mcDepth = textureLod(gDepth, uv, 0.0).r;
+    float dhDepth = (uDh.dhActive != 0u) ? textureLod(uDhDepth, uv, 0.0).r : 0.0;
+    bool hasMc = mcDepth > 1e-6;
+    bool hasDh = (uDh.dhActive != 0u) && (dhDepth > 1e-6);
+
+    int dimId = vsDimensionId();
+    vec3 sunDir = dot(vsWorld.sunDir, vsWorld.sunDir) > 1e-6
+        ? normalize(vsWorld.sunDir)
+        : normalize(vec3(0.4, 0.85, 0.2));
+    vec3 cameraOrigin = (vsWorld.invView * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+
+    bool isDhPixel = !hasMc && hasDh;
+    vec3 rasterPos = hasMc
+        ? reconstructCameraRelativePos(uv, mcDepth)
+        : (isDhPixel ? reconstructDhCameraRelativePos(uv, dhDepth) : vec3(0.0));
+    float rasterDistance = (hasMc || isDhPixel)
+        ? length(rasterPos - cameraOrigin)
+        : clamp(vsWorld.depthFar, 64.0, 384.0);
+    vec3 rayDir;
+    if ((hasMc || isDhPixel) && rasterDistance > 1e-5) {
+        rayDir = (rasterPos - cameraOrigin) / rasterDistance;
+    } else {
+        vec3 nearPos = reconstructCameraRelativePos(uv, 0.90);
+        vec3 farPos = reconstructCameraRelativePos(uv, 0.25);
+        vec3 rayDelta = farPos - nearPos;
+        rayDir = dot(rayDelta, rayDelta) > 1e-8 ? normalize(rayDelta) : vec3(0.0, 0.0, -1.0);
+    }
+    VsSkyState skyState = VsSkyState(sunDir, vsWorld.rain, vsWorld.thunder, vsWorld.gameTimeSec);
+    bool submerged = vsWorld.eyeInFluid == 1;
+
+    vec4 albedoSample = isDhPixel ? textureLod(uDhAlbedo, uv, 0.0) : textureLod(gAlbedo, uv, 0.0);
+    vec4 normSample = isDhPixel ? textureLod(uDhNormal, uv, 0.0) : textureLod(gNormal, uv, 0.0);
+
+    bool isGbufferWater = (hasMc || isDhPixel) && (normSample.a > 1.0);
+    float waterDistance = rasterDistance;
+    vec2 waterLight = vec2(0.85, 0.0);
+    vec3 waterPosition = rasterPos;
+    vec3 waterNormal = vec3(0.0);
+    VsSurface waterSurface = VsSurface(vec3(0.1), vec3(0.0, 1.0, 0.0), 0.05, 0.0, 0.0, 1.0, 0.0, 0.04);
+    bool isWater = isGbufferWater;
+    if (!isGbufferWater && !isDhPixel) {
+        float maxWaterTrace = submerged ? max(rasterDistance - 0.15, 0.0) : (rasterDistance + 0.04);
+        if (maxWaterTrace > 0.005) {
+            isWater = traceClosestHitSurface(
+                cameraOrigin,
+                rayDir,
+                0.003,
+                maxWaterTrace,
+                WATER_ONLY,
+                true,
+                waterDistance,
+                waterPosition,
+                waterSurface,
+                waterLight,
+                waterNormal
+            );
+        }
+    }
+
+    if (!hasMc && !hasDh && !isWater) {
+        vec3 skyRadiance = vec3(0.0);
+        vs_dispatch_hook_sky(skyRadiance, rayDir, skyState);
+        vec4 clouds = vs_dispatch_hook_clouds(rayDir, uSharc.cfg.cameraPosition.xyz, skyState);
+        skyRadiance = skyRadiance * clouds.a + clouds.rgb;
+
+        float daySky = (dimId == 0) ? smoothstep(-0.10, 0.24, sunDir.y) : 0.0;
+        if (submerged) {
+            skyRadiance = vsWaterTint(vec3(0.0), 1.0, daySky);
+        } else {
+            vec4 skyVolFog = textureLod(uVolumetricFog, uv, 0.0);
+            skyRadiance += clamp(skyVolFog.rgb, vec3(0.0), vec3(1.5)) * 0.65;
+        }
+        imageStore(outHdrRadiance, pixel, vec4(max(skyRadiance, vec3(0.0)), 1.0));
+        imageStore(outSharpRadiance, pixel, vec4(0.0));
+        return;
+    }
+
+    vec4 pbr = isDhPixel ? textureLod(uDhMaterial, uv, 0.0) : textureLod(gPbr, uv, 0.0);
+    bool hasTerrainGbuffer = isDhPixel ? true : (normSample.a > 0.01);
+    bool tracedWaterOnly = isWater && !isGbufferWater;
+
+    vec3 P = tracedWaterOnly ? waterPosition : rasterPos;
+    vec3 V = normalize(cameraOrigin - P);
+    float distToCam = tracedWaterOnly ? waterDistance : rasterDistance;
+
+    vec3 N = tracedWaterOnly ? waterSurface.normal : (hasTerrainGbuffer
+        ? normalize(normSample.xyz * 2.0 - 1.0) : vec3(0.0, 1.0, 0.0));
+    if (isGbufferWater) waterNormal = dot(N, V) >= 0.0 ? N : -N;
+    float rawRoughness = isGbufferWater ? (normSample.a - 1.0) : normSample.a;
+    float roughness = isWater ? 0.05 : (hasTerrainGbuffer ? clamp(rawRoughness, 0.04, 1.0) : 0.74);
+    float metallic = hasTerrainGbuffer && !isWater ? clamp(pbr.r, 0.0, 1.0) : 0.0;
+    float emission = hasTerrainGbuffer && !isWater ? clamp(pbr.g * 4.0, 0.0, 4.0) : 0.0;
+    float skyLight = tracedWaterOnly ? waterLight.x : (hasTerrainGbuffer ? vsUnpackNibbleHi(pbr.b) : 0.85);
+    float blockLight = hasTerrainGbuffer && !isWater ? vsUnpackNibbleLo(pbr.b) : 0.0;
+    float f0Enc = vsUnpackNibbleHi(pbr.a);
+    float f0 = hasTerrainGbuffer && !isWater ? max(0.9 * f0Enc * f0Enc, 0.02) : 0.04;
+    float subsurface = hasTerrainGbuffer && !isWater ? vsUnpackNibbleLo(pbr.a) : 0.0;
+
+    vec3 baseLinear = pow(max(albedoSample.rgb, vec3(0.0)), vec3(2.2));
+    VsSurface s = tracedWaterOnly ? waterSurface : VsSurface(baseLinear, N, roughness, metallic, emission,
+                                       1.0, subsurface, f0);
+    bool isGlass = !isWater && !isDhPixel && hasTerrainGbuffer && s.metallic < 0.05
+        && (albedoSample.a > 0.02 && albedoSample.a < 0.98);
+
+    // Smooth blend in the vanilla-to-DH transition zone when both vanilla and DH geometry exist.
+    if (hasMc && hasDh && !isWater && !isGlass && uDh.fadeEnd > uDh.fadeStart && distToCam > uDh.fadeStart) {
+        float dhBlend = smoothstep(uDh.fadeStart, uDh.fadeEnd, distToCam);
+        vec3 dhAlbedoLin = pow(max(textureLod(uDhAlbedo, uv, 0.0).rgb, vec3(0.0)), vec3(2.2));
+        s.albedo = mix(s.albedo, dhAlbedoLin, dhBlend);
+    }
+
+    vec3 worldApprox = P + uSharc.cfg.cameraPosition.xyz;
+    vec3 geomN = isWater ? waterNormal : N;
+    if (isWater) {
+        s.normal = waterNormal;
+        float waveStrength = 0.35;
+        float waveSpeed = 1.75;
+        float waveScale = 2.1;
+        vs_dispatch_hook_water_waves(waveStrength, waveSpeed, waveScale);
+        float waveHeight = sin(worldApprox.x * waveScale + vsWorld.gameTimeSec * waveSpeed) * waveStrength;
+        vs_dispatch_hook_water_surface(s, worldApprox, waveHeight);
+        s.normal = vsFaceWaterNormal(s.normal, V);
+    } else if (!isGlass && !isDhPixel && dimId == 0 && vsWorld.rain > 0.01) {
+        vsApplyRainWetness(s, worldApprox, skyLight, vsWorld.rain, clamp(VS_PARAM_WETNESS_STRENGTH, 0.0, 1.0));
+    }
+
+    vec2 bnUv = (vec2(pixel & 63) + 0.5) / 64.0 + vec2(
+        float(vsWorld.frameIndex & 63) * 0.61803399,
+        float((vsWorld.frameIndex * 11) & 63) * 0.38196601
+    );
+    vec4 bn = vsSamplePackTexture_blue_noise(bnUv);
+    uint rng = vsPcgHash(uint(pixel.x) * 1973u ^ uint(pixel.y) * 9277u ^ uint(vsWorld.frameIndex) * 26699u);
+
+    // Smooth sunset-to-moonlight cross-fade with zero twilight dead zone; natural moon arc.
+    vec3 moonDir = normalize(-sunDir);
+    float dayFactor = (dimId == 0) ? smoothstep(-0.10, 0.16, sunDir.y) : 0.0;
+    float sunWeight = (dimId == 0) ? smoothstep(-0.08, 0.08, sunDir.y) : 0.0;
+    float moonWeight = (dimId == 0) ? smoothstep(-0.08, 0.08, moonDir.y) : 0.0;
+    vec3 L = (sunWeight >= moonWeight) ? sunDir : moonDir;
+    float sunset = clamp(1.0 - abs(sunDir.y) * 3.6, 0.0, 1.0) * smoothstep(-0.14, 0.08, sunDir.y);
+    float sunIntensity = clamp(VS_PARAM_SUN_INTENSITY, 0.5, 8.0);
+    vec3 dayLightColor = mix(vec3(1.00, 0.95, 0.87), vec3(1.05, 0.58, 0.28), sunset) * (0.58 + sunIntensity * 0.34);
+    vec3 nightLightColor = vec3(0.14, 0.21, 0.38);
+    vec3 directColor = (dimId == 1) ? vec3(0.0)
+        : (dimId == 2) ? vec3(0.32, 0.28, 0.48)
+        : (dayLightColor * sunWeight + nightLightColor * moonWeight) * (1.0 - vsWorld.rain * 0.66);
+
+    float originBias = clamp(0.012 + distToCam * 0.00045, 0.012, 0.12);
+    vec3 rayOrigin = P + geomN * originBias;
+    bool mirrorLike = isWater || isGlass || s.roughness < 0.14;
+    vec3 directDir = mirrorLike ? L : vsSampleSunDisk(L, mix(0.005, 0.014, dayFactor),
+        fract(bn.rg + vec2(vsRandFloat(rng), vsRandFloat(rng))));
+    float directSkyVis = (submerged && !isWater && skyLight > 0.02)
+        ? max(smoothstep(0.05, 0.88, skyLight), 0.38 * max(dayFactor, 0.25))
+        : smoothstep(0.05, 0.88, skyLight);
+    vec3 sunTransmittance = (dot(directColor, directColor) > 1e-6 && directSkyVis > 0.02 && (dot(s.normal, directDir) > 0.0 || s.subsurface > 0.05 || isWater || isGlass))
+        ? (isDhPixel ? vec3(1.0) : traceSunTransmittance(rayOrigin + directDir * 0.004, directDir, 0.004, VS_RQ_SUN_SHADOW_DIST))
+        : vec3(0.0);
+
+    vec3 direct = vec3(0.0);
+    if (dot(sunTransmittance, sunTransmittance) > 1e-8) {
+        vec3 brdf = evaluateCookTorrance(s.albedo, s.normal, V, L, s.roughness, s.metallic, s.f0);
+        vs_dispatch_hook_direct_light(s, V, L, brdf);
+        direct = brdf * 1.35 * directColor * sunTransmittance * directSkyVis;
+    }
+    if (submerged && !isWater && !isGlass && dayFactor > 0.05 && directSkyVis > 0.10) {
+        vec3 causticRgb = vsWaterCausticsRgb(worldApprox, L, vsWorld.gameTimeSec)
+            * exp(-distToCam * 0.08) * max(dot(s.normal, L), 0.0);
+        direct *= (vec3(1.0) + causticRgb * 1.10);
+    }
+
+    vec3 heldRadiance = vec3(0.0);
+    vec3 restirPointRad = vec3(0.0);
+    vec3 opticalLightGlint = vec3(0.0);
+    uint lightCount = isDhPixel ? 0u : min(uEmissiveLights.header.x, 512u);
+    uint firstWorldLight = 0u;
+    if (lightCount > 0u && vsIsHeldLight(uEmissiveLights.lights[0])) {
+        VsEmissiveLight held = uEmissiveLights.lights[0];
+        heldRadiance = isWater
+            ? min(directLocalLight(held, vsWaterGlintSurface(s), geomN, P, V) * 0.32, vec3(0.24))
+            : directLocalLight(held, s, geomN, P, V);
+        firstWorldLight = 1u;
+    }
+    uint worldLights = lightCount - firstWorldLight;
+    if (isWater || isGlass) {
+        // Select top-2 strongest attenuated nearby world lights before tracing shadow rays.
+        VsSurface glintSurf = isWater ? vsWaterGlintSurface(s) : s;
+        uint glintCap = min(worldLights, 12u);
+        uint topIdx0 = 0xFFFFFFFFu;
+        uint topIdx1 = 0xFFFFFFFFu;
+        float topScore0 = 0.0;
+        float topScore1 = 0.0;
+        for (uint gi = 0u; gi < glintCap; ++gi) {
+            uint lIdx = firstWorldLight + gi;
+            VsEmissiveLight wl = uEmissiveLights.lights[lIdx];
+            vec3 d = wl.posRadius.xyz - P;
+            float distSq = dot(d, d);
+            float r = clamp(wl.posRadius.w, 0.5, 48.0);
+            if (distSq < r * r) {
+                float atten = vsEmissiveAttenuation(distSq, r);
+                float score = vsLuminance(wl.colorIntensity.rgb) * wl.colorIntensity.a * atten;
+                if (score > topScore0) {
+                    topScore1 = topScore0;
+                    topIdx1 = topIdx0;
+                    topScore0 = score;
+                    topIdx0 = lIdx;
+                } else if (score > topScore1) {
+                    topScore1 = score;
+                    topIdx1 = lIdx;
+                }
+            }
+        }
+        float glintScale = isWater ? 0.45 : 0.35;
+        vec3 glintClamp = isWater ? vec3(0.45) : vec3(0.40);
+        if (topIdx0 != 0xFFFFFFFFu) {
+            vec3 gRad = directLocalLight(uEmissiveLights.lights[topIdx0], glintSurf, geomN, P, V);
+            opticalLightGlint += min(gRad * glintScale, glintClamp);
+        }
+        if (topIdx1 != 0xFFFFFFFFu) {
+            vec3 gRad = directLocalLight(uEmissiveLights.lights[topIdx1], glintSurf, geomN, P, V);
+            opticalLightGlint += min(gRad * glintScale, glintClamp);
+        }
+    } else if (worldLights <= 4u) {
+        for (uint i = firstWorldLight; i < lightCount; ++i) {
+            restirPointRad += directLocalLight(uEmissiveLights.lights[i], s, geomN, P, V);
+        }
+    } else {
+        VsRestirReservoir r;
+        vsRestirInit(r);
+        uint candCount = min(worldLights, VS_RQ_RESTIR_CANDIDATES);
+        for (uint c = 0u; c < candCount; ++c) {
+            uint lIdx = firstWorldLight + (candCount == worldLights
+                ? c : uint(vsRandFloat(rng) * float(worldLights)));
+            VsEmissiveLight candLight = uEmissiveLights.lights[lIdx];
+            vec3 toL;
+            float distL;
+            vec3 unshadowed;
+            float pHat = vsEvaluateEmissiveTargetPdf(candLight, P, s, V, toL, distL, unshadowed);
+            vsRestirUpdate(r, lIdx, pHat, 1.0 / float(worldLights), vsRandFloat(rng));
+        }
+
+        uint resW = max(uEmissiveLights.header.y, 1u);
+        uint resH = max(uEmissiveLights.header.z, 1u);
+        uint totalCells = resW * resH;
+        uint totalBufLen = uint(uReservoirs.cells.length());
+        bool isFullResGrid = all(equal(uvec2(resW, resH), uvec2(size)));
+        bool isHalfResGrid = all(equal(uvec2(resW, resH), (uvec2(size) + 1u) / 2u));
+        bool hasReservoirGrid = (isFullResGrid || isHalfResGrid) && totalBufLen >= totalCells * 2u;
+        uvec2 curCell = isFullResGrid ? uvec2(pixel) : (uvec2(pixel) / 2u);
+        uint previousFrame = uEmissiveLights.header.w - 1u;
+        uint curBank = (uEmissiveLights.header.w & 1u) * totalCells;
+        uint prevBank = ((uEmissiveLights.header.w ^ 1u) & 1u) * totalCells;
+
+        if (hasReservoirGrid && vsWorld.frameIndex != 0) {
+            vec4 prevClip = vsWorld.prevViewProj * vec4(P + vsWorld.cameraDelta, 1.0);
+            if (prevClip.w > 1e-4) {
+                vec2 prevUv = (prevClip.xy / prevClip.w) * 0.5 + 0.5;
+                if (all(greaterThanEqual(prevUv, vec2(0.0))) && all(lessThan(prevUv, vec2(1.0)))) {
+                    uvec2 prevPx = uvec2(prevUv * vec2(size));
+                    uvec2 prevCell = min(isFullResGrid ? prevPx : (prevPx / 2u), uvec2(resW - 1u, resH - 1u));
+                    uint prevIdx = prevBank + prevCell.y * resW + prevCell.x;
+                    VsRestirReservoir temporalR = uReservoirs.cells[prevIdx];
+                    if (temporalR.selectedLight >= firstWorldLight && temporalR.selectedLight < lightCount && temporalR.M > 0.0 &&
+                        temporalR.ageFlags == vsReservoirTag(uEmissiveLights.lights[temporalR.selectedLight],
+                            uSharc.cfg.cameraPosition.xyz, previousFrame)) {
+                        vec3 prevRelPos = temporalR.hitPos - vsWorld.cameraDelta;
+                        if (length(prevRelPos - P) < max(0.85, distToCam * 0.08)) {
+                            vec3 tL; float dL; vec3 uC;
+                            float tPdf = vsEvaluateEmissiveTargetPdf(
+                                uEmissiveLights.lights[temporalR.selectedLight],
+                                P, s, V, tL, dL, uC
+                            );
+                            vsRestirCombine(r, temporalR, tPdf, 16.0, vsRandFloat(rng));
+                        }
+                    }
+                }
+            }
+
+            ivec2 jitter = ivec2(int(vsRandFloat(rng) * 5.0) - 2, int(vsRandFloat(rng) * 5.0) - 2);
+            uvec2 neighborCell = uvec2(clamp(ivec2(curCell) + jitter, ivec2(0), ivec2(int(resW) - 1, int(resH) - 1)));
+            uint neighborIdx = prevBank + neighborCell.y * resW + neighborCell.x;
+            VsRestirReservoir spatialR = uReservoirs.cells[neighborIdx];
+            if (spatialR.selectedLight >= firstWorldLight && spatialR.selectedLight < lightCount && spatialR.M > 0.0 &&
+                spatialR.ageFlags == vsReservoirTag(uEmissiveLights.lights[spatialR.selectedLight],
+                    uSharc.cfg.cameraPosition.xyz, previousFrame)) {
+                vec3 neighborRelPos = spatialR.hitPos - vsWorld.cameraDelta;
+                if (length(neighborRelPos - P) < max(1.25, distToCam * 0.10)) {
+                    vec3 sL; float sdL; vec3 suC;
+                    float sPdf = vsEvaluateEmissiveTargetPdf(
+                        uEmissiveLights.lights[spatialR.selectedLight],
+                        P, s, V, sL, sdL, suC
+                    );
+                    vsRestirCombine(r, spatialR, sPdf, 8.0, vsRandFloat(rng));
+                }
+            }
+        }
+
+        if (r.selectedLight < lightCount) {
+            VsEmissiveLight chosen = uEmissiveLights.lights[r.selectedLight];
+            vec3 directLight = directLocalLight(chosen, s, geomN, P, V);
+            restirPointRad = min(directLight * vsRestirFinalizeWeight(r), vec3(4.5));
+            if (dot(directLight, directLight) <= 0.0) {
+                r.weightSum = 0.0;
+                r.targetPdf = 0.0;
+            }
+        }
+
+        if (hasReservoirGrid && (isFullResGrid || (((pixel.x & 1) == 0) && ((pixel.y & 1) == 0)))) {
+            r.hitPos = P;
+            r.ageFlags = r.selectedLight < lightCount
+                ? vsReservoirTag(uEmissiveLights.lights[r.selectedLight],
+                    uSharc.cfg.cameraPosition.xyz, uEmissiveLights.header.w)
+                : 0u;
+            uReservoirs.cells[curBank + curCell.y * resW + curCell.x] = r;
+        }
+    }
+
+    vec3 indirect = vec3(0.0);
+    float giStrength = clamp(VS_PARAM_GI_BOUNCE_STRENGTH, 0.2, 2.0);
+    if (!isWater && !isGlass && s.metallic < 0.99) {
+        vec2 sampleUv = fract(bn.ba + vec2(vsRandFloat(rng), vsRandFloat(rng)));
+        vec3 giDir = vsSampleCosineHemisphere(s.normal, sampleUv);
+        vec3 indirectLight = vec3(0.0);
+        vs_dispatch_hook_sky(indirectLight, s.normal, skyState);
+        float skyDiffuse = mix(0.18, 0.52, dayFactor);
+        indirectLight *= (dimId == 1) ? 0.22 : (skyDiffuse * skyLight * skyLight);
+        float hitT;
+        vec2 hitLight;
+        vec3 hitPos;
+        vec3 hitWaterNormal;
+        VsSurface hitSurf;
+        if (!isDhPixel && dot(giDir, geomN) > 0.0) {
+            if (traceClosestHitSurface(rayOrigin, giDir, 0.005, VS_RQ_GI_DIST, SKIP_WATER, true,
+                                       hitT, hitPos, hitSurf, hitLight, hitWaterNormal)) {
+                indirectLight += 0.48 * giStrength * shadeSecondaryHit(pixel, hitPos, giDir, hitSurf, hitLight, L, directColor, skyState, true);
+            } else {
+                vec3 skyLightSample = vec3(0.0);
+                vs_dispatch_hook_sky(skyLightSample, giDir, skyState);
+                indirectLight += min(skyLightSample, vec3(1.5)) * (0.30 * skyLight);
+            }
+        }
+        indirect = s.albedo * (1.0 - s.metallic) * indirectLight * s.ao;
+    }
+
+    vec3 specular = vec3(0.0);
+    float NoV = clamp(dot(s.normal, V), 0.0, 1.0);
+    vec3 transmission = vec3(0.0);
+    float waterReflectance = isWater ? vsWaterOptics(-V, s.normal, waterNormal, submerged, transmission) : 0.0;
+    vec3 waterTint = isWater ? vsWaterTint(s.albedo, skyLight, dayFactor) : vec3(0.0);
+    vec3 waterBias = waterNormal * (tracedWaterOnly ? 0.015 : 0.065);
+    float fresnelWeight = pow(1.0 - NoV, 5.0);
+    if (isWater || isGlass || s.roughness < 0.45) {
+        vec3 H = (isWater || isGlass || s.roughness < 0.14) ? s.normal
+            : vsSampleGgxHalfVector(s.normal, s.roughness, vec2(vsRandFloat(rng), vsRandFloat(rng)));
+        vec3 direction = isWater ? vsWaterReflection(-V, H, waterNormal) : reflect(-V, H);
+        if (isWater || isGlass || dot(direction, geomN) > 0.0) {
+            float hitT;
+            vec2 hitLight;
+            vec3 hitPos;
+            vec3 hitWaterNormal;
+            VsSurface hitSurf;
+            vec3 reflected = vec3(0.0);
+            vec3 reflectionOrigin = isWater ? P + waterBias : rayOrigin;
+            bool wetReflection = isWater && submerged;
+            uint waterMode = isWater ? INCLUDE_WATER : SKIP_WATER;
+            if (!isDhPixel && traceClosestHitSurface(reflectionOrigin, direction, 0.005, VS_RQ_REFLECTION_DIST, waterMode, isGlass,
+                                       hitT, hitPos, hitSurf, hitLight, hitWaterNormal)
+                    && dot(hitWaterNormal, hitWaterNormal) < 0.5) {
+                reflected = shadeSecondaryHit(pixel, hitPos, direction, hitSurf, hitLight, L, directColor, skyState, true);
+                if (wetReflection) reflected = vsWaterTransmission(reflected, waterTint, hitT);
+            } else if (wetReflection) {
+                reflected = waterTint;
+            } else {
+                vs_dispatch_hook_sky(reflected, direction, skyState);
+                vec4 reflClouds = vs_dispatch_hook_clouds(direction, uSharc.cfg.cameraPosition.xyz, skyState);
+                reflected = reflected * reflClouds.a + reflClouds.rgb;
+            }
+            vec3 f0Col = mix(vec3(s.f0), s.albedo, s.metallic);
+            vec3 reflectance = isWater ? vec3(waterReflectance) : mix(f0Col, vec3(1.0), fresnelWeight);
+            float specAo = (isWater || isGlass || s.metallic > 0.5) ? 1.0 : s.ao;
+            specular = reflected * reflectance * ((isWater || isGlass) ? 1.0 : (1.0 - s.roughness * 0.68)) * specAo;
+        }
+    }
+
+    vec3 sharpRadiance = s.albedo * s.emission * 2.2 + heldRadiance + (mirrorLike ? direct : vec3(0.0));
+    vec3 diffuseRadiance = indirect + restirPointRad + (mirrorLike ? vec3(0.0) : direct);
+    if (isWater) {
+        vec3 transmitted = waterTint;
+        if (!isDhPixel && waterReflectance < 1.0) {
+            float hitT;
+            vec2 hitLight;
+            vec3 hitPos;
+            vec3 hitWaterNormal;
+            VsSurface hitSurf;
+            if (traceClosestHitSurface(P - waterBias, transmission, 0.005, 64.0, SKIP_WATER, true,
+                                       hitT, hitPos, hitSurf, hitLight, hitWaterNormal)) {
+                transmitted = shadeSecondaryHit(pixel, hitPos, transmission, hitSurf, hitLight, L, directColor, skyState, false);
+                if (!submerged && dayFactor > 0.05 && hitLight.x > 0.15) {
+                    vec3 causticRgb = vsWaterCausticsRgb(hitPos + uSharc.cfg.cameraPosition.xyz, L, vsWorld.gameTimeSec)
+                        * exp(-hitT * 0.18) * max(dot(hitSurf.normal, L), 0.0);
+                    transmitted *= (vec3(1.0) + causticRgb * 0.95);
+                }
+                if (!submerged) transmitted = vsWaterTransmission(transmitted, waterTint, hitT);
+            } else if (submerged) {
+                vs_dispatch_hook_sky(transmitted, transmission, skyState);
+            }
+        }
+        sharpRadiance = direct * 0.14 + specular + heldRadiance + opticalLightGlint + transmitted * (1.0 - waterReflectance);
+        diffuseRadiance = vec3(0.0);
+    } else if (isGlass) {
+        float glassF = clamp(s.f0 + (1.0 - s.f0) * fresnelWeight, 0.04, 0.98);
+        vec3 refractedDir = refract(-V, s.normal, 1.0 / 1.5);
+        vec3 transDir = dot(refractedDir, refractedDir) > 1e-6 ? normalize(refractedDir) : -V;
+        vec3 transmitted = vec3(0.0);
+        float hitT;
+        vec2 hitLight;
+        vec3 hitPos;
+        vec3 hitWaterNormal;
+        VsSurface hitSurf;
+        if (traceClosestHitSurface(P - geomN * 0.025, transDir, 0.005, VS_RQ_GLASS_DIST, SKIP_WATER, true,
+                                   hitT, hitPos, hitSurf, hitLight, hitWaterNormal)) {
+            transmitted = shadeSecondaryHit(pixel, hitPos, transDir, hitSurf, hitLight, L, directColor, skyState, true);
+        } else {
+            vs_dispatch_hook_sky(transmitted, transDir, skyState);
+            vec4 transClouds = vs_dispatch_hook_clouds(transDir, uSharc.cfg.cameraPosition.xyz, skyState);
+            transmitted = transmitted * transClouds.a + transClouds.rgb;
+        }
+        float glassAlpha = (albedoSample.a > 0.02 && albedoSample.a < 0.98) ? albedoSample.a : 0.25;
+        vec3 tint = mix(vec3(1.0), s.albedo, glassAlpha);
+        sharpRadiance = direct * 0.18 + specular + heldRadiance + opticalLightGlint + (1.0 - glassF) * transmitted * tint;
+        diffuseRadiance = vec3(0.0);
+    } else {
+        float torchEnergy = pow(blockLight, 1.40);
+        vec3 blockRadiance = vec3(1.0);
+        vs_dispatch_hook_block_light(blockRadiance, 0u, mix(6.0, 0.4, torchEnergy));
+        diffuseRadiance += s.albedo * blockRadiance * (torchEnergy * 1.05 * clamp(VS_PARAM_TORCH_INTENSITY, 0.3, 2.5))
+            * (isDhPixel ? 1.0 : vsBlockLightFallback(P));
+        if (s.roughness < 0.14) sharpRadiance += specular;
+        else diffuseRadiance += specular;
+    }
+
+    if (submerged) {
+        vec3 tint = vsWaterTint(vec3(0.0), 1.0, dayFactor);
+        sharpRadiance = clamp(vsWaterTransmission(sharpRadiance, tint, distToCam), vec3(0.0), vec3(16.0));
+        diffuseRadiance = clamp(vsWaterTransmission(diffuseRadiance, vec3(0.0), distToCam), vec3(0.0), vec3(8.0));
+    } else {
+        vec2 texelSize = 1.0 / vec2(size);
+        float activeDepth = isDhPixel ? dhDepth : mcDepth;
+        vec4 volFog = vec4(0.0);
+        float fogWeightSum = 0.0;
+        const vec2 fogOffsets[4] = vec2[4](
+            vec2(-0.5, -0.5), vec2(0.5, -0.5), vec2(-0.5, 0.5), vec2(0.5, 0.5)
+        );
+        for (int fi = 0; fi < 4; ++fi) {
+            vec2 fuv = clamp(uv + fogOffsets[fi] * texelSize * 1.5, vec2(0.001), vec2(0.999));
+            float tapDepth = isDhPixel ? textureLod(uDhDepth, fuv, 0.0).r : textureLod(gDepth, fuv, 0.0).r;
+            if (tapDepth <= 1e-6) continue;
+            float relD = abs(activeDepth - tapDepth) / max(activeDepth, 1e-4);
+            float fw = exp(-relD * 12.0);
+            vec4 tapFog = textureLod(uVolumetricFog, fuv, 0.0);
+            tapFog.a = (tapFog.a > 0.0) ? clamp(tapFog.a, 0.34, 1.0) : 1.0;
+            volFog += tapFog * fw;
+            fogWeightSum += fw;
+        }
+        if (fogWeightSum > 1e-4) {
+            volFog /= fogWeightSum;
+        } else {
+            volFog = textureLod(uVolumetricFog, uv, 0.0);
+            volFog.a = (volFog.a > 0.0) ? clamp(volFog.a, 0.34, 1.0) : 1.0;
+        }
+        vec3 fogScatter = clamp(volFog.rgb, vec3(0.0), vec3(2.5));
+        vec3 fogTransmittance = vec3(clamp(volFog.a, 0.34, 1.0));
+        vs_dispatch_hook_fog(distToCam, rayDir, fogScatter, fogTransmittance);
+        sharpRadiance = clamp(sharpRadiance * fogTransmittance + fogScatter, vec3(0.0), vec3(16.0));
+        diffuseRadiance = clamp(diffuseRadiance * fogTransmittance, vec3(0.0), vec3(8.0));
+
+        // Seamless far-horizon atmospheric fade for DH terrain into procedural sky + clouds.
+        if (isDhPixel && uDh.dhFarClip > 16.0) {
+            float farFade = smoothstep(0.78 * uDh.dhFarClip, 0.98 * uDh.dhFarClip, distToCam);
+            if (farFade > 0.001) {
+                vec3 horizonSky = vec3(0.0);
+                vs_dispatch_hook_sky(horizonSky, rayDir, skyState);
+                vec4 horizonClouds = vs_dispatch_hook_clouds(rayDir, uSharc.cfg.cameraPosition.xyz, skyState);
+                horizonSky = horizonSky * horizonClouds.a + horizonClouds.rgb;
+                sharpRadiance = mix(sharpRadiance, horizonSky, farFade);
+                diffuseRadiance *= (1.0 - farFade);
+            }
+        }
+    }
+    imageStore(outSharpRadiance, pixel, vec4(sharpRadiance, isWater ? 1.0 : 0.0));
+    imageStore(outHdrRadiance, pixel, vec4(sharpRadiance + diffuseRadiance, 1.0));
+}
+
+#else
+
+void main() {}
+
+#endif

@@ -1,0 +1,44 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/vsp-compiler",
+    "crates/vulkanshaders-core",
+    "crates/vsp-cli",
+    "crates/vulkanshaders-sdk-bench",
+]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.88"
+authors = ["VulkanShaders Contributors"]
+license = "GPL-3.0-only"
+repository = "https://github.com/vulkanshaders/vulkanshaders"
+
+[workspace.dependencies]
+ash = { version = "0.38", default-features = false, features = ["linked", "loaded", "debug"] }
+gpu-allocator = { version = "0.28", default-features = false, features = ["std", "vulkan"] }
+naga = { version = "30.0", features = ["glsl-in", "wgsl-in", "spv-in", "spv-out"] }
+shaderc = "0.10"
+rspirv = "0.13"
+spirv = "0.4"
+glam = { version = "0.34", features = ["bytemuck"] }
+bytemuck = { version = "1.22", features = ["derive", "min_const_generics"] }
+parking_lot = "0.12.5"
+toml = "1.2"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.140"
+thiserror = "2.0.12"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
+bitflags = "2.10"
+blake3 = "1.8.2"
+clap = { version = "4.5.54", features = ["derive"] }
+libloading = "0.8"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"

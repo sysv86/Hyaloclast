@@ -1,0 +1,150 @@
+#version 460
+
+#include <vulkanshaders/v1/common.vsl>
+#include <vulkanshaders/v1/lighting.vsl>
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 1) uniform sampler2D gAlbedo;
+layout(set = 0, binding = 2) uniform sampler2D gNormal;
+layout(set = 0, binding = 3) uniform sampler2D gDepth;
+layout(set = 0, binding = 4) uniform sampler2D gVelocity;
+layout(set = 0, binding = 5) uniform sampler2D uPrevLitColor;
+layout(set = 0, binding = 6) uniform sampler2D uSsgiHistory;
+layout(set = 0, binding = 7, rgba16f) uniform writeonly image2D outSsgi;
+
+vec3 reconstructCameraRelativePos(vec2 uv, float depth) {
+    vec4 ndc = vec4(uv * 2.0 - 1.0, depth, 1.0);
+    vec4 viewPos = vsWorld.invProj * ndc;
+    float w = abs(viewPos.w) > 1e-6 ? viewPos.w : (viewPos.w >= 0.0 ? 1e-6 : -1e-6);
+    viewPos /= w;
+    return (vsWorld.invView * vec4(viewPos.xyz, 1.0)).xyz;
+}
+
+void main() {
+    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 res = imageSize(outSsgi);
+    if (px.x >= res.x || px.y >= res.y) {
+        return;
+    }
+
+    ivec2 fullRes = textureSize(gDepth, 0);
+    ivec2 fullPx = min(px * 2, fullRes - ivec2(1));
+    vec2 uv = (vec2(fullPx) + 0.5) / vec2(fullRes);
+    float depth = texelFetch(gDepth, fullPx, 0).r;
+
+    if (depth <= 1e-6) {
+        imageStore(outSsgi, px, vec4(0.0));
+        return;
+    }
+
+    vec3 P = reconstructCameraRelativePos(uv, depth);
+    vec4 normSample = texelFetch(gNormal, fullPx, 0);
+    vec3 rawN = normSample.xyz * 2.0 - 1.0;
+    vec3 N = (normSample.a > 0.01 && dot(rawN, rawN) > 1e-6) ? normalize(rawN) : vec3(0.0, 1.0, 0.0);
+    vec3 sunDir = dot(vsWorld.sunDir, vsWorld.sunDir) > 1e-6 ? normalize(vsWorld.sunDir) : vec3(0.0, 1.0, 0.0);
+    VsSkyState skyState = VsSkyState(sunDir, vsWorld.rain, vsWorld.thunder, vsWorld.gameTimeSec);
+
+    // Spatiotemporal blue-noise rotation from pack Set 3 resource
+    vec2 bnUv = (vec2(px & 63) + 0.5) / 64.0 + vec2(
+        float(vsWorld.frameIndex & 63) * 0.61803399,
+        float((vsWorld.frameIndex * 7) & 63) * 0.38196601
+    );
+    vec4 bn = vsSamplePackTexture_blue_noise(bnUv);
+    uint rng = vsPcgHash(uint(px.x) * 1973u ^ uint(px.y) * 9277u ^ uint(vsWorld.frameIndex) * 26699u);
+
+#ifdef VS_HIGH_END_GPU
+    const int RAYS = 4;
+    const int STEPS = 16;
+    float distScale = clamp(length(P) * 0.16, 2.0, 28.0);
+#else
+    const int RAYS = 2;
+    const int STEPS = 8;
+    float distScale = clamp(length(P) * 0.12, 1.5, 16.0);
+#endif
+    float invProj23 = vsWorld.invProj[2][3];
+    float invProj33 = vsWorld.invProj[3][3];
+
+    vec3 indirectAccum = vec3(0.0);
+    for (int r = 0; r < RAYS; ++r) {
+        vec2 u = fract(vec2(bn.r, bn.g) + vec2(vsRandFloat(rng), vsRandFloat(rng)));
+        vec3 rayDir = vsSampleCosineHemisphere(N, u);
+
+        bool hit = false;
+        vec2 hitUv = uv;
+        for (int s = 1; s <= STEPS; ++s) {
+            float tNorm = float(s) / float(STEPS);
+            float t = (tNorm * tNorm) * distScale;
+            vec3 samplePos = P + N * 0.06 + rayDir * t;
+            vec4 clip = vsWorld.curViewProj * vec4(samplePos, 1.0);
+            if (abs(clip.w) < 1e-5) {
+                break;
+            }
+            vec3 ndc = clip.xyz / clip.w;
+            vec2 suv = ndc.xy * 0.5 + 0.5;
+            if (suv.x <= 0.0 || suv.x >= 1.0 || suv.y <= 0.0 || suv.y >= 1.0) {
+                break;
+            }
+
+            float sceneDepth = textureLod(gDepth, suv, 0.0).r;
+            if (sceneDepth > 1e-6 && sceneDepth > ndc.z + 0.0004) {
+                float sampleDist = length(samplePos);
+                float denom = abs((invProj23 * sceneDepth + invProj33) * clip.w);
+                float sceneDist = denom > 1e-5 ? (sampleDist / denom) : length(reconstructCameraRelativePos(suv, sceneDepth));
+                float thickness = sampleDist - sceneDist;
+                if (thickness > 0.04 && thickness < 2.2) {
+                    hit = true;
+                    hitUv = suv;
+                    break;
+                }
+            }
+        }
+
+        if (hit) {
+            // Reproject hitUv into previous frame's lit buffer using gVelocity to eliminate motion lag.
+            vec2 hitMotion = textureLod(gVelocity, hitUv, 0.0).xy;
+            vec2 prevHitUv = hitUv - hitMotion;
+            bool hitInBounds = all(greaterThanEqual(prevHitUv, vec2(0.0))) && all(lessThanEqual(prevHitUv, vec2(1.0)));
+            vec3 hitPrevLit = hitInBounds
+                ? max(textureLod(uPrevLitColor, prevHitUv, 0.0).rgb, vec3(0.0))
+                : vec3(0.0);
+            vec3 hitAlbedo = pow(max(textureLod(gAlbedo, hitUv, 0.0).rgb, vec3(0.0)), vec3(2.2));
+            float hitLuma = dot(hitPrevLit, vec3(0.2126, 0.7152, 0.0722));
+            vec3 bounceCol = hitLuma > 1e-4 ? hitPrevLit : (hitAlbedo * 0.25);
+            indirectAccum += min(bounceCol, vec3(8.0));
+        } else {
+            vec3 skyCol = vec3(0.0);
+            vs_dispatch_hook_sky(skyCol, rayDir, skyState);
+            indirectAccum += skyCol * 0.35;
+        }
+    }
+
+    vec3 curSsgi = indirectAccum * (1.0 / float(RAYS));
+
+    // Temporal reprojection with velocity and soft neighborhood clamping
+    vec2 motion = texelFetch(gVelocity, fullPx, 0).xy;
+    vec2 prevUv = uv - motion;
+    bool inBounds = all(greaterThanEqual(prevUv, vec2(0.0))) && all(lessThanEqual(prevUv, vec2(1.0)));
+
+    vec3 resolved = curSsgi;
+    float confidence = 1.0;
+    if (vsWorld.frameIndex != 0 && inBounds) {
+        vec4 hist = textureLod(uSsgiHistory, prevUv, 0.0);
+        float reprojectedDepth = textureLod(gDepth, prevUv, 0.0).r;
+        float depthDelta = abs(reprojectedDepth - depth) / max(depth, 1e-4);
+        bool sameSurface = reprojectedDepth > 1e-6 && depthDelta < 0.035;
+        if (!sameSurface) {
+            imageStore(outSsgi, px, vec4(max(curSsgi, vec3(0.0)), 1.0));
+            return;
+        }
+        float histConf = clamp(hist.a, 0.0, 32.0);
+        vec3 clampMin = curSsgi * 0.35;
+        vec3 clampMax = curSsgi * 2.2 + vec3(0.08);
+        vec3 clampedHist = clamp(hist.rgb, clampMin, clampMax);
+        float alpha = mix(0.20, 0.07, clamp(histConf / 16.0, 0.0, 1.0));
+        resolved = mix(clampedHist, curSsgi, alpha);
+        confidence = min(histConf + 1.0, 32.0);
+    }
+
+    imageStore(outSsgi, px, vec4(max(resolved, vec3(0.0)), confidence));
+}
