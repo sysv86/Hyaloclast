@@ -1,34 +1,43 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-label="HYALOCLAST VSP compiler icon">
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" shape-rendering="crispEdges" role="img" aria-label="HYALOCLAST VSP compiler icon">
   <title>HYALOCLAST VSP compiler icon</title>
   <style>
+    @keyframes mosaicPulse{0%,100%{opacity:.85}50%{opacity:1}}
+    @keyframes iconFloat{0%,100%{transform:translateY(0)}50%{transform:translateY(-6px)}}
     @keyframes sweep{0%{transform:translateX(-120px)}55%,100%{transform:translateX(300px)}}
-    @keyframes icon-bob{0%,100%{transform:translateY(0)}50%{transform:translateY(-5px)}}
-    .icon-bob{animation:icon-bob 3.2s steps(5,end) infinite}
-    .glint{animation:sweep 4.2s cubic-bezier(.4,0,.2,1) infinite}
+    .glint{animation:sweep 4.6s cubic-bezier(.4,0,.2,1) infinite}
+    .float{animation:iconFloat 4.6s steps(5,end) infinite}
+    .mosaic{animation:mosaicPulse 8s ease-in-out infinite}
   </style>
   <defs>
-    <polygon id="crystal" points="128,24 204,84 180,224 76,224 52,84"/>
-    <clipPath id="cclip"><use href="#crystal"/></clipPath>
-    <linearGradient id="face-grad" gradientUnits="userSpaceOnUse" x1="0" y1="24" x2="0" y2="224">
-      <stop offset="0" stop-color="#FFF2A6"/><stop offset=".18" stop-color="#FFCE47"/><stop offset=".48" stop-color="#FF9624"/><stop offset=".78" stop-color="#EA5E12"/><stop offset="1" stop-color="#BD3808"/>
+    <path id="shape" d="M48 16h112v16h-112Z M48 32h128v16h-128Z M48 48h144v16h-144Z M48 64h160v16h-160Z M48 80h160v16h-160Z M48 96h160v16h-160Z M48 112h160v16h-160Z M48 128h160v16h-160Z M48 144h160v16h-160Z M48 160h160v16h-160Z M48 176h160v16h-160Z M48 192h160v16h-160Z M48 208h160v16h-160Z M48 224h160v16h-160Z"/>
+    <clipPath id="sclip"><use href="#shape"/></clipPath>
+    <linearGradient id="front" gradientUnits="userSpaceOnUse" x1="0" y1="16" x2="0" y2="240">
+      <stop offset="0%" stop-color="#FFF2A6"/><stop offset="22%" stop-color="#FFCE47"/><stop offset="52%" stop-color="#FF9624"/><stop offset="80%" stop-color="#EA5E12"/><stop offset="100%" stop-color="#BD3808"/>
     </linearGradient>
-    <linearGradient id="side-grad" gradientUnits="userSpaceOnUse" x1="0" y1="24" x2="0" y2="236">
-      <stop offset="0" stop-color="#C95214"/><stop offset=".5" stop-color="#94310A"/><stop offset="1" stop-color="#4D1605"/>
+    <linearGradient id="sideg" gradientUnits="userSpaceOnUse" x1="0" y1="16" x2="0" y2="240">
+      <stop offset="0%" stop-color="#C95214"/><stop offset="50%" stop-color="#94310A"/><stop offset="100%" stop-color="#4D1605"/>
     </linearGradient>
-    <linearGradient id="glint-grad" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0" stop-color="#FFFBE6" stop-opacity="0"/><stop offset=".5" stop-color="#FFFBE6" stop-opacity=".4"/><stop offset="1" stop-color="#FFFBE6" stop-opacity="0"/>
-    </linearGradient>
-    <pattern id="shader-scan" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(-25)"><rect width="8" height="2" fill="#FFF7D0" opacity=".06"/></pattern>
+    <pattern id="mosaic" width="27" height="27" patternUnits="userSpaceOnUse">
+      <rect x="0" y="0" width="9" height="9" fill="#FFFFFF" fill-opacity="0.13"/><rect x="9" y="0" width="9" height="9" fill="#000000" fill-opacity="0.035"/><rect x="18" y="0" width="9" height="9" fill="#FFFFFF" fill-opacity="0.06"/>
+      <rect x="0" y="9" width="9" height="9" fill="#000000" fill-opacity="0.045"/><rect x="9" y="9" width="9" height="9" fill="#FFFFFF" fill-opacity="0.11"/><rect x="18" y="9" width="9" height="9" fill="#000000" fill-opacity="0.05"/>
+      <rect x="0" y="18" width="9" height="9" fill="#FFFFFF" fill-opacity="0.05"/><rect x="9" y="18" width="9" height="9" fill="#000000" fill-opacity="0.03"/><rect x="18" y="18" width="9" height="9" fill="#FFFFFF" fill-opacity="0.12"/>
+    </pattern>
+    <linearGradient id="glint-grad" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#FFFBE6" stop-opacity="0"/><stop offset=".5" stop-color="#FFFBE6" stop-opacity=".45"/><stop offset="1" stop-color="#FFFBE6" stop-opacity="0"/></linearGradient>
+    <filter id="softShadow" x="-10%" y="-10%" width="120%" height="125%"><feDropShadow dx="0" dy="3" stdDeviation="2.5" flood-color="#2B1308" flood-opacity="0.32"/></filter>
   </defs>
-  <g class="icon-bob">
-    <use href="#crystal" transform="translate(-4 10)" fill="#2B1308" stroke="#2B1308" stroke-width="14" stroke-linejoin="miter"/>
-    <use href="#crystal" transform="translate(-4 10)" fill="url(#side-grad)"/>
-    <use href="#crystal" fill="url(#face-grad)" stroke="#2B1308" stroke-width="8" stroke-linejoin="miter"/>
-    <g clip-path="url(#cclip)">
-      <rect x="40" y="20" width="180" height="210" fill="url(#shader-scan)"/>
-      <polyline points="128,24 128,224" stroke="#2B1308" stroke-width="4" opacity=".45"/>
-      <polyline points="52,84 128,116 204,84" fill="none" stroke="#2B1308" stroke-width="4" opacity=".45"/>
-      <g class="glint"><path d="M0 20h50l-18 210h-50z" fill="url(#glint-grad)"/></g>
+  <g filter="url(#softShadow)">
+    <g class="float">
+      <g fill="#2B1308" stroke="#2B1308" stroke-width="16" stroke-linejoin="miter" stroke-miterlimit="3"><use href="#shape" transform="translate(-3.60 12.00)"/><use href="#shape" transform="translate(-3.00 10.00)"/><use href="#shape" transform="translate(-2.40 8.00)"/><use href="#shape" transform="translate(-1.80 6.00)"/><use href="#shape" transform="translate(-1.20 4.00)"/><use href="#shape" transform="translate(-0.60 2.00)"/><use href="#shape" transform="translate(0 0)"/></g>
+      <g fill="url(#sideg)"><use href="#shape" transform="translate(-3.60 12.00)"/><use href="#shape" transform="translate(-3.00 10.00)"/><use href="#shape" transform="translate(-2.40 8.00)"/><use href="#shape" transform="translate(-1.80 6.00)"/><use href="#shape" transform="translate(-1.20 4.00)"/><use href="#shape" transform="translate(-0.60 2.00)"/><use href="#shape" transform="translate(0 0)"/></g>
+      <g clip-path="url(#sclip)">
+        <use href="#shape" fill="url(#front)"/>
+        <g class="mosaic"><use href="#shape" fill="url(#mosaic)"/></g>
+        <path d="M144 16h16v48h-16Z M160 64h48v16h-48Z" fill="#2B1308"/>
+        <path d="M160 32h16v32h-16Z M176 48h16v16h-16Z" fill="#FFF8C8"/>
+        <path d="M80 96h16v16h-16Z M64 112h16v16h-16Z M80 128h16v16h-16Z M160 96h16v16h-16Z M176 112h16v16h-16Z M160 128h16v16h-16Z M112 128h16v16h-16Z M128 96h16v16h-16Z M112 112h16v16h-16Z" fill="#2B1308"/>
+        <path d="M80 160h96v16h-96Z M80 192h64v16h-64Z" fill="#FFFBE6"/>
+        <g class="glint"><path d="M0 0h50l-18 256h-50z" fill="url(#glint-grad)"/></g>
+      </g>
     </g>
   </g>
 </svg>
