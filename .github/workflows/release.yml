@@ -44,7 +44,7 @@ jobs:
           cargo run --locked -p vsp-cli -- check src/main/resources/builtin-packs/hyaloclast-sunlit-vanilla.vsp --tier 3
           cargo run --locked -p vsp-cli -- check src/main/resources/builtin-packs/hyaloclast-obsidian-showcase.vsp --tier 0
           cargo run --locked -p vsp-cli -- check src/main/resources/builtin-packs/hyaloclast-obsidian-showcase.vsp --tier 3
-          cargo run --locked -p vulkanshaders-sdk-bench -- verify --repo-root . --download
+          cargo run --locked -p vulkanshaders-sdk-bench -- verify --repo-root .
 
       - name: Run smoke harness
         run: python3 dev/smoke/smoke.py --ci
@@ -76,7 +76,7 @@ jobs:
             cross_arm64: false
           - platform_dir: macos-aarch64
             target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-15
             lib_name: libvulkanshaders_core.dylib
             cli_name: vsp-cli
             cross_arm64: false
