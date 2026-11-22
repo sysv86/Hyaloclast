@@ -60,7 +60,7 @@ pub fn set_instance_proc_addr(pfn_raw: u64) {
 }
 
 /// Loads an `ash::Entry` using LWJGL's `vkGetInstanceProcAddr` when available, or falls back to
-/// `Entry::linked()`.
+/// `Entry::load()`.
 pub fn load_vulkan_entry() -> Entry {
     let raw = LWJGL_GET_INSTANCE_PROC_ADDR.load(Ordering::Acquire);
     if raw != 0 {
@@ -70,7 +70,7 @@ pub fn load_vulkan_entry() -> Entry {
         };
         unsafe { Entry::from_static_fn(static_fn) }
     } else {
-        Entry::linked()
+        unsafe { Entry::load() }.expect("Failed to dynamically load Vulkan loader")
     }
 }
 
