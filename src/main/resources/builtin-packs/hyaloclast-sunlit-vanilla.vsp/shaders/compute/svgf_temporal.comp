@@ -17,6 +17,15 @@ layout(set = 0, binding = 10) uniform sampler2D uSharpRadiance;
 #endif
 
 const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
+#if VS_ACTIVE_RENDER_TIER >= 3
+const float MAX_HISTORY_LENGTH = 64.0;
+const float MIN_HISTORY_ALPHA = 0.025;
+const float MIN_HISTORY_NORMAL_ALIGNMENT = 0.86;
+#else
+const float MAX_HISTORY_LENGTH = 24.0;
+const float MIN_HISTORY_ALPHA = 0.06;
+const float MIN_HISTORY_NORMAL_ALIGNMENT = 0.92;
+#endif
 
 vec3 diffuseSignal(ivec2 p) {
     vec3 radiance = texelFetch(uRawRadiance, p, 0).rgb;
@@ -98,12 +107,12 @@ void main() {
                 ivec2 q = base + ivec2(x, y);
                 if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, size))) continue;
                 vec4 previous = texelFetch(uHistoryMoments, q, 0);
-                if (previous.b < 1.0 || previous.b > 32.0 ||
+                if (previous.b < 1.0 || previous.b > MAX_HISTORY_LENGTH ||
                     abs(previous.a - expectedDepth) > tolerance) continue;
                 vec4 sampleRadiance = texelFetch(uHistoryRadiance, q, 0);
                 if (any(isnan(sampleRadiance)) || any(isinf(sampleRadiance)) ||
                     sampleRadiance.a < 0.0 || sampleRadiance.a > 1023.0 ||
-                    dot(normal, decodeNormal(sampleRadiance.a)) < 0.92) continue;
+                    dot(normal, decodeNormal(sampleRadiance.a)) < MIN_HISTORY_NORMAL_ALIGNMENT) continue;
                 vec2 bilinear = mix(1.0 - frac, frac, bvec2(x != 0, y != 0));
                 float w = bilinear.x * bilinear.y;
                 history += sampleRadiance.rgb * w;
@@ -122,9 +131,9 @@ void main() {
         float deviation = sqrt(max(moments.y - moments.x * moments.x, 0.015));
         float darkeningThreshold = max(0.60, 3.0 * deviation + 0.20);
         if (currentLuma + darkeningThreshold >= moments.x) {
-            historyLength = min(count / weight + 1.0, 24.0);
+            historyLength = min(count / weight + 1.0, MAX_HISTORY_LENGTH);
             float lumaLimit = moments.x + 4.0 * deviation + 0.35;
-            float alpha = max(1.0 / historyLength, 0.06);
+            float alpha = max(1.0 / historyLength, MIN_HISTORY_ALPHA);
             float cap = mix(lumaLimit, currentLuma, 0.16);
             current *= min(1.0, cap / max(currentLuma, 1e-5));
             current = mix(history, current, alpha);

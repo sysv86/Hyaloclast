@@ -547,16 +547,17 @@ void main() {
         ? normalize(vec3(0.32, 0.86, -0.39))
         : ((sunWeight >= moonWeight) ? sunDir : moonDir);
     float sunset = clamp(1.0 - abs(sunDir.y) * 3.6, 0.0, 1.0) * smoothstep(-0.14, 0.08, sunDir.y);
-    vec3 daylightColor = mix(vec3(1.00, 0.95, 0.86), vec3(1.05, 0.58, 0.28), sunset);
+    vec3 daylightColor = mix(vec3(1.00, 0.95, 0.86), vec3(1.05, 0.58, 0.28), sunset)
+        * (0.58 + VS_PARAM_SUN_INTENSITY * 0.34);
     vec3 sunEnergy;
     if (dimId == 1) {
         sunEnergy = vec3(0.0);
     } else if (dimId == 2) {
         sunEnergy = vec3(0.32, 0.28, 0.48);
     } else {
-        sunEnergy = (daylightColor * VS_PARAM_SUN_INTENSITY * sunWeight
-                   + vec3(0.14, 0.20, 0.36) * moonWeight)
-            * (1.0 - 0.70 * vsWorld.rain);
+        sunEnergy = (daylightColor * sunWeight
+                   + vec3(0.14, 0.21, 0.38) * moonWeight)
+            * 1.35 * (1.0 - 0.66 * vsWorld.rain);
     }
     VsSkyState sky = VsSkyState(sunDir, vsWorld.rain, vsWorld.thunder, vsWorld.gameTimeSec);
     bool submerged = vsWorld.eyeInFluid == 1;
@@ -632,7 +633,7 @@ void main() {
     }
 #endif
     vec3 directDir = mirrorLike ? L : vsSampleSunDisk(
-        L, mix(0.005, 0.014, daylight), fract(bn.rg + vec2(vsRandFloat(rng), vsRandFloat(rng))));
+        L, mix(0.003, 0.008, daylight), fract(bn.rg + vec2(vsRandFloat(rng), vsRandFloat(rng))));
     float effPrimarySky = (submerged && !water && primarySkyLight > 0.02)
         ? max(primarySkyLight, 0.42 * max(daylight, 0.25))
         : primarySkyLight;
@@ -728,7 +729,7 @@ void main() {
         vs_dispatch_hook_sky(ambient, primary.normal, sky);
         float skyAmbScale = (dimId == 1)
             ? 0.24
-            : ((dimId == 2) ? max(0.16, 0.22 * primarySkyLight) : (0.14 * primarySkyLight * primarySkyLight));
+            : ((dimId == 2) ? max(0.16, 0.22 * primarySkyLight) : (0.26 * primarySkyLight * primarySkyLight));
         float giStrength = clamp(VS_PARAM_GI_BOUNCE_STRENGTH, 0.2, 2.0);
         // Apply primary.ao to ambient/GI only (not direct sunlight or metallic F0).
         diffuse += ambient * primary.albedo * (1.0 - primary.metallic * 0.85) * skyAmbScale * primary.ao
