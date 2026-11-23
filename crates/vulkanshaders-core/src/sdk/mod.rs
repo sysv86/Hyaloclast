@@ -807,7 +807,7 @@ impl RuntimeSdkManager {
                 None => format!("{ngx_primary} not found in system or natives search paths"),
                 Some(p) => format!("NGX loaded from {} but Init was not attempted", p.display()),
             },
-            Some(r) if r == "ok" => "NGX capability query reported feature unavailable".to_string(),
+            Some("ok") => "NGX capability query reported feature unavailable".to_string(),
             Some(r) => format!("NGX init failed: {r}"),
         };
         match feature {
@@ -1082,6 +1082,8 @@ impl RuntimeSdkManager {
         }
     }
 
+    /// # Safety
+    /// `p` must reference live images and a command buffer recording on the configured XeSS device.
     pub unsafe fn evaluate_xess(&mut self, p: &SdkDispatchParams) -> Result<(), String> {
         let ctx = self
             .active_xess
@@ -2252,6 +2254,8 @@ impl RuntimeSdkManager {
         res
     }
 
+    /// # Safety
+    /// Supplied Vulkan objects must remain live, and the device must be idle while contexts are reconfigured.
     pub unsafe fn configure_framegen(
         &mut self,
         kind: FrameGenKind,
@@ -2373,6 +2377,8 @@ impl RuntimeSdkManager {
         }
     }
 
+    /// # Safety
+    /// No in-flight command may reference a context unless `retire` defers its resource destruction.
     pub unsafe fn release_denoiser_contexts(&mut self, retire: Option<&RetireQueue>) {
         self.dlss_rr_configuration = None;
         self.dlss_rr_init_error = None;

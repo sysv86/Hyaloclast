@@ -829,10 +829,10 @@ fn parse_enums(code: &str, out: &mut ParsedHeader) {
                     if let Some(ref t) = tag_name {
                         scopes.push(t.as_str());
                     }
-                    if let Some(ref td) = typedef_name {
-                        if !scopes.contains(&td.as_str()) {
-                            scopes.push(td.as_str());
-                        }
+                    if let Some(ref td) = typedef_name
+                        && !scopes.contains(&td.as_str())
+                    {
+                        scopes.push(td.as_str());
                     }
 
                     parse_enum_body(body, &scopes, out);
@@ -1068,12 +1068,13 @@ fn is_struct_field_statement(stmt: &str) -> bool {
     }
     // Skip nested `struct Name { ... }` type-only declarations (no variable name after `}`),
     // while keeping anonymous `union { ... }` / `struct { ... }` and named `struct { ... } field`.
-    if stmt.starts_with("struct ") && stmt.ends_with('}') {
-        if let Some(brace_pos) = stmt.find('{') {
-            let header = stmt[6..brace_pos].trim();
-            if !header.is_empty() {
-                return false;
-            }
+    if stmt.starts_with("struct ")
+        && stmt.ends_with('}')
+        && let Some(brace_pos) = stmt.find('{')
+    {
+        let header = stmt[6..brace_pos].trim();
+        if !header.is_empty() {
+            return false;
         }
     }
     // Skip non-inline C++ method declarations like `void Reset()` (has `(` but not function pointer `(*`)
@@ -1232,11 +1233,11 @@ fn find_param_list_open_paren(stmt: &str) -> Option<usize> {
             while i < bytes.len() && bytes[i] != b'(' {
                 i += 1;
             }
-            if i < bytes.len() {
-                if let Some(close) = find_matching_paren(bytes, i) {
-                    i = close + 1;
-                    continue;
-                }
+            if i < bytes.len()
+                && let Some(close) = find_matching_paren(bytes, i)
+            {
+                i = close + 1;
+                continue;
             }
         }
         if bytes[i] == b'(' {
@@ -1273,11 +1274,11 @@ fn collect_prefix_tokens(prefix: &str) -> Vec<String> {
             while i < len && bytes[i] != b'(' {
                 i += 1;
             }
-            if i < len {
-                if let Some(close) = find_matching_paren(bytes, i) {
-                    i = close + 1;
-                    continue;
-                }
+            if i < len
+                && let Some(close) = find_matching_paren(bytes, i)
+            {
+                i = close + 1;
+                continue;
             }
         }
         if is_ident_start(bytes[i]) {

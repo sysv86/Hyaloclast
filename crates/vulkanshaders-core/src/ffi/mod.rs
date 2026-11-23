@@ -167,7 +167,7 @@ fn replay_pending_pack_uploads() {
         return;
     };
     let ctx = engine.ctx.read();
-    let mut pack = engine.pack_textures.lock();
+    let mut pack = engine.pack_textures.write();
     for upload in pending {
         let rc = unsafe {
             pack.upload_rgba_deferred(
@@ -188,11 +188,17 @@ fn replay_pending_pack_uploads() {
     }
 }
 
+/// # Safety
+/// The caller must pass live Vulkan handles and valid, correctly sized storage for each address argument.
+/// Storage must remain valid until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_set_instance_proc_addr(pfn_raw: u64) {
     device_merger::set_instance_proc_addr(pfn_raw);
 }
 
+/// # Safety
+/// The caller must pass live Vulkan handles and valid, correctly sized storage for each address argument.
+/// Storage must remain valid until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_init(
     vk_instance: u64,
@@ -200,7 +206,6 @@ pub unsafe extern "C" fn vs_core_init(
     vk_device: u64,
     graphics_queue: u64,
     compute_queue: u64,
-    vma_allocator: u64,
 ) -> i32 {
     crate::crash::init_early();
     let ctx = match unsafe {
@@ -210,7 +215,6 @@ pub unsafe extern "C" fn vs_core_init(
             vk_device,
             graphics_queue,
             compute_queue,
-            vma_allocator,
         )
     } {
         Ok(c) => c,
@@ -315,8 +319,8 @@ pub unsafe extern "C" fn vs_core_init(
     let engine = IgnisEngine {
         ctx: parking_lot::RwLock::new(ctx),
         retire: RetireQueue::new(3),
-        bindless: parking_lot::Mutex::new(bindless),
-        pack_textures: parking_lot::Mutex::new(pack_textures),
+        bindless: parking_lot::RwLock::new(bindless),
+        pack_textures: parking_lot::RwLock::new(pack_textures),
         blas_manager: parking_lot::Mutex::new(ZeroCopyBlasManager::new()),
         pipelines_and_compiler: parking_lot::Mutex::new(PipelinesAndCompiler {
             pipelines,
@@ -329,6 +333,7 @@ pub unsafe extern "C" fn vs_core_init(
         render_graph: parking_lot::Mutex::new(RenderGraph::default()),
         world_ubo: parking_lot::RwLock::new(WorldUboData::default()),
         frame_index: std::sync::atomic::AtomicU64::new(0),
+        last_built_tlas_handle: std::sync::atomic::AtomicU64::new(0),
         framegen_mode: std::sync::atomic::AtomicU32::new(0),
         timestamp_profiler: parking_lot::Mutex::new(timestamp_profiler),
         pipeline_disk_cache,
@@ -341,6 +346,8 @@ pub unsafe extern "C" fn vs_core_init(
     0
 }
 
+/// # Safety
+/// Calls must follow this entry point’s Vulkan engine lifecycle and must not race core initialization or shutdown.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_set_queue_families(
     graphics_family_index: i32,
@@ -355,11 +362,13 @@ pub unsafe extern "C" fn vs_core_set_queue_families(
     );
     {
         let ctx = engine.ctx.read();
-        let _ = engine.pack_textures.lock().init_gpu_resources(&ctx);
+        let _ = engine.pack_textures.write().init_gpu_resources(&ctx);
     }
     replay_pending_pack_uploads();
 }
 
+/// # Safety
+/// Calls must follow this entry point’s Vulkan engine lifecycle and must not race core initialization or shutdown.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_shutdown() {
     let Some(engine) = take_engine() else {
@@ -384,12 +393,15 @@ pub unsafe extern "C" fn vs_core_shutdown() {
         .destroy(&ctx, &engine.retire);
     engine.blas_manager.lock().shutdown(&ctx, &engine.retire);
     engine.render_graph.lock().destroy(&ctx, &engine.retire);
-    engine.bindless.lock().destroy(&ctx);
-    engine.pack_textures.lock().destroy(&ctx);
+    engine.bindless.write().destroy(&ctx);
+    engine.pack_textures.write().destroy(&ctx);
     engine.retire.drain_all();
     unsafe { engine.sdk_manager.lock().teardown() };
 }
 
+/// # Safety
+/// The caller must pass live Vulkan handles and valid, correctly sized storage for each address argument.
+/// Storage must remain valid until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_create_merged_instance(
     create_info_address: u64,
@@ -405,6 +417,9 @@ pub unsafe extern "C" fn vs_core_create_merged_instance(
     }
 }
 
+/// # Safety
+/// The caller must pass live Vulkan handles and valid, correctly sized storage for each address argument.
+/// Storage must remain valid until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_create_merged_device(
     physical_device_address: u64,
@@ -437,6 +452,9 @@ fn apply_platform_tier_policy_to_caps_mask(mut mask: u32, policy: &PlatformTierP
 /// bit5 DLSS-SR, bit6 DLSS-RR, bit7 DLSS-FG, bit8 FSR3, bit9 XeSS, bit10 NRD, bit11 HDR swapchain,
 /// bit12 buffer device address, bit13 SER NV, bit14 SER EXT, bit15 Opacity Micromap,
 /// bit16 High-End GPU, bit17 Ada Lovelace or newer.
+/// # Safety
+/// The caller must pass live Vulkan handles and valid, correctly sized storage for each address argument.
+/// Storage must remain valid until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_get_capabilities_mask(vk_device: u64) -> u32 {
     let caps = if vk_device != 0 {
@@ -517,6 +535,9 @@ pub unsafe extern "C" fn vs_core_get_capabilities_mask(vk_device: u64) -> u32 {
 /// bit5 DLSS-SR, bit6 DLSS-RR, bit7 DLSS-FG, bit8 FSR3, bit9 XeSS, bit10 NRD, bit11 HDR swapchain,
 /// bit12 buffer device address, bit13 SER NV, bit14 SER EXT, bit15 Opacity Micromap,
 /// bit16 High-End GPU, bit17 Ada Lovelace or newer.
+/// # Safety
+/// The caller must pass live Vulkan handles and valid, correctly sized storage for each address argument.
+/// Storage must remain valid until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_query_capabilities() -> u32 {
     let caps = device_merger::last_merged_capabilities().unwrap_or_default();
@@ -590,6 +611,9 @@ pub unsafe extern "C" fn vs_core_query_capabilities() -> u32 {
 /// Returns `1` if `surface` really advertises an HDR format (`R16G16B16A16_SFLOAT` /
 /// `A2B10G10R10`) together with `EXTENDED_SRGB_LINEAR_EXT` / `HDR10_ST2084_EXT`, probed via the
 /// real `vkGetPhysicalDeviceSurfaceFormatsKHR`. Returns `0` for an unknown surface or SDR-only GPU.
+/// # Safety
+/// The caller must pass live Vulkan handles and valid, correctly sized storage for each address argument.
+/// Storage must remain valid until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_is_hdr_swapchain_supported(surface_raw: u64) -> i32 {
     i32::from(device_merger::is_hdr_swapchain_supported(surface_raw))
@@ -623,6 +647,9 @@ fn json_string_array(items: &[String]) -> String {
 /// Writes a UTF-8 JSON capability report into `out_ptr` (at most `max_len` bytes) and returns the
 /// number of bytes that *would* be written. Every field is derived from a real Vulkan query or a
 /// real vendor-library probe; unavailable features carry a concrete reason for the UI tooltip.
+/// # Safety
+/// The caller must pass live Vulkan handles and valid, correctly sized storage for each address argument.
+/// Storage must remain valid until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_get_capability_details(out_ptr: u64, max_len: i32) -> i32 {
     let caps = device_merger::last_merged_capabilities().unwrap_or_default();
@@ -823,19 +850,19 @@ pub unsafe extern "C" fn vs_core_get_capability_details(out_ptr: u64, max_len: i
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn vs_core_lock_queue() {
+pub extern "C" fn vs_core_lock_queue() {
     lock_queue();
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn vs_core_unlock_queue() {
-    unsafe {
-        unlock_queue();
-    }
+pub extern "C" fn vs_core_unlock_queue() {
+    unlock_queue();
 }
 
 /// Updates the current frame's Halton sub-pixel jitter offset (in pixels) for TSR and vendor
 /// upscalers (`DLSS-SR`, `FSR3`, `XeSS`, `NRD`).
+/// # Safety
+/// Calls must follow this entry point’s Vulkan engine lifecycle and must not race core initialization or shutdown.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_set_jitter(jitter_x: f32, jitter_y: f32) {
     let Some(engine) = engine() else {
@@ -851,6 +878,8 @@ pub unsafe extern "C" fn vs_core_set_jitter(jitter_x: f32, jitter_y: f32) {
 
 /// Updates the active camera's world-space position so `dispatch_csm_shadow` computes exact
 /// camera-relative `RegionOrigin` offsets (`(section_origin & !63) - floor(camera_pos)`).
+/// # Safety
+/// Calls must follow this entry point’s Vulkan engine lifecycle and must not race core initialization or shutdown.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_set_camera_position(cam_x: f64, cam_y: f64, cam_z: f64) {
     let Some(engine) = engine() else {
@@ -865,6 +894,9 @@ pub unsafe extern "C" fn vs_core_set_camera_position(cam_x: f64, cam_y: f64, cam
     ];
 }
 
+/// # Safety
+/// The caller must pass live Vulkan handles and valid, correctly sized storage for each address argument.
+/// Storage must remain valid until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_update_world_ubo(ubo_address: u64, byte_size: i32) {
     if ubo_address == 0 || byte_size < std::mem::size_of::<WorldUboData>() as i32 {
@@ -886,13 +918,9 @@ pub unsafe extern "C" fn vs_core_update_world_ubo(ubo_address: u64, byte_size: i
     {
         let ctx = engine.ctx.read();
         engine.retire.open_slot_with_device(slot, Some(&ctx.device));
-        engine
-            .pipelines_and_compiler
-            .lock()
-            .pipelines
-            .flush_deferred_to_retire(&ctx, &engine.retire);
         engine.blas_manager.lock().entity_blas.begin_frame();
         let mut pnc = engine.pipelines_and_compiler.lock();
+        pnc.pipelines.flush_deferred_to_retire(&ctx, &engine.retire);
         if let Err(err) = pnc
             .pipelines
             .upload_world_ubo(&ctx, slot, &engine.world_ubo.read())
@@ -905,6 +933,8 @@ pub unsafe extern "C" fn vs_core_update_world_ubo(ubo_address: u64, byte_size: i
     }
 }
 
+/// # Safety
+/// Calls must follow this entry point’s Vulkan engine lifecycle and must not race core initialization or shutdown.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_reset_temporal_history() {
     let Some(engine) = engine() else {
@@ -918,6 +948,9 @@ pub unsafe extern "C" fn vs_core_reset_temporal_history() {
     }
 }
 
+/// # Safety
+/// The caller must pass live Vulkan handles and valid, correctly sized storage for each address argument.
+/// Storage must remain valid until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_submit_entity_vertices(
     vertex_ptr: u64,
@@ -944,7 +977,7 @@ pub unsafe extern "C" fn vs_core_submit_entity_vertices(
     };
     let (normal_slot, specular_slot) = engine
         .bindless
-        .lock()
+        .read()
         .companions_for_albedo(albedo_slot as u32);
     engine
         .blas_manager
@@ -965,6 +998,8 @@ pub unsafe extern "C" fn vs_core_submit_entity_vertices(
 
 /// Links a registered albedo bindless texture slot to its LabPBR normal (`_n`) and specular (`_s`)
 /// companion atlas slots so dynamic entities and items sample PBR maps in Tier 2/3 RT.
+/// # Safety
+/// Calls must follow this entry point’s Vulkan engine lifecycle and must not race core initialization or shutdown.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_link_pbr_companions(
     albedo_slot: i32,
@@ -977,13 +1012,16 @@ pub unsafe extern "C" fn vs_core_link_pbr_companions(
     let Some(engine) = engine() else {
         return;
     };
-    engine.bindless.lock().link_pbr_companions(
+    engine.bindless.write().link_pbr_companions(
         albedo_slot as u32,
         normal_slot.max(0) as u32,
         specular_slot.max(0) as u32,
     );
 }
 
+/// # Safety
+/// The caller must pass live Vulkan handles and valid, correctly sized storage for each address argument.
+/// Storage must remain valid until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_record_frame_rtx(
     cmd_raw: u64,
@@ -1025,7 +1063,7 @@ pub unsafe extern "C" fn vs_core_record_frame_rtx(
         blas.emissive_lights
             .set_viewport_dimensions(vp_size.0, vp_size.1);
     }
-    let bindless = engine.bindless.lock();
+    let bindless = engine.bindless.read();
     let addr = match blas.record_frame_rtx(
         &ctx,
         &engine.retire,
@@ -1046,9 +1084,16 @@ pub unsafe extern "C" fn vs_core_record_frame_rtx(
             0
         }
     };
+    engine.last_built_tlas_handle.store(
+        blas.last_built_tlas_handle.as_raw(),
+        std::sync::atomic::Ordering::Release,
+    );
     addr as i64
 }
 
+/// # Safety
+/// The caller must pass live Vulkan handles and valid, correctly sized storage for each address argument.
+/// Storage must remain valid until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_compile_active_pack(
     pack_path_utf8_ptr: u64,
@@ -1070,8 +1115,8 @@ pub unsafe extern "C" fn vs_core_compile_active_pack(
     let ctx = engine.ctx.read();
     let tier = ctx.platform_tier_policy().clamp_render_tier(requested_tier);
     let (bindless_layout, pack_layout) = {
-        let bl = engine.bindless.lock();
-        let mut pl = engine.pack_textures.lock();
+        let bl = engine.bindless.read();
+        let mut pl = engine.pack_textures.write();
         let _ = pl.init_gpu_resources(&ctx);
         (bl.descriptor_set_layout, pl.descriptor_set_layout)
     };
@@ -1145,13 +1190,12 @@ pub unsafe extern "C" fn vs_core_compile_active_pack(
         crate::crash::global_device_lost_guard().record_shader_compile_failure(diag);
         return -2;
     }
-    if count == 0 {
-        if let Some(ref msg) = pnc.pipelines.last_compile_error {
-            let diag =
-                crate::crash::ShaderCompileDiagnostic::parse_from_compiler_error(path_str, msg);
-            crate::crash::global_device_lost_guard().record_shader_compile_failure(diag);
-            return -2;
-        }
+    if count == 0
+        && let Some(ref msg) = pnc.pipelines.last_compile_error
+    {
+        let diag = crate::crash::ShaderCompileDiagnostic::parse_from_compiler_error(path_str, msg);
+        crate::crash::global_device_lost_guard().record_shader_compile_failure(diag);
+        return -2;
     }
     let guard = crate::crash::global_device_lost_guard();
     if guard.snapshot().reason == crate::crash::RecoveryReason::ShaderCompileFailure {
@@ -1160,6 +1204,9 @@ pub unsafe extern "C" fn vs_core_compile_active_pack(
     count as i32
 }
 
+/// # Safety
+/// The caller must pass live Vulkan handles and valid, correctly sized storage for each address argument.
+/// Storage must remain valid until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_update_spec_constants(pairs_ptr: u64, pair_count: i32) -> i32 {
     let Some(engine) = engine() else {
@@ -1169,7 +1216,7 @@ pub unsafe extern "C" fn vs_core_update_spec_constants(pairs_ptr: u64, pair_coun
     if pairs_ptr != 0 && pair_count > 0 {
         let raw_u32 =
             unsafe { slice::from_raw_parts(pairs_ptr as *const u32, (pair_count as usize) * 2) };
-        for chunk in raw_u32.chunks_exact(2) {
+        for chunk in raw_u32.as_chunks::<2>().0 {
             overrides.push((chunk[0], chunk[1]));
         }
     }
@@ -1181,8 +1228,8 @@ pub unsafe extern "C" fn vs_core_update_spec_constants(pairs_ptr: u64, pair_coun
         }
     }
     let (bindless_layout, pack_layout) = {
-        let bl = engine.bindless.lock();
-        let pl = engine.pack_textures.lock();
+        let bl = engine.bindless.read();
+        let pl = engine.pack_textures.read();
         (bl.descriptor_set_layout, pl.descriptor_set_layout)
     };
     let ctx = engine.ctx.read();
@@ -1197,6 +1244,9 @@ pub unsafe extern "C" fn vs_core_update_spec_constants(pairs_ptr: u64, pair_coun
     pnc.pipelines.compute_pipelines.len() as i32
 }
 
+/// # Safety
+/// The caller must pass live Vulkan handles and valid, correctly sized storage for each address argument.
+/// Storage must remain valid until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_get_last_compile_error(out_buf_ptr: u64, out_buf_cap: i32) -> i32 {
     let Some(engine) = engine() else {
@@ -1217,6 +1267,8 @@ pub unsafe extern "C" fn vs_core_get_last_compile_error(out_buf_ptr: u64, out_bu
     copy_len as i32
 }
 
+/// # Safety
+/// Calls must follow this entry point’s Vulkan engine lifecycle and must not race core initialization or shutdown.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_bind_gbuffer_images(
     albedo_img: u64,
@@ -1244,6 +1296,8 @@ pub unsafe extern "C" fn vs_core_bind_gbuffer_images(
     }
 }
 
+/// # Safety
+/// Calls must follow this entry point’s Vulkan engine lifecycle and must not race core initialization or shutdown.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_bind_gbuffer_views(
     albedo_img: u64,
@@ -1299,6 +1353,8 @@ pub unsafe extern "C" fn vs_core_bind_gbuffer_views(
     }
 }
 
+/// # Safety
+/// Calls must follow this entry point’s Vulkan engine lifecycle and must not race core initialization or shutdown.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_bind_post_targets(
     hudless_img: u64,
@@ -1350,6 +1406,9 @@ pub unsafe extern "C" fn vs_core_bind_post_targets(
     }
 }
 
+/// # Safety
+/// The caller must pass live Vulkan handles and valid, correctly sized storage for each address argument.
+/// Storage must remain valid until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_execute_render_graph(
     cmd_raw: u64,
@@ -1377,8 +1436,8 @@ pub unsafe extern "C" fn vs_core_execute_render_graph(
     blas.emissive_lights.set_viewport_dimensions(w, h);
     let tlas_handle = blas.last_built_tlas_handle;
     let mut pnc = engine.pipelines_and_compiler.lock();
-    let bindless = engine.bindless.lock();
-    let pack = engine.pack_textures.lock();
+    let bindless = engine.bindless.read();
+    let pack_set = engine.pack_textures.read().descriptor_set;
     let mut sdk = engine.sdk_manager.lock();
     let mut graph = engine.render_graph.lock();
     let cfg = graph.config;
@@ -1528,11 +1587,7 @@ pub unsafe extern "C" fn vs_core_execute_render_graph(
         output_width: w,
         output_height: h,
     };
-    let gdpa = unsafe {
-        std::mem::transmute::<_, vk::PFN_vkGetDeviceProcAddr>(
-            ctx.instance.fp_v1_0().get_device_proc_addr,
-        )
-    };
+    let gdpa = ctx.instance.fp_v1_0().get_device_proc_addr;
     let upscaler_kind = match cfg.upscaler_mode {
         2 if sdk.capabilities.fsr3_loaded => UpscalerKind::Fsr3,
         3 if sdk.capabilities.dlss_sr_available => UpscalerKind::DlssSr,
@@ -1829,7 +1884,7 @@ pub unsafe extern "C" fn vs_core_execute_render_graph(
         cmd,
         &mut pnc.pipelines,
         Some(&bindless),
-        pack.descriptor_set,
+        pack_set,
         tlas_handle,
         slot,
         w,
@@ -1852,6 +1907,9 @@ pub unsafe extern "C" fn vs_core_execute_render_graph(
 /// `GuiRenderer.render()` completes, binding `ui_img` / `ui_view` (`mainTarget.colorTexture` with
 /// HUD) to `RES_UI_COLOR` and copying `RES_POST_OUTPUT` into `RES_PREV_HUDLESS_COLOR` for next
 /// frame's temporal history.
+/// # Safety
+/// The caller must pass live Vulkan handles and valid, correctly sized storage for each address argument.
+/// Storage must remain valid until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_execute_after_gui(
     cmd_raw: u64,
@@ -1872,11 +1930,14 @@ pub unsafe extern "C" fn vs_core_execute_after_gui(
     let ctx = engine.ctx.read();
     let cmd = vk::CommandBuffer::from_raw(cmd_raw);
     let slot = engine.frame_slot();
-    let blas = engine.blas_manager.lock();
-    let tlas_handle = blas.last_built_tlas_handle;
+    let tlas_handle = vk::AccelerationStructureKHR::from_raw(
+        engine
+            .last_built_tlas_handle
+            .load(std::sync::atomic::Ordering::Acquire),
+    );
     let mut pnc = engine.pipelines_and_compiler.lock();
-    let bindless = engine.bindless.lock();
-    let pack = engine.pack_textures.lock();
+    let bindless = engine.bindless.read();
+    let pack_set = engine.pack_textures.read().descriptor_set;
     let mut sdk = engine.sdk_manager.lock();
     let mut graph = engine.render_graph.lock();
     let w = width.max(1) as u32;
@@ -1967,12 +2028,11 @@ pub unsafe extern "C" fn vs_core_execute_after_gui(
         cmd,
         &mut pnc.pipelines,
         Some(&bindless),
-        pack.descriptor_set,
+        pack_set,
         tlas_handle,
         slot,
         w,
         h,
-        &blas,
         Some(&mut *sdk),
         &dispatch,
         &engine.retire,
@@ -2007,6 +2067,9 @@ pub unsafe extern "C" fn vs_core_execute_after_gui(
     result as i32
 }
 
+/// # Safety
+/// The caller must pass live Vulkan handles and valid, correctly sized storage for each address argument.
+/// Storage must remain valid until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_register_section_slice(
     key_id: u64,
@@ -2034,6 +2097,9 @@ pub unsafe extern "C" fn vs_core_register_section_slice(
     }
 }
 
+/// # Safety
+/// The caller must pass live Vulkan handles and valid, correctly sized storage for each address argument.
+/// Storage must remain valid until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_register_section_slice_ex(
     key_id: u64,
@@ -2070,6 +2136,9 @@ pub unsafe extern "C" fn vs_core_register_section_slice_ex(
 
 /// Registers a terrain slice in a single atomic call with all geometry metadata (`section_pos_packed`,
 /// `vertex_stride`, `vertex_count`, `is_region_shifted`) and LabPBR bindless slots + material flags.
+/// # Safety
+/// The caller must pass live Vulkan handles and valid, correctly sized storage for each address argument.
+/// Storage must remain valid until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_register_section_slice_with_pbr(
     key_id: u64,
@@ -2112,6 +2181,8 @@ pub unsafe extern "C" fn vs_core_register_section_slice_with_pbr(
     );
 }
 
+/// # Safety
+/// Calls must follow this entry point’s Vulkan engine lifecycle and must not race core initialization or shutdown.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_unregister_section_slice(key_id: u64, layer_ordinal: i32) {
     if layer_ordinal < 0 {
@@ -2129,6 +2200,9 @@ pub unsafe extern "C" fn vs_core_unregister_section_slice(key_id: u64, layer_ord
     );
 }
 
+/// # Safety
+/// The caller must pass live Vulkan handles and valid, correctly sized storage for each address argument.
+/// Storage must remain valid until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_register_texture(
     vk_image: u64,
@@ -2141,6 +2215,9 @@ pub unsafe extern "C" fn vs_core_register_texture(
     }
 }
 
+/// # Safety
+/// The caller must pass live Vulkan handles and valid, correctly sized storage for each address argument.
+/// Storage must remain valid until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_register_texture_ex(
     vk_image: u64,
@@ -2164,6 +2241,9 @@ pub unsafe extern "C" fn vs_core_register_texture_ex(
     }
 }
 
+/// # Safety
+/// The caller must pass live Vulkan handles and valid, correctly sized storage for each address argument.
+/// Storage must remain valid until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_register_texture_with_sampler(
     vk_image: u64,
@@ -2188,7 +2268,7 @@ pub unsafe extern "C" fn vs_core_register_texture_with_sampler(
     let ctx = engine.ctx.read();
     engine
         .bindless
-        .lock()
+        .write()
         .register_or_update_with_sampler_deferred(
             vk_image,
             vk_image_view,
@@ -2205,6 +2285,9 @@ pub unsafe extern "C" fn vs_core_register_texture_with_sampler(
         .unwrap_or(-1)
 }
 
+/// # Safety
+/// The caller must pass live Vulkan handles and valid, correctly sized storage for each address argument.
+/// Storage must remain valid until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_unregister_texture(vk_image: u64) {
     let Some(engine) = engine() else {
@@ -2213,12 +2296,15 @@ pub unsafe extern "C" fn vs_core_unregister_texture(vk_image: u64) {
     let ctx = engine.ctx.read();
     engine
         .bindless
-        .lock()
+        .write()
         .unregister_deferred(vk_image, Some(&ctx), Some(&engine.retire));
 }
 
 /// Uploads a shader-pack `[resources.*]` texture into descriptor Set 3 at `slot`.
 /// `rgba_ptr` must point to `width * height * 4` RGBA8 bytes.
+/// # Safety
+/// The caller must pass live Vulkan handles and valid, correctly sized storage for each address argument.
+/// Storage must remain valid until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_upload_pack_texture(
     slot: u32,
@@ -2255,7 +2341,7 @@ pub unsafe extern "C" fn vs_core_upload_pack_texture(
     };
     let ctx = engine.ctx.read();
     unsafe {
-        engine.pack_textures.lock().upload_rgba_deferred(
+        engine.pack_textures.write().upload_rgba_deferred(
             &ctx,
             Some(&engine.retire),
             slot,
@@ -2270,6 +2356,9 @@ pub unsafe extern "C" fn vs_core_upload_pack_texture(
 
 /// Writes the raw `VkDescriptorSetLayout` handles that G-Buffer shaders must append to their
 /// `VkPipelineLayout`: `[bindless (Set 2), pack resources (Set 3)]`. Returns the number written.
+/// # Safety
+/// The caller must pass live Vulkan handles and valid, correctly sized storage for each address argument.
+/// Storage must remain valid until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_get_custom_descriptor_set_layouts(
     out_ptr: u64,
@@ -2282,8 +2371,8 @@ pub unsafe extern "C" fn vs_core_get_custom_descriptor_set_layouts(
         return 0;
     };
     let layouts = {
-        let bl = engine.bindless.lock();
-        let pl = engine.pack_textures.lock();
+        let bl = engine.bindless.read();
+        let pl = engine.pack_textures.read();
         [
             bl.descriptor_set_layout.as_raw(),
             pl.descriptor_set_layout.as_raw(),
@@ -2299,6 +2388,8 @@ pub unsafe extern "C" fn vs_core_get_custom_descriptor_set_layouts(
 /// Writes the raw `VkDescriptorSet` handles for the engine's global bindless texture table
 /// (Set 2) and pack resources (Set 3) so the JVM can cache and bind them directly without
 /// per-draw FFI overhead or mutex locks. Returns `1` on success, `0` if unavailable.
+/// # Safety
+/// Calls must follow this entry point’s Vulkan engine lifecycle and must not race core initialization or shutdown.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_get_custom_descriptor_sets(
     out_bindless_set: *mut u64,
@@ -2308,8 +2399,8 @@ pub unsafe extern "C" fn vs_core_get_custom_descriptor_sets(
         return 0;
     };
     let (bl_raw, pl_raw) = {
-        let bl = engine.bindless.lock();
-        let pl = engine.pack_textures.lock();
+        let bl = engine.bindless.read();
+        let pl = engine.pack_textures.read();
         (bl.descriptor_set.as_raw(), pl.descriptor_set.as_raw())
     };
     unsafe {
@@ -2325,6 +2416,9 @@ pub unsafe extern "C" fn vs_core_get_custom_descriptor_sets(
 
 /// Binds the engine-owned custom descriptor sets (bindless + pack resources) on `cmd` starting at
 /// `first_set`, using `pipeline_layout` and `bind_point` supplied by the caller.
+/// # Safety
+/// The caller must pass live Vulkan handles and valid, correctly sized storage for each address argument.
+/// Storage must remain valid until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_bind_custom_descriptor_sets(
     cmd_raw: u64,
@@ -2338,8 +2432,8 @@ pub unsafe extern "C" fn vs_core_bind_custom_descriptor_sets(
     let Some(engine) = engine() else {
         return;
     };
-    let bl = engine.bindless.lock();
-    let pl = engine.pack_textures.lock();
+    let bl = engine.bindless.read();
+    let pl = engine.pack_textures.read();
     let point = if bind_point == 1 {
         vk::PipelineBindPoint::COMPUTE
     } else {
@@ -2371,6 +2465,8 @@ pub unsafe extern "C" fn vs_core_bind_custom_descriptor_sets(
     }
 }
 
+/// # Safety
+/// Calls must follow this entry point’s Vulkan engine lifecycle and must not race core initialization or shutdown.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_can_enable_framegen(mode: i32) -> i32 {
     let Some(engine) = engine() else {
@@ -2396,6 +2492,8 @@ pub unsafe extern "C" fn vs_core_can_enable_framegen(mode: i32) -> i32 {
     i32::from(supported)
 }
 
+/// # Safety
+/// Calls must follow this entry point’s Vulkan engine lifecycle and must not race core initialization or shutdown.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_take_framegen_failure() -> i32 {
     engine().map_or(0, |engine| {
@@ -2403,6 +2501,8 @@ pub unsafe extern "C" fn vs_core_take_framegen_failure() -> i32 {
     })
 }
 
+/// # Safety
+/// Calls must follow this entry point’s Vulkan engine lifecycle and must not race core initialization or shutdown.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_configure_pipeline(
     tier_index: i32,
@@ -2411,10 +2511,12 @@ pub unsafe extern "C" fn vs_core_configure_pipeline(
     framegen_mode: i32,
     hdr_enabled: i32,
     overlay_pass_enabled: i32,
+    ser_enabled: i32,
 ) -> i32 {
     let Some(engine) = engine() else {
         return -1;
     };
+    crate::gpu::set_ser_reordering_enabled(ser_enabled != 0);
     let requested_tier =
         RenderTier::from_index(tier_index.max(0) as u32).unwrap_or(RenderTier::Tier0Raster);
     let policy = engine.platform_tier_policy();
@@ -2473,6 +2575,8 @@ pub unsafe extern "C" fn vs_core_configure_pipeline(
     engine.render_graph.lock().compiled_steps.len() as i32
 }
 
+/// # Safety
+/// Calls must follow this entry point’s Vulkan engine lifecycle and must not race core initialization or shutdown.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_set_shadow_config(
     shadow_resolution: i32,
@@ -2499,6 +2603,9 @@ pub unsafe extern "C" fn vs_core_set_shadow_config(
     }
 }
 
+/// # Safety
+/// The caller must pass live Vulkan handles and valid, correctly sized storage for each address argument.
+/// Storage must remain valid until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_intercept_surface_blit(
     cmd_raw: u64,
@@ -2529,6 +2636,8 @@ pub unsafe extern "C" fn vs_core_intercept_surface_blit(
     i32::from(intercepted)
 }
 
+/// # Safety
+/// Calls must follow this entry point’s Vulkan engine lifecycle and must not race core initialization or shutdown.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_set_overlay_depth_params(
     z_scale: f32,
@@ -2558,6 +2667,9 @@ pub unsafe extern "C" fn vs_core_set_overlay_depth_params(
     params.evaluate_device_depth(16.0)
 }
 
+/// # Safety
+/// The caller must pass live Vulkan handles and valid, correctly sized storage for each address argument.
+/// Storage must remain valid until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_reflex_set_swapchain(swapchain_raw: u64) {
     let Some(engine) = engine() else {
@@ -2570,6 +2682,8 @@ pub unsafe extern "C" fn vs_core_reflex_set_swapchain(swapchain_raw: u64) {
         .set_swapchain(Some(&ctx), swapchain_raw);
 }
 
+/// # Safety
+/// Calls must follow this entry point’s Vulkan engine lifecycle and must not race core initialization or shutdown.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_reflex_marker(marker_id: i32) {
     let Some(engine) = engine() else {
@@ -2579,6 +2693,8 @@ pub unsafe extern "C" fn vs_core_reflex_marker(marker_id: i32) {
     engine.framegen.lock().set_reflex_marker(&ctx, marker_id);
 }
 
+/// # Safety
+/// Calls must follow this entry point’s Vulkan engine lifecycle and must not race core initialization or shutdown.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_reflex_sleep_and_sample_input() {
     let Some(engine) = engine() else {
@@ -2591,6 +2707,9 @@ pub unsafe extern "C" fn vs_core_reflex_sleep_and_sample_input() {
         .begin_frame_sleep_and_input_sample(&ctx);
 }
 
+/// # Safety
+/// The caller must pass live Vulkan handles and valid, correctly sized storage for each address argument.
+/// Storage must remain valid until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_intercept_acquire_next_image(
     swapchain_raw: u64,
@@ -2611,6 +2730,9 @@ pub unsafe extern "C" fn vs_core_intercept_acquire_next_image(
     )
 }
 
+/// # Safety
+/// The caller must pass live Vulkan handles and valid, correctly sized storage for each address argument.
+/// Storage must remain valid until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_intercept_queue_present(
     queue_raw: u64,
@@ -2634,6 +2756,8 @@ pub unsafe extern "C" fn vs_core_intercept_queue_present(
     ))
 }
 
+/// # Safety
+/// Calls must follow this entry point’s Vulkan engine lifecycle and must not race core initialization or shutdown.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_wait_present_idle() {
     let Some(engine) = engine() else {
@@ -2644,6 +2768,9 @@ pub unsafe extern "C" fn vs_core_wait_present_idle() {
 
 /// Uploads dynamic block/point/handheld emissive lights for ReSTIR DI and hardware NEE shadow rays.
 /// `lights_ptr` points to `light_count` 48-byte `WorldEmissiveLightDesc` records.
+/// # Safety
+/// The caller must pass live Vulkan handles and valid, correctly sized storage for each address argument.
+/// Storage must remain valid until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_submit_emissive_lights(
     lights_ptr: u64,
@@ -2672,6 +2799,9 @@ pub unsafe extern "C" fn vs_core_submit_emissive_lights(
 }
 
 /// Registers or updates a Distant Horizons LOD terrain mesh slice for ray-traced far-field BLAS/TLAS.
+/// # Safety
+/// The caller must pass live Vulkan handles and valid, correctly sized storage for each address argument.
+/// Storage must remain valid until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_register_lod_slice(
     lod_key_id: u64,
@@ -2723,6 +2853,9 @@ pub unsafe extern "C" fn vs_core_register_lod_slice(
 /// Uploads a CPU-unpacked 28-byte/vertex Distant Horizons LOD mesh (`pos: [f32; 3]`,
 /// `color_abgr: u32`, `uv: [f32; 2]`, `light_normal: u32`) and `u32` index buffer into owned
 /// BDA-enabled `VkBuffer`s inside `LodBlasManager`. Returns `1` on success, `0` on failure.
+/// # Safety
+/// The caller must pass live Vulkan handles and valid, correctly sized storage for each address argument.
+/// Storage must remain valid until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_upload_lod_mesh_cpu(
     lod_key_id: u64,
@@ -2786,6 +2919,8 @@ pub unsafe extern "C" fn vs_core_upload_lod_mesh_cpu(
     i32::from(ok)
 }
 
+/// # Safety
+/// Calls must follow this entry point’s Vulkan engine lifecycle and must not race core initialization or shutdown.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_unregister_lod_slice(lod_key_id: u64) {
     let Some(engine) = engine() else {
@@ -2798,6 +2933,8 @@ pub unsafe extern "C" fn vs_core_unregister_lod_slice(lod_key_id: u64) {
         .unregister_lod_slice(lod_key_id, Some(&ctx), Some(&engine.retire));
 }
 
+/// # Safety
+/// Calls must follow this entry point’s Vulkan engine lifecycle and must not race core initialization or shutdown.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_clear_lod_slices() {
     let Some(engine) = engine() else {
@@ -2812,6 +2949,8 @@ pub unsafe extern "C" fn vs_core_clear_lod_slices() {
 
 /// Updates the minimum horizontal distance (in blocks) before Distant Horizons LOD instances
 /// are injected into the ray-tracing TLAS.
+/// # Safety
+/// Calls must follow this entry point’s Vulkan engine lifecycle and must not race core initialization or shutdown.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_set_lod_cutoff_distance(cutoff_blocks: f32) -> i32 {
     let Some(engine) = engine() else {
@@ -2826,6 +2965,9 @@ pub unsafe extern "C" fn vs_core_set_lod_cutoff_distance(cutoff_blocks: f32) -> 
 
 /// Binds Distant Horizons external G-Buffer image/view handles and updates the 80-byte
 /// `DhFrameUniforms` block consumed by `compute_lighting`, `rayquery_lighting`, and `volumetric_fog`.
+/// # Safety
+/// The caller must pass live Vulkan handles and valid, correctly sized storage for each address argument.
+/// Storage must remain valid until this call returns.
 #[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_bind_dh_targets(
@@ -2885,6 +3027,9 @@ pub unsafe extern "C" fn vs_core_bind_dh_targets(
 /// Preprocesses a raster G-Buffer GLSL shader (`gbuffer_terrain_region.vsh/.fsh`, `gbuffer_entity.fsh`, etc.)
 /// through the unified Rust `vsp-compiler` lexer and preprocessor (`#include`, `@hook`, namespace isolation).
 /// Writes the resulting UTF-8 GLSL source into `out_ptr` (up to `out_cap` bytes) and returns the full byte length.
+/// # Safety
+/// The caller must pass live Vulkan handles and valid, correctly sized storage for each address argument.
+/// Storage must remain valid until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_preprocess_raster_shader(
     source_ptr: u64,
@@ -2914,60 +3059,54 @@ pub unsafe extern "C" fn vs_core_preprocess_raster_shader(
         .map(|e| e.render_graph.lock().config.tier)
         .unwrap_or(RenderTier::Tier0Raster);
 
-    let processed =
-        if let Some(pack_dir) = pack_dir_opt {
-            let Ok((manifest, chain_dirs)) = VspCompiler::resolve_pack_inheritance(pack_dir, &[])
-            else {
-                return -2;
-            };
-            let mut spec_overrides = std::collections::BTreeMap::new();
-            let layout = manifest.build_parameter_layout();
-            {
-                let rfs = RUNTIME_FRAME_STATE.lock();
-                for (key, &const_id) in &layout.specialization_constant_ids {
-                    if let Some(&raw_bits) = rfs.spec_overrides_by_id.get(&const_id) {
-                        if let Some(decl) = manifest.settings.get(key) {
-                            let val =
-                                match decl.value_type {
-                                    vsp_compiler::manifest::SettingValueType::Float => {
-                                        f32::from_bits(raw_bits)
-                                    }
-                                    vsp_compiler::manifest::SettingValueType::Int => {
-                                        (raw_bits as i32) as f32
-                                    }
-                                    vsp_compiler::manifest::SettingValueType::Bool => {
-                                        if raw_bits != 0 { 1.0 } else { 0.0 }
-                                    }
-                                    vsp_compiler::manifest::SettingValueType::Enum => {
-                                        (raw_bits as i32) as f32
-                                    }
-                                    vsp_compiler::manifest::SettingValueType::ColorRgb => {
-                                        f32::from_bits(raw_bits)
-                                    }
-                                    vsp_compiler::manifest::SettingValueType::Vec3 => {
-                                        f32::from_bits(raw_bits)
-                                    }
-                                };
-                            spec_overrides.insert(key.clone(), val);
+    let processed = if let Some(pack_dir) = pack_dir_opt {
+        let Ok((manifest, chain_dirs)) = VspCompiler::resolve_pack_inheritance(pack_dir, &[])
+        else {
+            return -2;
+        };
+        let mut spec_overrides = std::collections::BTreeMap::new();
+        let layout = manifest.build_parameter_layout();
+        {
+            let rfs = RUNTIME_FRAME_STATE.lock();
+            for (key, &const_id) in &layout.specialization_constant_ids {
+                if let Some(&raw_bits) = rfs.spec_overrides_by_id.get(&const_id)
+                    && let Some(decl) = manifest.settings.get(key)
+                {
+                    let val = match decl.value_type {
+                        vsp_compiler::manifest::SettingValueType::Float => f32::from_bits(raw_bits),
+                        vsp_compiler::manifest::SettingValueType::Int => (raw_bits as i32) as f32,
+                        vsp_compiler::manifest::SettingValueType::Bool => {
+                            if raw_bits != 0 {
+                                1.0
+                            } else {
+                                0.0
+                            }
                         }
-                    }
+                        vsp_compiler::manifest::SettingValueType::Enum => (raw_bits as i32) as f32,
+                        vsp_compiler::manifest::SettingValueType::ColorRgb => {
+                            f32::from_bits(raw_bits)
+                        }
+                        vsp_compiler::manifest::SettingValueType::Vec3 => f32::from_bits(raw_bits),
+                    };
+                    spec_overrides.insert(key.clone(), val);
                 }
             }
-            let chain_refs: Vec<&Path> = chain_dirs.iter().map(|p| p.as_path()).collect();
-            match vsp_compiler::Preprocessor::preprocess_raster_source_with_chain(
-                src_str,
-                &chain_refs,
-                &manifest,
-                tier as u32,
-                stage_is_fragment != 0,
-                &spec_overrides,
-            ) {
-                Ok(out) => out,
-                Err(_) => return -2,
-            }
-        } else {
-            src_str.to_owned()
-        };
+        }
+        let chain_refs: Vec<&Path> = chain_dirs.iter().map(|p| p.as_path()).collect();
+        match vsp_compiler::Preprocessor::preprocess_raster_source_with_chain(
+            src_str,
+            &chain_refs,
+            &manifest,
+            tier as u32,
+            stage_is_fragment != 0,
+            &spec_overrides,
+        ) {
+            Ok(out) => out,
+            Err(_) => return -2,
+        }
+    } else {
+        src_str.to_owned()
+    };
 
     let out_bytes = processed.as_bytes();
     if out_ptr != 0 && out_cap > 0 {
@@ -2980,6 +3119,8 @@ pub unsafe extern "C" fn vs_core_preprocess_raster_shader(
 }
 
 /// Clears all resident terrain & LOD BLAS slices (called on world unload / server switch).
+/// # Safety
+/// Calls must follow this entry point’s Vulkan engine lifecycle and must not race core initialization or shutdown.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_clear_section_slices() {
     let Some(engine) = engine() else {
@@ -2988,6 +3129,9 @@ pub unsafe extern "C" fn vs_core_clear_section_slices() {
     let ctx = engine.ctx.read();
     let mut blas = engine.blas_manager.lock();
     blas.clear_all_slices(Some(&ctx), Some(&engine.retire));
+    engine
+        .last_built_tlas_handle
+        .store(0, std::sync::atomic::Ordering::Release);
     engine.framegen.lock().on_world_unloaded();
     {
         let mut rfs = RUNTIME_FRAME_STATE.lock();
@@ -2998,6 +3142,8 @@ pub unsafe extern "C" fn vs_core_clear_section_slices() {
 }
 
 /// Resets per-world HDR / FrameGen / temporal state when returning to the main menu or switching worlds.
+/// # Safety
+/// Calls must follow this entry point’s Vulkan engine lifecycle and must not race core initialization or shutdown.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_on_world_unloaded() {
     let Some(engine) = engine() else {
@@ -3014,6 +3160,9 @@ pub unsafe extern "C" fn vs_core_on_world_unloaded() {
 }
 
 /// Binds RenderPearl's GPU timeline semaphore to `RetireQueue` for real hardware completion checks.
+/// # Safety
+/// The caller must pass live Vulkan handles and valid, correctly sized storage for each address argument.
+/// Storage must remain valid until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_bind_timeline_semaphore(semaphore_raw: u64) {
     let Some(engine) = engine() else {
@@ -3023,6 +3172,8 @@ pub unsafe extern "C" fn vs_core_bind_timeline_semaphore(semaphore_raw: u64) {
 }
 
 /// Records the GPU timeline value actually submitted for the current frame.
+/// # Safety
+/// Calls must follow this entry point’s Vulkan engine lifecycle and must not race core initialization or shutdown.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_record_submission(timeline_value: u64) {
     let Some(engine) = engine() else {
@@ -3032,6 +3183,8 @@ pub unsafe extern "C" fn vs_core_record_submission(timeline_value: u64) {
 }
 
 /// Notifies `RetireQueue` that GPU timeline semaphore value `completed_value` has finished executing.
+/// # Safety
+/// Calls must follow this entry point’s Vulkan engine lifecycle and must not race core initialization or shutdown.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_notify_timeline_completed(completed_value: u64) {
     let Some(engine) = engine() else {
@@ -3041,6 +3194,8 @@ pub unsafe extern "C" fn vs_core_notify_timeline_completed(completed_value: u64)
 }
 
 /// Sets internal render resolution scale (`0.5..=1.0`) for TSR / FSR3 / DLSS / XeSS upscalers.
+/// # Safety
+/// Calls must follow this entry point’s Vulkan engine lifecycle and must not race core initialization or shutdown.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_set_render_scale(scale: f32) {
     if scale.is_finite() {
@@ -3049,6 +3204,8 @@ pub unsafe extern "C" fn vs_core_set_render_scale(scale: f32) {
 }
 
 /// Configures HDR peak display luminance and UI paper-white luminance (in nits).
+/// # Safety
+/// Calls must follow this entry point’s Vulkan engine lifecycle and must not race core initialization or shutdown.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_set_hdr_params(peak_nits: f32, paper_white_nits: f32) {
     let peak = if peak_nits.is_finite() {
@@ -3074,6 +3231,8 @@ pub unsafe extern "C" fn vs_core_set_hdr_params(peak_nits: f32, paper_white_nits
 }
 
 /// Records the active swapchain format & color space so `hdr_compose.comp` picks scRGB vs HDR10 PQ.
+/// # Safety
+/// Calls must follow this entry point’s Vulkan engine lifecycle and must not race core initialization or shutdown.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_on_swapchain_created(
     format: i32,
@@ -3116,6 +3275,9 @@ pub unsafe extern "C" fn vs_core_on_swapchain_created(
 }
 
 /// Sets the Minecraft game directory so `natives/` and `config/vulkanshaders/` resolve portably.
+/// # Safety
+/// The caller must pass live Vulkan handles and valid, correctly sized storage for each address argument.
+/// Storage must remain valid until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_set_game_dir(path_ptr: *const u8, path_len: i32) {
     if path_ptr.is_null() || path_len <= 0 {
@@ -3133,6 +3295,8 @@ pub unsafe extern "C" fn vs_core_set_game_dir(path_ptr: *const u8, path_len: i32
 }
 
 /// Returns the number of queued native error/warning entries waiting to be drained.
+/// # Safety
+/// Calls must follow this entry point’s Vulkan engine lifecycle and must not race core initialization or shutdown.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_get_native_error_count() -> u32 {
     crate::crash::pending_error_count()
@@ -3143,6 +3307,9 @@ pub unsafe extern "C" fn vs_core_get_native_error_count() -> u32 {
 /// If `out_buf_ptr == 0 || out_buf_cap <= 0`, returns the full UTF-8 byte length without clearing
 /// the buffer. Otherwise copies up to `out_buf_cap` bytes, clears the buffer, and returns the
 /// number of bytes copied.
+/// # Safety
+/// The caller must pass live Vulkan handles and valid, correctly sized storage for each address argument.
+/// Storage must remain valid until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_drain_native_errors(out_buf_ptr: u64, out_buf_cap: i32) -> i32 {
     if out_buf_ptr == 0 || out_buf_cap <= 0 {
@@ -3161,6 +3328,8 @@ pub unsafe extern "C" fn vs_core_drain_native_errors(out_buf_ptr: u64, out_buf_c
 }
 
 /// Flags that temporal history must be reset on the next vendor upscaler/denoiser dispatch.
+/// # Safety
+/// Calls must follow this entry point’s Vulkan engine lifecycle and must not race core initialization or shutdown.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_mark_history_reset() {
     {
@@ -3199,6 +3368,9 @@ unsafe fn write_utf8_nul_terminated(out_ptr: u64, max_len: i32, text: &str) -> i
 
 /// Queries the active VRAM usage, driver budget, and pressure level (`0=Normal`, `1=Elevated`, `2=Critical`).
 /// Returns `0` on success or `-1` if the engine is not initialized.
+/// # Safety
+/// The caller must pass live Vulkan handles and valid, correctly sized storage for each address argument.
+/// Storage must remain valid until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_get_vram_budget(
     out_used_bytes_ptr: u64,
@@ -3234,6 +3406,9 @@ pub unsafe extern "C" fn vs_core_get_vram_budget(
 
 /// Queries live Ray Tracing acceleration structure counts (resident built BLASes and active TLAS instances).
 /// Returns `0` on success or `-1` if the engine is not initialized.
+/// # Safety
+/// The caller must pass live Vulkan handles and valid, correctly sized storage for each address argument.
+/// Storage must remain valid until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_get_rt_stats(
     out_blas_count_ptr: u64,
@@ -3268,21 +3443,55 @@ pub unsafe extern "C" fn vs_core_get_rt_stats(
 
 /// Enables (`enabled != 0`) or disables (`enabled == 0`) the ring-buffered GPU timestamp profiler.
 /// Returns `0` on success or `-1` if the engine or timestamp profiler is not initialized.
+/// # Safety
+/// Calls must follow this entry point’s Vulkan engine lifecycle and must not race core initialization or shutdown.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_set_gpu_profiler_enabled(enabled: i32) -> i32 {
     let Some(engine) = engine() else {
         return -1;
     };
-    let guard = engine.timestamp_profiler.lock();
-    let Some(ref profiler) = *guard else {
+    let mut guard = engine.timestamp_profiler.lock();
+    let Some(ref mut profiler) = *guard else {
         return -1;
     };
     profiler.set_enabled(enabled != 0);
     0
 }
 
+/// Writes the rolling mean GPU frame time after at least 30 completed timestamp samples.
+/// Returns `1` when available, `0` while warming up or disabled, or `-1` for invalid input.
+/// # Safety
+/// The caller must pass live Vulkan handles and valid, correctly sized storage for each address argument.
+/// Storage must remain valid until this call returns.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_core_get_average_gpu_frame_time_ms(out_ms_ptr: u64) -> i32 {
+    if out_ms_ptr == 0 {
+        return -1;
+    }
+    let Some(engine) = engine() else {
+        return -1;
+    };
+    let guard = engine.timestamp_profiler.lock();
+    let Some(ref profiler) = *guard else {
+        return 0;
+    };
+    if !profiler.is_enabled() {
+        return 0;
+    }
+    let Some(average_ms) = profiler.average_total_gpu_ms() else {
+        return 0;
+    };
+    unsafe {
+        (out_ms_ptr as *mut f64).write_unaligned(average_ms);
+    }
+    1
+}
+
 /// Writes the latest resolved GPU pass timings as NUL-terminated UTF-8 `"pass=0.42;pass2=1.15"`
 /// into `out_ptr`. Returns bytes written, `0` if disabled/empty, or `-1` on error.
+/// # Safety
+/// The caller must pass live Vulkan handles and valid, correctly sized storage for each address argument.
+/// Storage must remain valid until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_get_gpu_pass_timings(out_ptr: u64, max_len: i32) -> i32 {
     if out_ptr == 0 || max_len <= 0 {
@@ -3320,6 +3529,9 @@ pub unsafe extern "C" fn vs_core_get_gpu_pass_timings(out_ptr: u64, max_len: i32
 
 /// Reads the global driver-TDR / shader-failure recovery state. Writes `0`/`1` to `out_disabled_ptr`
 /// and a NUL-terminated UTF-8 diagnostic notice to `out_notice_ptr`. Returns bytes written (`>= 0`).
+/// # Safety
+/// The caller must pass live Vulkan handles and valid, correctly sized storage for each address argument.
+/// Storage must remain valid until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_get_recovery_state(
     out_disabled_ptr: u64,
@@ -3342,6 +3554,8 @@ pub unsafe extern "C" fn vs_core_get_recovery_state(
 }
 
 /// Resets `global_device_lost_guard()` to re-enable RT/VSP passes after recovery or pack reload.
+/// # Safety
+/// Calls must follow this entry point’s Vulkan engine lifecycle and must not race core initialization or shutdown.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_reset_recovery_state() -> i32 {
     crate::crash::global_device_lost_guard().reset();
@@ -3350,6 +3564,9 @@ pub unsafe extern "C" fn vs_core_reset_recovery_state() -> i32 {
 
 /// Starts asynchronous shader pack prewarming on a background `"hyaloclast-prewarm"` thread.
 /// Returns `0` on start or `-1` on invalid arguments / uninitialized engine.
+/// # Safety
+/// The caller must pass live Vulkan handles and valid, correctly sized storage for each address argument.
+/// Storage must remain valid until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_start_pack_prewarm(pack_path_ptr: u64, pack_path_len: i32) -> i32 {
     if pack_path_ptr == 0 || pack_path_len <= 0 {
@@ -3371,8 +3588,12 @@ pub unsafe extern "C" fn vs_core_start_pack_prewarm(pack_path_ptr: u64, pack_pat
         let ctx = engine.ctx.read();
         let tier = ctx.platform_tier_policy().clamp_render_tier(requested_tier);
         let hw_caps = vsp_compiler::preprocessor::HardwareShaderCaps {
-            ser_ext: ctx.capabilities.supports_ser_ext && ctx.capabilities.ser_reordering_active,
-            ser_nv: ctx.capabilities.supports_ser_nv && ctx.capabilities.ser_reordering_active,
+            ser_ext: crate::gpu::ser_reordering_enabled()
+                && ctx.capabilities.supports_ser_ext
+                && ctx.capabilities.ser_reordering_active,
+            ser_nv: crate::gpu::ser_reordering_enabled()
+                && ctx.capabilities.supports_ser_nv
+                && ctx.capabilities.ser_reordering_active,
             ada_or_newer: ctx.capabilities.gpu_arch.is_ada_or_newer(),
             high_end_gpu: ctx.capabilities.gpu_tier_class.is_high_end(),
             opacity_micromap: ctx.capabilities.supports_opacity_micromap,
@@ -3393,6 +3614,9 @@ pub unsafe extern "C" fn vs_core_start_pack_prewarm(pack_path_ptr: u64, pack_pat
 
 /// Polls progress of the active background pack prewarmer.
 /// Returns `0` on success or `-1` if no prewarmer is active (or engine is uninitialized).
+/// # Safety
+/// The caller must pass live Vulkan handles and valid, correctly sized storage for each address argument.
+/// Storage must remain valid until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_get_prewarm_progress(
     out_completed_ptr: u64,
@@ -3423,6 +3647,8 @@ pub unsafe extern "C" fn vs_core_get_prewarm_progress(
 
 /// Enables (`enabled != 0`) or disables (`enabled == 0`) Distant Horizons LOD BLAS injection,
 /// cleanly retiring resident LOD BLASes when disabled. Returns `0` or `-1` if uninitialized.
+/// # Safety
+/// Calls must follow this entry point’s Vulkan engine lifecycle and must not race core initialization or shutdown.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_set_lod_enabled(enabled: i32) -> i32 {
     let Some(engine) = engine() else {
@@ -3439,6 +3665,8 @@ pub unsafe extern "C" fn vs_core_set_lod_enabled(enabled: i32) -> i32 {
 /// Sets the active Minecraft dimension (`0` = Overworld, `1` = Nether, `2` = End) for
 /// dimension-aware emissive scaling and resets temporal history if the dimension changed.
 /// Returns `0` on success or `-1` if uninitialized.
+/// # Safety
+/// Calls must follow this entry point’s Vulkan engine lifecycle and must not race core initialization or shutdown.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_set_dimension(dimension_id: i32) -> i32 {
     let Some(engine) = engine() else {
@@ -3462,6 +3690,9 @@ pub unsafe extern "C" fn vs_core_set_dimension(dimension_id: i32) -> i32 {
 /// Attaches pre-encoded Opacity Micromap (`VK_EXT_opacity_micromap`) bit data to a cutout terrain
 /// slice (`layer_ordinal == 1`) so its next BLAS build binds a hardware `VkMicromapEXT`.
 /// Returns `0` if attached, or `-1` on invalid arguments / uninitialized engine / missing slice.
+/// # Safety
+/// The caller must pass live Vulkan handles and valid, correctly sized storage for each address argument.
+/// Storage must remain valid until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_attach_cutout_omm(
     allocation_key_id: u64,
@@ -3519,6 +3750,9 @@ pub unsafe extern "C" fn vs_core_attach_cutout_omm(
 /// Submits a categorized dynamic entity geometry batch (mobs, players, armor/elytra overlays,
 /// block entities, particles, weather, held items, first-person hand, or crumbling overlay)
 /// for inclusion in the per-frame dynamic Entity BLAS.
+/// # Safety
+/// The caller must pass live Vulkan handles and valid, correctly sized storage for each address argument.
+/// Storage must remain valid until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_submit_entity_vertices_categorized(
     vertex_data_ptr: u64,
@@ -3553,7 +3787,7 @@ pub unsafe extern "C" fn vs_core_submit_entity_vertices_categorized(
     let (normal_slot, specular_slot) = if normal_tex_id > 0 || specular_tex_id > 0 {
         (normal_tex_id.max(0) as u32, specular_tex_id.max(0) as u32)
     } else if albedo_slot > 0 {
-        engine.bindless.lock().companions_for_albedo(albedo_slot)
+        engine.bindless.read().companions_for_albedo(albedo_slot)
     } else {
         (0, 0)
     };
@@ -3578,6 +3812,8 @@ pub unsafe extern "C" fn vs_core_submit_entity_vertices_categorized(
 /// Handles display/swapchain resize events by resetting temporal history across all subsystems
 /// and retiring resize-sensitive internal render-graph targets cleanly.
 /// Returns `0` on success or `-1` if the engine is not initialized.
+/// # Safety
+/// Calls must follow this entry point’s Vulkan engine lifecycle and must not race core initialization or shutdown.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_on_display_resized() -> i32 {
     let Some(engine) = engine() else {
@@ -3608,6 +3844,8 @@ pub unsafe extern "C" fn vs_core_on_display_resized() -> i32 {
 /// Handles Minecraft `F3+T` resource reload events by resetting temporal history, clearing
 /// cached descriptor signatures, and marking cutout Opacity Micromap slices dirty for rebuild.
 /// Returns `0` on success or `-1` if the engine is not initialized.
+/// # Safety
+/// Calls must follow this entry point’s Vulkan engine lifecycle and must not race core initialization or shutdown.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vs_core_on_resources_reloaded() -> i32 {
     let Some(engine) = engine() else {

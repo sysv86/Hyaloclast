@@ -66,6 +66,7 @@ data class PackSettingDefinition(
     val max: Double? = null,
     val step: Double? = null,
     val options: List<String> = emptyList(),
+    val optionLabels: List<String> = emptyList(),
     val runtime: Boolean = true,
     val category: String? = null,
     val description: String? = null,

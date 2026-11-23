@@ -23,6 +23,11 @@ layout(set = 0, binding = 4, r32f) uniform writeonly image2D outLinearDepth;
 layout(set = 0, binding = 5, rgba16f) uniform writeonly image2D outPtAlbedo;
 layout(set = 0, binding = 6, rgba16f) uniform writeonly image2D outSharpRadiance;
 layout(set = 0, binding = 7, rgba8) uniform writeonly image2D outMaterialPbr;
+layout(set = 0, binding = 8) uniform sampler2DArray uVolumetricFog;
+#if VS_ACTIVE_RENDER_TIER >= 3
+layout(set = 0, binding = 9) uniform sampler2DArray uRestirGiReservoirHistory;
+layout(set = 0, binding = 10, rgba16f) uniform writeonly image2DArray uRestirGiReservoir;
+#endif
 
 layout(set = 1, binding = 0) uniform accelerationStructureEXT topLevelAS;
 layout(set = 1, binding = 2, std140) uniform SharcConfigUBO {
@@ -53,16 +58,12 @@ const int VS_PT_MAX_BOUNCES_CAP = 6;
 const float VS_PT_INDIRECT_RAY_DIST = 128.0;
 const float VS_PT_OPTICAL_RAY_DIST = 256.0;
 const float VS_PT_SUN_SHADOW_DIST = 320.0;
-const int VS_PT_VOLUMETRIC_STEPS = 8;
-const float VS_PT_VOLUMETRIC_MAX_DIST = 224.0;
 const uint VS_PT_RESTIR_CANDIDATES = 16u;
 #else
 const int VS_PT_MAX_BOUNCES_CAP = 4;
 const float VS_PT_INDIRECT_RAY_DIST = 72.0;
 const float VS_PT_OPTICAL_RAY_DIST = 128.0;
 const float VS_PT_SUN_SHADOW_DIST = 196.0;
-const int VS_PT_VOLUMETRIC_STEPS = 6;
-const float VS_PT_VOLUMETRIC_MAX_DIST = 144.0;
 const uint VS_PT_RESTIR_CANDIDATES = 8u;
 #endif
 
@@ -217,72 +218,6 @@ vec3 evaluateTop2OpticalGlints(
         accum += min(directLocalLight(uEmissiveLights.lights[topIdx1], glintSurf, geomN, pos, V) * scale, maxClamp);
     }
     return accum;
-}
-
-// Hardware-raytraced volumetric god rays (blue-noise jittered visibility march + Nether/End haze)
-vec3 traceVolumetricGodRays(
-    vec3 origin,
-    vec3 direction,
-    float hitDist,
-    float hitSkyLight,
-    vec3 L,
-    vec3 sunEnergy,
-    float daylight,
-    float bnJitter,
-    inout uint rng
-) {
-    float rayStrength = clamp(VS_PARAM_GODRAYS_INTENSITY, 0.0, 2.0);
-    if (rayStrength <= 0.01) {
-        return vec3(0.0);
-    }
-    float maxDist = min(hitDist, VS_PT_VOLUMETRIC_MAX_DIST);
-    if (maxDist <= 2.0) {
-        return vec3(0.0);
-    }
-
-    int dimId = vsDimensionId();
-    float density = clamp(VS_PARAM_FOG_DENSITY, 0.0005, 0.015) * vsBiomeFogDensityScale()
-        * (1.0 + vsWorld.rain * 0.65);
-
-    if (dimId == 1) {
-        float hazeFactor = 1.0 - exp(-maxDist * density * 1.15);
-        vec3 netherGlow = mix(vec3(0.28, 0.07, 0.03), vsBiomeFogTint() * 0.55, 0.55);
-        return min(netherGlow * hazeFactor * 0.32 * rayStrength, vec3(0.45));
-    }
-    if (dimId == 2) {
-        float hazeFactor = 1.0 - exp(-maxDist * density * 0.85);
-        vec3 endGlow = mix(vec3(0.11, 0.07, 0.20), vsBiomeFogTint() * 0.45, 0.45);
-        return min(endGlow * hazeFactor * 0.28 * rayStrength, vec3(0.35));
-    }
-
-    if (daylight < 0.03) {
-        return vec3(0.0);
-    }
-
-    float cosTheta = dot(direction, L);
-    float g = 0.74;
-    float g2 = g * g;
-    float mie = (1.0 - g2) / (12.56637061 * pow(max(1.0 + g2 - 2.0 * g * cosTheta, 1e-3), 1.5));
-    float forwardBias = mix(0.18, 1.0, smoothstep(-0.2, 0.92, cosTheta));
-
-    const int STEPS = VS_PT_VOLUMETRIC_STEPS;
-    float stepLen = maxDist / float(STEPS);
-    float litAccum = 0.0;
-
-    for (int i = 0; i < STEPS; ++i) {
-        float jitter = fract(bnJitter + float(i) * 0.61803399 + vsRandFloat(rng) * 0.15);
-        float t = (float(i) + jitter) * stepLen;
-        vec3 samplePos = origin + direction * t;
-        float worldY = samplePos.y + uSharc.cfg.cameraPosition.y;
-        float heightScale = exp(-clamp((worldY - 64.0) * 0.020, -0.35, 2.6));
-        if (traceVisible(samplePos, L, VS_PT_VOLUMETRIC_MAX_DIST)) {
-            litAccum += heightScale;
-        }
-    }
-
-    float shaft = (litAccum / float(STEPS)) * (1.0 - exp(-maxDist * density * 0.24));
-    vec3 shaftColor = mix(sunEnergy, vsBiomeFogTint() * max(sunEnergy.r, 0.4), 0.18);
-    return min(shaftColor * (shaft * (0.045 + 0.34 * mie) * forwardBias * rayStrength), vec3(0.85));
 }
 
 vec3 sampleLocalLight(ivec2 pixel, vec2 prevUv, bool validPrevUv, float primaryDepth, VsSurface s, vec3 geomN, vec3 p, vec3 V,
@@ -451,8 +386,143 @@ vec3 fresnel(VsSurface s, float cosTheta) {
     return mix(f0, vec3(1.0), pow(1.0 - clamp(cosTheta, 0.0, 1.0), 5.0));
 }
 
+#if VS_ACTIVE_RENDER_TIER >= 3
+struct VsRestirGiReservoir {
+    vec3 direction;
+    vec3 radiance;
+    float targetPdf;
+    float weightSum;
+    float M;
+};
+
+void vsRestirGiInit(out VsRestirGiReservoir reservoir) {
+    reservoir.direction = vec3(0.0, 1.0, 0.0);
+    reservoir.radiance = vec3(0.0);
+    reservoir.targetPdf = 0.0;
+    reservoir.weightSum = 0.0;
+    reservoir.M = 0.0;
+}
+
+vec2 vsRestirGiEncodeDirection(vec3 direction) {
+    vec3 n = direction / max(abs(direction.x) + abs(direction.y) + abs(direction.z), 1e-6);
+    vec2 oct = n.xy;
+    if (n.z < 0.0) {
+        oct = (1.0 - abs(oct.yx)) * sign(oct.xy);
+    }
+    return oct * 0.5 + 0.5;
+}
+
+vec3 vsRestirGiDecodeDirection(vec2 encoded) {
+    vec2 f = encoded * 2.0 - 1.0;
+    vec3 n = vec3(f, 1.0 - abs(f.x) - abs(f.y));
+    if (n.z < 0.0) {
+        n.xy = (1.0 - abs(n.yx)) * sign(n.xy);
+    }
+    return normalize(n);
+}
+
+vec3 vsRestirGiContribution(VsSurface surface, vec3 viewDir, vec3 direction, vec3 incoming, float strength) {
+    float cosine = max(dot(surface.normal, direction), 0.0);
+    if (cosine <= 0.0) {
+        return vec3(0.0);
+    }
+    vec3 diffuse = (1.0 - fresnel(surface, dot(surface.normal, viewDir)))
+        * surface.albedo * (1.0 - surface.metallic) * surface.ao;
+    return diffuse * incoming * (cosine * (1.0 / 3.14159265) * strength);
+}
+
+void vsRestirGiUpdate(
+    inout VsRestirGiReservoir reservoir,
+    vec3 direction,
+    vec3 radiance,
+    float targetPdf,
+    float sourcePdf,
+    float randomValue
+) {
+    float weight = max(targetPdf, 0.0) / max(sourcePdf, 1e-6);
+    reservoir.weightSum += weight;
+    reservoir.M += 1.0;
+    if (weight > 0.0 && randomValue * reservoir.weightSum < weight) {
+        reservoir.direction = direction;
+        reservoir.radiance = radiance;
+        reservoir.targetPdf = targetPdf;
+    }
+}
+
+void vsRestirGiCombine(
+    inout VsRestirGiReservoir reservoir,
+    VsRestirGiReservoir history,
+    float currentTargetPdf,
+    float randomValue
+) {
+    if (history.M <= 0.0 || history.targetPdf <= 1e-6 || currentTargetPdf <= 1e-6) {
+        return;
+    }
+    float historyM = min(history.M, 8.0);
+    float averageWeight = history.weightSum / max(history.targetPdf * history.M, 1e-6);
+    float weight = currentTargetPdf * clamp(averageWeight, 0.0, 8.0) * historyM;
+    reservoir.weightSum += weight;
+    reservoir.M += historyM;
+    if (weight > 0.0 && randomValue * reservoir.weightSum < weight) {
+        reservoir.direction = history.direction;
+        reservoir.radiance = history.radiance;
+        reservoir.targetPdf = currentTargetPdf;
+    }
+}
+
+float vsRestirGiFinalizeWeight(VsRestirGiReservoir reservoir) {
+    if (reservoir.M <= 0.0 || reservoir.targetPdf <= 1e-6) {
+        return 0.0;
+    }
+    return clamp(reservoir.weightSum / max(reservoir.targetPdf * reservoir.M, 1e-6), 0.0, 4.0);
+}
+
+vec3 vsRestirGiAddSample(
+    inout VsRestirGiReservoir reservoir,
+    VsSurface surface,
+    vec3 viewDir,
+    vec3 direction,
+    vec3 incoming,
+    float strength,
+    float sourcePdf,
+    inout uint rng
+) {
+    vec3 contribution = vsRestirGiContribution(surface, viewDir, direction, incoming, strength);
+    float targetPdf = dot(contribution, vec3(0.2126, 0.7152, 0.0722));
+    vsRestirGiUpdate(reservoir, direction, incoming, targetPdf, sourcePdf, vsRandFloat(rng));
+    if (reservoir.M <= 0.0 || reservoir.targetPdf <= 1e-6) {
+        return vec3(0.0);
+    }
+    vec3 selected = vsRestirGiContribution(
+        surface, viewDir, reservoir.direction, reservoir.radiance, strength
+    );
+    return selected * vsRestirGiFinalizeWeight(reservoir);
+}
+
+void vsRestirGiStore(ivec2 pixel, VsRestirGiReservoir reservoir, float surfaceDepth) {
+    if ((pixel.x & 3) != 0 || (pixel.y & 3) != 0) {
+        return;
+    }
+    ivec3 size = imageSize(uRestirGiReservoir);
+    ivec2 cell = min(pixel / 4, size.xy - ivec2(1));
+    imageStore(uRestirGiReservoir, ivec3(cell, 0), vec4(
+        vsRestirGiEncodeDirection(reservoir.direction),
+        reservoir.targetPdf,
+        reservoir.weightSum
+    ));
+    imageStore(uRestirGiReservoir, ivec3(cell, 1), vec4(reservoir.radiance, reservoir.M));
+    imageStore(uRestirGiReservoir, ivec3(cell, 2), vec4(surfaceDepth, 0.0, 0.0, 0.0));
+}
+#endif
+
 void main() {
     ivec2 pixel = ivec2(gl_LaunchIDEXT.xy);
+#if VS_ACTIVE_RENDER_TIER >= 3
+    VsRestirGiReservoir giReservoir;
+    vsRestirGiInit(giReservoir);
+    vsRestirGiStore(pixel, giReservoir, 0.0);
+    bool restirGiEnabled = VS_PARAM_RESTIR_GI > 0.5;
+#endif
     uint hIdx = (uint(vsWorld.frameIndex) % 16u) + 1u;
     float hx = 0.0, hy = 0.0;
     {
@@ -538,6 +608,29 @@ void main() {
     vec2 motion = validPrevUv ? (unjitteredUv - prevUv) : vec2(2.0);
     uint rng = vsPcgHash(uint(pixel.x) * 1973u ^ uint(pixel.y) * 9277u ^ uint(vsWorld.frameIndex) * 26699u);
     bool mirrorLike = primary.roughness < 0.14 || water || isGlass;
+#if VS_ACTIVE_RENDER_TIER >= 3
+    if (restirGiEnabled && !mirrorLike && vsWorld.frameIndex != 0
+        && validPrevUv && all(greaterThanEqual(prevUv, vec2(0.0)))
+        && all(lessThan(prevUv, vec2(1.0)))) {
+        float historyDepth = textureLod(uRestirGiReservoirHistory, vec3(prevUv, 2.0), 0.0).x;
+        if (abs(historyDepth - primaryDepth) <= max(0.75, primaryDepth * 0.06)) {
+            vec4 historyDirection = textureLod(uRestirGiReservoirHistory, vec3(prevUv, 0.0), 0.0);
+            vec4 historyRadiance = textureLod(uRestirGiReservoirHistory, vec3(prevUv, 1.0), 0.0);
+            VsRestirGiReservoir history;
+            history.direction = vsRestirGiDecodeDirection(historyDirection.xy);
+            history.targetPdf = historyDirection.z;
+            history.weightSum = historyDirection.w;
+            history.radiance = max(historyRadiance.rgb, vec3(0.0));
+            history.M = clamp(historyRadiance.a, 0.0, 8.0);
+            float historyTarget = dot(
+                vsRestirGiContribution(primary, -direction, history.direction, history.radiance,
+                    clamp(VS_PARAM_GI_BOUNCE_STRENGTH, 0.2, 2.0)),
+                vec3(0.2126, 0.7152, 0.0722)
+            );
+            vsRestirGiCombine(giReservoir, history, historyTarget, vsRandFloat(rng));
+        }
+    }
+#endif
     vec3 directDir = mirrorLike ? L : vsSampleSunDisk(
         L, mix(0.005, 0.014, daylight), fract(bn.rg + vec2(vsRandFloat(rng), vsRandFloat(rng))));
     float effPrimarySky = (submerged && !water && primarySkyLight > 0.02)
@@ -707,7 +800,20 @@ void main() {
                 }
             }
             if (!bounceHit) {
-                diffuse += throughput * min(vsPayloadGetRadiance(payload), vec3(1.35)) * giStrength;
+                vec3 incoming = min(vsPayloadGetRadiance(payload), vec3(1.35));
+#if VS_ACTIVE_RENDER_TIER >= 3
+                if (restirGiEnabled && bounce == 1u && !isSpecBounce) {
+                    float sourcePdf = (1.0 - specProbability)
+                        * max(dot(primary.normal, rayDir), 0.0) * (1.0 / 3.14159265);
+                    diffuse += vsRestirGiAddSample(
+                        giReservoir, primary, -direction, rayDir, incoming, giStrength, sourcePdf, rng
+                    );
+                    vsRestirGiStore(pixel, giReservoir, primaryDepth);
+                } else
+#endif
+                {
+                    diffuse += throughput * incoming * giStrength;
+                }
                 break;
             }
             p = rayOrigin + rayDir * hitT;
@@ -724,7 +830,20 @@ void main() {
             uint downsample = max(uSharc.cfg.updateDownsampleFactor, 1u);
             bool updateSharc = (((uint(pixel.x) * 3u + uint(pixel.y) * 5u + uint(vsWorld.frameIndex)) % downsample) == 0u);
             if (hasSharc && sharcWeight >= 16.0 && !updateSharc) {
-                diffuse += throughput * min(sharcRad, vec3(4.0)) * giStrength;
+                vec3 incoming = min(sharcRad, vec3(4.0));
+#if VS_ACTIVE_RENDER_TIER >= 3
+                if (restirGiEnabled && bounce == 1u && !isSpecBounce) {
+                    float sourcePdf = (1.0 - specProbability)
+                        * max(dot(primary.normal, rayDir), 0.0) * (1.0 / 3.14159265);
+                    diffuse += vsRestirGiAddSample(
+                        giReservoir, primary, -direction, rayDir, incoming, giStrength, sourcePdf, rng
+                    );
+                    vsRestirGiStore(pixel, giReservoir, primaryDepth);
+                } else
+#endif
+                {
+                    diffuse += throughput * incoming * giStrength;
+                }
                 break;
             }
 
@@ -738,12 +857,20 @@ void main() {
             if (updateSharc || !hasSharc) {
                 sharcAccumulate(uSharc.cfg, hitWorldAbs, s.normal, bounced);
             }
-            diffuse += throughput * bounced * giStrength;
+#if VS_ACTIVE_RENDER_TIER >= 3
+            if (restirGiEnabled && bounce == 1u && !isSpecBounce) {
+                float sourcePdf = (1.0 - specProbability)
+                    * max(dot(primary.normal, rayDir), 0.0) * (1.0 / 3.14159265);
+                diffuse += vsRestirGiAddSample(
+                    giReservoir, primary, -direction, rayDir, bounced, giStrength, sourcePdf, rng
+                );
+                vsRestirGiStore(pixel, giReservoir, primaryDepth);
+            } else
+#endif
+            {
+                diffuse += throughput * bounced * giStrength;
+            }
         }
-    }
-
-    if (!submerged) {
-        diffuse += traceVolumetricGodRays(origin, direction, primaryDepth, primarySkyLight, L, sunEnergy, daylight, bn.r, rng);
     }
 
     if (submerged) {
@@ -751,8 +878,10 @@ void main() {
         sharp = clamp(vsWaterTransmission(sharp, tint, primaryDepth), vec3(0.0), vec3(16.0));
         diffuse = clamp(vsWaterTransmission(diffuse, vec3(0.0), primaryDepth), vec3(0.0), vec3(8.0));
     } else {
-        vec3 scatter = vec3(0.0);
-        vec3 transmission = vec3(1.0);
+        vec2 fogUv = (vec2(pixel) + 0.5) / vec2(gl_LaunchSizeEXT.xy);
+        vec4 fogSample = vsSampleFroxelFog(uVolumetricFog, fogUv, primaryDepth);
+        vec3 scatter = fogSample.rgb;
+        vec3 transmission = vec3(fogSample.a);
         vs_dispatch_hook_fog(primaryDepth, direction, scatter, transmission);
         sharp = clamp(sharp * transmission + scatter, vec3(0.0), vec3(16.0));
         diffuse = clamp(diffuse * transmission, vec3(0.0), vec3(8.0));

@@ -187,6 +187,8 @@ impl BindlessTextureTable {
         Ok(())
     }
 
+    // Mirrors the fields in a pack texture descriptor.
+    #[allow(clippy::too_many_arguments)]
     pub fn register_or_update(
         &mut self,
         vk_image: u64,
@@ -210,6 +212,7 @@ impl BindlessTextureTable {
         )
     }
 
+    // Mirrors format, dimensions, and sampler fields in the renderer texture descriptor.
     #[allow(clippy::too_many_arguments)]
     pub fn register_or_update_with_sampler(
         &mut self,
@@ -237,6 +240,7 @@ impl BindlessTextureTable {
         )
     }
 
+    // Preserves the deferred texture upload ABI used by the Kotlin bridge.
     #[allow(clippy::too_many_arguments)]
     pub fn register_or_update_with_sampler_deferred(
         &mut self,
@@ -1036,6 +1040,11 @@ impl PackTextureTable {
 
     /// Uploads an RGBA8 pack resource into `binding = slot` of Set 3. Returns `0` on success and a
     /// negative Vulkan result code on failure.
+    ///
+    /// # Safety
+    /// `ctx` and its Vulkan device and graphics queue must remain valid for the duration of upload.
+    // Preserves the texture upload ABI used by the Kotlin bridge.
+    #[allow(clippy::too_many_arguments)]
     pub unsafe fn upload_rgba(
         &mut self,
         ctx: &VulkanContext,
@@ -1060,6 +1069,10 @@ impl PackTextureTable {
         }
     }
 
+    /// # Safety
+    /// `ctx` and `retire` must refer to the same live Vulkan device for the duration of upload.
+    // Preserves the deferred texture upload ABI used by the Kotlin bridge.
+    #[allow(clippy::too_many_arguments)]
     pub unsafe fn upload_rgba_deferred(
         &mut self,
         ctx: &VulkanContext,
@@ -1172,7 +1185,7 @@ impl PackTextureTable {
                 (image, memory, None)
             };
 
-            let cleanup_image = |pooled: &mut Option<PooledImageAllocation>| unsafe {
+            let cleanup_image = |pooled: &mut Option<PooledImageAllocation>| {
                 if let Some(mut p) = pooled.take() {
                     p.destroy(&ctx.device);
                 } else {
@@ -1355,7 +1368,7 @@ impl PackTextureTable {
                         let dev = ctx.device.clone();
                         let old_view = old.view;
                         let old_sampler = old.sampler;
-                        rq.retire_later(move || unsafe {
+                        rq.retire_later(move || {
                             if old_sampler != vk::Sampler::null() {
                                 dev.destroy_sampler(old_sampler, None);
                             }

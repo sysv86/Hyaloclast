@@ -81,6 +81,12 @@ object NativeCoreBridge {
         val ready: Boolean = true,
     )
 
+    data class VramBudgetSnapshot(
+        val usedMb: Long,
+        val budgetMb: Long,
+        val pressure: Int,
+    )
+
     private val linker: Linker = Linker.nativeLinker()
     private val arena: Arena = Arena.ofShared()
 
@@ -167,6 +173,7 @@ object NativeCoreBridge {
     private var fnGetRtStats: MethodHandle? = null
     private var fnSetGpuProfilerEnabled: MethodHandle? = null
     private var fnGetGpuPassTimings: MethodHandle? = null
+    private var fnGetAverageGpuFrameTimeMs: MethodHandle? = null
     private var fnGetRecoveryState: MethodHandle? = null
     private var fnResetRecoveryState: MethodHandle? = null
     private var fnStartPackPrewarm: MethodHandle? = null
@@ -208,6 +215,7 @@ object NativeCoreBridge {
     private val vramUsedSeg: MemorySegment = arena.allocate(ValueLayout.JAVA_LONG)
     private val vramBudgetSeg: MemorySegment = arena.allocate(ValueLayout.JAVA_LONG)
     private val vramPressureSeg: MemorySegment = arena.allocate(ValueLayout.JAVA_INT)
+    private val averageGpuFrameTimeSeg: MemorySegment = arena.allocate(ValueLayout.JAVA_DOUBLE)
     private val rtBlasCountSeg: MemorySegment = arena.allocate(ValueLayout.JAVA_INT)
     private val rtTlasInstancesSeg: MemorySegment = arena.allocate(ValueLayout.JAVA_INT)
     private val recoveryDisabledSeg: MemorySegment = arena.allocate(ValueLayout.JAVA_INT)
@@ -222,20 +230,21 @@ object NativeCoreBridge {
     private val customDescPackSeg: MemorySegment = arena.allocate(ValueLayout.JAVA_LONG)
     private val customDescLayoutsScratch = PersistentScratchBuffer(128L, 8L)
 
-    private val lodUploadScratchLock = Any()
-    private val lodVertexScratch = PersistentScratchBuffer(65536L, 8L)
-    private val lodIndexScratch = PersistentScratchBuffer(16384L, 8L)
+    private class IoScratchBuffers {
+        val primary = PersistentScratchBuffer(8192L, 8L)
+        val secondary = PersistentScratchBuffer(4096L, 8L)
+        val output = PersistentScratchBuffer(8192L, 8L)
+    }
 
-    private val ioScratchLock = Any()
-    private val primaryIoScratch = PersistentScratchBuffer(8192L, 8L)
-    private val secondaryIoScratch = PersistentScratchBuffer(4096L, 8L)
-    private val outputIoScratch = PersistentScratchBuffer(8192L, 8L)
+    private class LodUploadScratchBuffers {
+        val vertices = PersistentScratchBuffer(65536L, 8L)
+        val indices = PersistentScratchBuffer(16384L, 8L)
+    }
 
-    private val ommScratchLock = Any()
-    private val ommDataScratch = PersistentScratchBuffer(16384L, 8L)
-
-    private val entityVertexScratchLock = Any()
-    private val entityVertexScratch = PersistentScratchBuffer(65536L, 8L)
+    private val ioScratch = ThreadLocal.withInitial { IoScratchBuffers() }
+    private val lodUploadScratch = ThreadLocal.withInitial { LodUploadScratchBuffers() }
+    private val ommDataScratch = ThreadLocal.withInitial { PersistentScratchBuffer(16384L, 8L) }
+    private val entityVertexScratch = ThreadLocal.withInitial { PersistentScratchBuffer(65536L, 8L) }
 
     @Volatile
     private var deviceLostNotifiedForIncident: Boolean = false
@@ -304,7 +313,6 @@ object NativeCoreBridge {
                 "vs_core_init",
                 FunctionDescriptor.of(
                     ValueLayout.JAVA_INT,
-                    ValueLayout.JAVA_LONG,
                     ValueLayout.JAVA_LONG,
                     ValueLayout.JAVA_LONG,
                     ValueLayout.JAVA_LONG,
@@ -480,6 +488,7 @@ object NativeCoreBridge {
                 lookup,
                 "vs_core_configure_pipeline",
                 FunctionDescriptor.of(
+                    ValueLayout.JAVA_INT,
                     ValueLayout.JAVA_INT,
                     ValueLayout.JAVA_INT,
                     ValueLayout.JAVA_INT,
@@ -918,6 +927,11 @@ object NativeCoreBridge {
                     ValueLayout.JAVA_INT,
                 ),
             )
+            fnGetAverageGpuFrameTimeMs = downcall(
+                lookup,
+                "vs_core_get_average_gpu_frame_time_ms",
+                FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.JAVA_LONG),
+            )
             fnGetRecoveryState = downcall(
                 lookup,
                 "vs_core_get_recovery_state",
@@ -1212,13 +1226,15 @@ object NativeCoreBridge {
     }
 
     @JvmStatic
-    fun lockQueue() {
-        if (!initialized) return
-        val fn = fnLockQueue ?: return
+    fun lockQueue(): Boolean {
+        if (!initialized) return false
+        val fn = fnLockQueue ?: return false
         try {
             fn.invokeExact()
+            return true
         } catch (t: Throwable) {
             logNativeCallError("lockQueue", t)
+            return false
         }
     }
 
@@ -1240,7 +1256,6 @@ object NativeCoreBridge {
         vkDevice: Long,
         graphicsQueue: Long,
         computeQueue: Long,
-        vmaAllocator: Long,
         graphicsQueueFamilyIndex: Int = 0,
         computeQueueFamilyIndex: Int = 0,
         timelineSemaphore: Long = 0L,
@@ -1248,7 +1263,7 @@ object NativeCoreBridge {
         val fn = fnInit ?: return
         syncLwjglInstanceProcAddr()
         try {
-            val rc = fn.invokeExact(vkInstance, vkPhysicalDevice, vkDevice, graphicsQueue, computeQueue, vmaAllocator) as Int
+            val rc = fn.invokeExact(vkInstance, vkPhysicalDevice, vkDevice, graphicsQueue, computeQueue) as Int
             initialized = rc == 0
             if (initialized) {
                 setQueueFamilies(graphicsQueueFamilyIndex, computeQueueFamilyIndex)
@@ -1297,6 +1312,7 @@ object NativeCoreBridge {
                 cfg.frameGenMode.ordinal,
                 if (cfg.hdrEnabled) 1 else 0,
                 if (cfg.enableOverlayPass) 1 else 0,
+                if (cfg.enableSer) 1 else 0,
             ) as Int
         } catch (t: Throwable) {
             logNativeCallError("configurePipeline", t)
@@ -1656,11 +1672,9 @@ object NativeCoreBridge {
         val fn = fnCompileActivePack ?: return 0
         val rc = runCatching {
             val utf8 = packPath.toAbsolutePath().toString().toByteArray(StandardCharsets.UTF_8)
-            synchronized(ioScratchLock) {
-                val seg = primaryIoScratch.ensureCapacity(utf8.size.toLong())
-                MemorySegment.copy(utf8, 0, seg, ValueLayout.JAVA_BYTE, 0L, utf8.size)
-                fn.invokeExact(seg.address(), utf8.size) as Int
-            }
+            val seg = ioScratch.get().primary.ensureCapacity(utf8.size.toLong())
+            MemorySegment.copy(utf8, 0, seg, ValueLayout.JAVA_BYTE, 0L, utf8.size)
+            fn.invokeExact(seg.address(), utf8.size) as Int
         }.getOrDefault(-1)
 
         if (rc < 0) {
@@ -1687,11 +1701,9 @@ object NativeCoreBridge {
                 flat[i * 2] = specPairs[i].first
                 flat[i * 2 + 1] = specPairs[i].second
             }
-            synchronized(ioScratchLock) {
-                val seg = primaryIoScratch.ensureCapacity(flat.size.toLong() * ValueLayout.JAVA_INT.byteSize())
-                MemorySegment.copy(flat, 0, seg, ValueLayout.JAVA_INT, 0L, flat.size)
-                fn.invokeExact(seg.address(), specPairs.size) as Int
-            }
+            val seg = ioScratch.get().primary.ensureCapacity(flat.size.toLong() * ValueLayout.JAVA_INT.byteSize())
+            MemorySegment.copy(flat, 0, seg, ValueLayout.JAVA_INT, 0L, flat.size)
+            fn.invokeExact(seg.address(), specPairs.size) as Int
         }.getOrDefault(-1)
     }
 
@@ -1702,14 +1714,12 @@ object NativeCoreBridge {
         return runCatching {
             val len = fn.invokeExact(0L, 0) as Int
             if (len <= 0) return@runCatching null
-            synchronized(ioScratchLock) {
-                val buf = outputIoScratch.ensureCapacity(len.toLong())
-                val copied = (fn.invokeExact(buf.address(), len) as Int).coerceIn(0, len)
-                if (copied <= 0) return@synchronized null
-                val bytes = ByteArray(copied)
-                MemorySegment.copy(buf, ValueLayout.JAVA_BYTE, 0L, bytes, 0, copied)
-                String(bytes, StandardCharsets.UTF_8)
-            }
+            val buf = ioScratch.get().output.ensureCapacity(len.toLong())
+            val copied = (fn.invokeExact(buf.address(), len) as Int).coerceIn(0, len)
+            if (copied <= 0) return@runCatching null
+            val bytes = ByteArray(copied)
+            MemorySegment.copy(buf, ValueLayout.JAVA_BYTE, 0L, bytes, 0, copied)
+            String(bytes, StandardCharsets.UTF_8)
         }.getOrNull()
     }
 
@@ -1900,14 +1910,12 @@ object NativeCoreBridge {
         return runCatching {
             val needed = fn.invokeExact(0L, 0) as Int
             if (needed <= 0) return ""
-            synchronized(ioScratchLock) {
-                val outSeg = outputIoScratch.ensureCapacity(needed.toLong())
-                val written = (fn.invokeExact(outSeg.address(), needed) as Int).coerceIn(0, needed)
-                if (written <= 0) return@synchronized ""
-                val bytes = ByteArray(written)
-                MemorySegment.copy(outSeg, ValueLayout.JAVA_BYTE, 0L, bytes, 0, written)
-                String(bytes, StandardCharsets.UTF_8)
-            }
+            val outSeg = ioScratch.get().output.ensureCapacity(needed.toLong())
+            val written = (fn.invokeExact(outSeg.address(), needed) as Int).coerceIn(0, needed)
+            if (written <= 0) return@runCatching ""
+            val bytes = ByteArray(written)
+            MemorySegment.copy(outSeg, ValueLayout.JAVA_BYTE, 0L, bytes, 0, written)
+            String(bytes, StandardCharsets.UTF_8)
         }.getOrElse { t -> logNativeCallError("getCapabilityDetails", t); "" }
     }
 
@@ -1976,6 +1984,46 @@ object NativeCoreBridge {
     }
 
     @JvmStatic
+    fun getVramBudgetSnapshot(): VramBudgetSnapshot? {
+        if (!initialized) return null
+        val fn = fnGetVramBudget ?: return null
+        return synchronized(telemetryLock) {
+            runCatching {
+                vramUsedSeg.set(ValueLayout.JAVA_LONG, 0L, 0L)
+                vramBudgetSeg.set(ValueLayout.JAVA_LONG, 0L, 0L)
+                vramPressureSeg.set(ValueLayout.JAVA_INT, 0L, 0)
+                val rc = fn.invokeExact(
+                    vramUsedSeg.address(),
+                    vramBudgetSeg.address(),
+                    vramPressureSeg.address(),
+                ) as Int
+                if (rc < 0) return@synchronized null
+                VramBudgetSnapshot(
+                    usedMb = vramUsedSeg.get(ValueLayout.JAVA_LONG, 0L).coerceAtLeast(0L) / (1024L * 1024L),
+                    budgetMb = vramBudgetSeg.get(ValueLayout.JAVA_LONG, 0L).coerceAtLeast(0L) / (1024L * 1024L),
+                    pressure = vramPressureSeg.get(ValueLayout.JAVA_INT, 0L).coerceAtLeast(0),
+                )
+            }.getOrNull()
+        }
+    }
+
+    @JvmStatic
+    fun getAverageGpuFrameTimeMs(): Double? {
+        if (!initialized) return null
+        val fn = fnGetAverageGpuFrameTimeMs ?: return null
+        return synchronized(telemetryLock) {
+            runCatching {
+                averageGpuFrameTimeSeg.set(ValueLayout.JAVA_DOUBLE, 0L, 0.0)
+                if ((fn.invokeExact(averageGpuFrameTimeSeg.address()) as Int) != 1) {
+                    return@synchronized null
+                }
+                averageGpuFrameTimeSeg.get(ValueLayout.JAVA_DOUBLE, 0L)
+                    .takeIf { it.isFinite() && it > 0.0 }
+            }.getOrNull()
+        }
+    }
+
+    @JvmStatic
     fun getGpuTierClass(): String {
         cachedGpuTierClass?.let { return it }
         if (!initialized) {
@@ -2031,19 +2079,17 @@ object NativeCoreBridge {
         val fn = fnUploadPackTexture ?: return -1
         if (width <= 0 || height <= 0 || rgba.isEmpty()) return -1
         return runCatching {
-            synchronized(ioScratchLock) {
-                val pixels = primaryIoScratch.ensureCapacity(rgba.size.toLong())
-                MemorySegment.copy(rgba, 0, pixels, ValueLayout.JAVA_BYTE, 0L, rgba.size)
-                fn.invokeExact(
-                    slot,
-                    width,
-                    height,
-                    pixels.address(),
-                    rgba.size,
-                    if (filterLinear) 1 else 0,
-                    if (wrapRepeat) 1 else 0,
-                ) as Int
-            }
+            val pixels = ioScratch.get().primary.ensureCapacity(rgba.size.toLong())
+            MemorySegment.copy(rgba, 0, pixels, ValueLayout.JAVA_BYTE, 0L, rgba.size)
+            fn.invokeExact(
+                slot,
+                width,
+                height,
+                pixels.address(),
+                rgba.size,
+                if (filterLinear) 1 else 0,
+                if (wrapRepeat) 1 else 0,
+            ) as Int
         }.getOrElse { t -> logNativeCallError("uploadPackTexture", t); -1 }
     }
 
@@ -2253,36 +2299,35 @@ object NativeCoreBridge {
         }
         val fn = fnUploadLodMeshCpu ?: return false
         return runCatching {
-            synchronized(lodUploadScratchLock) {
-                fun bufferAddress(buf: ByteBuffer, scratch: PersistentScratchBuffer): Long {
-                    val view = buf.slice()
-                    return if (view.isDirect) {
-                        MemorySegment.ofBuffer(view).address()
-                    } else {
-                        val remaining = view.remaining()
-                        val seg = scratch.ensureCapacity(remaining.toLong())
-                        seg.asSlice(0L, remaining.toLong()).asByteBuffer().put(view)
-                        seg.address()
-                    }
+            val scratch = lodUploadScratch.get()
+            fun bufferAddress(buf: ByteBuffer, buffer: PersistentScratchBuffer): Long {
+                val view = buf.slice()
+                return if (view.isDirect) {
+                    MemorySegment.ofBuffer(view).address()
+                } else {
+                    val remaining = view.remaining()
+                    val seg = buffer.ensureCapacity(remaining.toLong())
+                    seg.asSlice(0L, remaining.toLong()).asByteBuffer().put(view)
+                    seg.address()
                 }
-                val vertPtr = bufferAddress(vertices, lodVertexScratch)
-                val idxPtr = if (hasIndices) bufferAddress(indices!!, lodIndexScratch) else 0L
-                val effIndexCount = if (hasIndices) indexCount else 0
-                val res = fn.invokeExact(
-                    lodKeyId,
-                    level,
-                    originBlockX,
-                    originBlockY,
-                    originBlockZ,
-                    scaleBlocks,
-                    vertPtr,
-                    vertexCount,
-                    idxPtr,
-                    effIndexCount,
-                    materialFlags,
-                ) as Int
-                res > 0
             }
+            val vertPtr = bufferAddress(vertices, scratch.vertices)
+            val idxPtr = if (hasIndices) bufferAddress(indices!!, scratch.indices) else 0L
+            val effIndexCount = if (hasIndices) indexCount else 0
+            val res = fn.invokeExact(
+                lodKeyId,
+                level,
+                originBlockX,
+                originBlockY,
+                originBlockZ,
+                scaleBlocks,
+                vertPtr,
+                vertexCount,
+                idxPtr,
+                effIndexCount,
+                materialFlags,
+            ) as Int
+            res > 0
         }.getOrElse { t -> logNativeCallError("uploadLodMeshCpu", t); false }
     }
 
@@ -2379,42 +2424,41 @@ object NativeCoreBridge {
         return runCatching {
             val srcBytes = source.toByteArray(StandardCharsets.UTF_8)
             val dirBytes = packDir?.toAbsolutePath()?.toString()?.toByteArray(StandardCharsets.UTF_8) ?: ByteArray(0)
-            synchronized(ioScratchLock) {
-                val srcSeg = primaryIoScratch.ensureCapacity(srcBytes.size.toLong())
-                MemorySegment.copy(srcBytes, 0, srcSeg, ValueLayout.JAVA_BYTE, 0L, srcBytes.size)
-                val dirSeg = if (dirBytes.isNotEmpty()) {
-                    val seg = secondaryIoScratch.ensureCapacity(dirBytes.size.toLong())
-                    MemorySegment.copy(dirBytes, 0, seg, ValueLayout.JAVA_BYTE, 0L, dirBytes.size)
-                    seg
-                } else {
-                    MemorySegment.NULL
-                }
-                val needed = fn.invokeExact(
-                    srcSeg.address(),
-                    srcBytes.size,
-                    dirSeg.address(),
-                    dirBytes.size,
-                    stageFlag,
-                    0L,
-                    0,
-                ) as Int
-                if (needed <= 0) return@synchronized null
-                val outSeg = outputIoScratch.ensureCapacity(needed.toLong())
-                val written = fn.invokeExact(
-                    srcSeg.address(),
-                    srcBytes.size,
-                    dirSeg.address(),
-                    dirBytes.size,
-                    stageFlag,
-                    outSeg.address(),
-                    needed,
-                ) as Int
-                val clamped = written.coerceIn(0, needed)
-                if (clamped <= 0) return@synchronized null
-                val outBytes = ByteArray(clamped)
-                MemorySegment.copy(outSeg, ValueLayout.JAVA_BYTE, 0L, outBytes, 0, clamped)
-                String(outBytes, StandardCharsets.UTF_8)
+            val scratch = ioScratch.get()
+            val srcSeg = scratch.primary.ensureCapacity(srcBytes.size.toLong())
+            MemorySegment.copy(srcBytes, 0, srcSeg, ValueLayout.JAVA_BYTE, 0L, srcBytes.size)
+            val dirSeg = if (dirBytes.isNotEmpty()) {
+                val seg = scratch.secondary.ensureCapacity(dirBytes.size.toLong())
+                MemorySegment.copy(dirBytes, 0, seg, ValueLayout.JAVA_BYTE, 0L, dirBytes.size)
+                seg
+            } else {
+                MemorySegment.NULL
             }
+            val needed = fn.invokeExact(
+                srcSeg.address(),
+                srcBytes.size,
+                dirSeg.address(),
+                dirBytes.size,
+                stageFlag,
+                0L,
+                0,
+            ) as Int
+            if (needed <= 0) return@runCatching null
+            val outSeg = scratch.output.ensureCapacity(needed.toLong())
+            val written = fn.invokeExact(
+                srcSeg.address(),
+                srcBytes.size,
+                dirSeg.address(),
+                dirBytes.size,
+                stageFlag,
+                outSeg.address(),
+                needed,
+            ) as Int
+            val clamped = written.coerceIn(0, needed)
+            if (clamped <= 0) return@runCatching null
+            val outBytes = ByteArray(clamped)
+            MemorySegment.copy(outSeg, ValueLayout.JAVA_BYTE, 0L, outBytes, 0, clamped)
+            String(outBytes, StandardCharsets.UTF_8)
         }.getOrNull()
     }
 
@@ -2491,12 +2535,10 @@ object NativeCoreBridge {
         val bytes = path.toByteArray(Charsets.UTF_8)
         if (bytes.isEmpty()) return
         runCatching {
-            synchronized(ioScratchLock) {
-                val seg = primaryIoScratch.ensureCapacity(bytes.size.toLong())
-                MemorySegment.copy(bytes, 0, seg, ValueLayout.JAVA_BYTE, 0L, bytes.size)
-                fn.invokeExact(seg, bytes.size)
-                Unit
-            }
+            val seg = ioScratch.get().primary.ensureCapacity(bytes.size.toLong())
+            MemorySegment.copy(bytes, 0, seg, ValueLayout.JAVA_BYTE, 0L, bytes.size)
+            fn.invokeExact(seg, bytes.size)
+            Unit
         }.onFailure { logNativeCallError("setGameDir", it) }
     }
 
@@ -2520,14 +2562,12 @@ object NativeCoreBridge {
             val needed = drainFn.invokeExact(0L, 0) as Int
             if (needed <= 0) return@runCatching null
             val capacity = needed + 1024
-            synchronized(ioScratchLock) {
-                val outSeg = outputIoScratch.ensureCapacity(capacity.toLong())
-                val written = (drainFn.invokeExact(outSeg.address(), capacity) as Int).coerceIn(0, capacity)
-                if (written <= 0) return@synchronized null
-                val bytes = ByteArray(written)
-                MemorySegment.copy(outSeg, ValueLayout.JAVA_BYTE, 0L, bytes, 0, written)
-                String(bytes, StandardCharsets.UTF_8)
-            }
+            val outSeg = ioScratch.get().output.ensureCapacity(capacity.toLong())
+            val written = (drainFn.invokeExact(outSeg.address(), capacity) as Int).coerceIn(0, capacity)
+            if (written <= 0) return@runCatching null
+            val bytes = ByteArray(written)
+            MemorySegment.copy(outSeg, ValueLayout.JAVA_BYTE, 0L, bytes, 0, written)
+            String(bytes, StandardCharsets.UTF_8)
         }.getOrElse { t ->
             logNativeCallError("drainNativeErrorsToLog", t)
             null
@@ -2745,11 +2785,9 @@ object NativeCoreBridge {
         val utf8 = packPath.toAbsolutePath().toString().toByteArray(StandardCharsets.UTF_8)
         if (utf8.isEmpty()) return 0
         return runCatching {
-            synchronized(ioScratchLock) {
-                val seg = primaryIoScratch.ensureCapacity(utf8.size.toLong())
-                MemorySegment.copy(utf8, 0, seg, ValueLayout.JAVA_BYTE, 0L, utf8.size)
-                fn.invokeExact(seg.address(), utf8.size) as Int
-            }
+            val seg = ioScratch.get().primary.ensureCapacity(utf8.size.toLong())
+            MemorySegment.copy(utf8, 0, seg, ValueLayout.JAVA_BYTE, 0L, utf8.size)
+            fn.invokeExact(seg.address(), utf8.size) as Int
         }.getOrElse { t -> logNativeCallError("startPackPrewarm", t); -1 }
     }
 
@@ -2811,20 +2849,18 @@ object NativeCoreBridge {
         if (!initialized || triangleCount <= 0 || encodedData.isEmpty()) return false
         val fn = fnAttachCutoutOmm ?: return false
         return runCatching {
-            synchronized(ommScratchLock) {
-                val seg = ommDataScratch.ensureCapacity(encodedData.size.toLong())
-                MemorySegment.copy(encodedData, 0, seg, ValueLayout.JAVA_BYTE, 0L, encodedData.size)
-                val rc = fn.invokeExact(
-                    allocationKeyId,
-                    layerOrdinal,
-                    triangleCount,
-                    subdivLevel,
-                    if (use4State) 1 else 0,
-                    seg.address(),
-                    encodedData.size,
-                ) as Int
-                rc >= 0
-            }
+            val seg = ommDataScratch.get().ensureCapacity(encodedData.size.toLong())
+            MemorySegment.copy(encodedData, 0, seg, ValueLayout.JAVA_BYTE, 0L, encodedData.size)
+            val rc = fn.invokeExact(
+                allocationKeyId,
+                layerOrdinal,
+                triangleCount,
+                subdivLevel,
+                if (use4State) 1 else 0,
+                seg.address(),
+                encodedData.size,
+            ) as Int
+            rc >= 0
         }.getOrElse { t ->
             logNativeCallError("attachCutoutOmm", t)
             false
@@ -2850,32 +2886,30 @@ object NativeCoreBridge {
         val legacyFn = if (categorizedFn == null) fnSubmitEntityVertices else null
         if (categorizedFn == null && (legacyFn == null || textureId < 0)) return
         try {
-            synchronized(entityVertexScratchLock) {
-                val seg = entityVertexScratch.ensureCapacity(vertexBytes.size.toLong())
-                MemorySegment.copy(vertexBytes, 0, seg, ValueLayout.JAVA_BYTE, 0L, vertexBytes.size)
-                if (categorizedFn != null) {
-                    categorizedFn.invokeExact(
-                        seg.address(),
-                        vertexCount,
-                        vertexStride,
-                        if (isQuads) 1 else 0,
-                        textureId,
-                        normalTexId,
-                        specularTexId,
-                        kind,
-                        category,
-                        entityFlags,
-                    )
-                } else if (legacyFn != null) {
-                    @Suppress("UNUSED_VARIABLE")
-                    val ignored = legacyFn.invokeExact(
-                        seg.address(),
-                        vertexCount,
-                        vertexStride,
-                        textureId,
-                        kind,
-                    ) as Int
-                }
+            val seg = entityVertexScratch.get().ensureCapacity(vertexBytes.size.toLong())
+            MemorySegment.copy(vertexBytes, 0, seg, ValueLayout.JAVA_BYTE, 0L, vertexBytes.size)
+            if (categorizedFn != null) {
+                categorizedFn.invokeExact(
+                    seg.address(),
+                    vertexCount,
+                    vertexStride,
+                    if (isQuads) 1 else 0,
+                    textureId,
+                    normalTexId,
+                    specularTexId,
+                    kind,
+                    category,
+                    entityFlags,
+                )
+            } else if (legacyFn != null) {
+                @Suppress("UNUSED_VARIABLE")
+                val ignored = legacyFn.invokeExact(
+                    seg.address(),
+                    vertexCount,
+                    vertexStride,
+                    textureId,
+                    kind,
+                ) as Int
             }
         } catch (t: Throwable) {
             logNativeCallError("submitEntityVerticesCategorized", t)

@@ -114,7 +114,8 @@ object VulkanShaders : ClientModInitializer {
         val packId = newConfig.selectedPackId
         val frameGenChanged = prev.frameGenMode != newConfig.frameGenMode
         val packOrTierChanged = prev.selectedPackId != packId ||
-            prev.renderTier != newConfig.renderTier || prev.enabled != newConfig.enabled
+            prev.renderTier != newConfig.renderTier || prev.enabled != newConfig.enabled ||
+            prev.enableSer != newConfig.enableSer
         val oldOverrides = prev.activePackOverrides(packId)
         val newOverrides = newConfig.activePackOverrides(packId)
         val specChanged = ShaderPackManager.activePack?.manifest?.settings?.any { setting ->

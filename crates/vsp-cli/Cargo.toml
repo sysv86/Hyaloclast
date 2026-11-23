@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Command-line validation, inspection, and SPIR-V precompilation utility for VulkanShaders (.vsp) packages"
 
 [[bin]]

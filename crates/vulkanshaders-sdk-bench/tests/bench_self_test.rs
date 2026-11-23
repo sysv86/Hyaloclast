@@ -46,9 +46,8 @@ fn build_minimal_elf64_so(exports: &[&str], needed: &[&str]) -> Vec<u8> {
     }
 
     // 2. Build .dynsym (24 bytes per Elf64_Sym)
-    let mut dynsym = Vec::new();
     // Entry 0: STN_UNDEF
-    dynsym.resize(24, 0u8);
+    let mut dynsym = vec![0u8; 24];
     for &name_off in &export_offsets {
         push_u32(&mut dynsym, name_off); // st_name
         dynsym.push((1u8 << 4) | 2u8); // st_info: STB_GLOBAL (1) | STT_FUNC (2)
@@ -207,9 +206,8 @@ fn build_minimal_pe64_dll(dll_name: &str, exports: &[&str]) -> Vec<u8> {
     const EDATA_RAW: usize = 0x200;
 
     let n = exports.len() as u32;
-    let mut edata = Vec::new();
-    // Reserve 40 bytes for IMAGE_EXPORT_DIRECTORY
-    edata.resize(40, 0u8);
+    // IMAGE_EXPORT_DIRECTORY occupies 40 bytes.
+    let mut edata = vec![0u8; 40];
 
     // AddressOfFunctions (n * u32)
     let eat_rva = EDATA_RVA + edata.len() as u32;
@@ -222,7 +220,7 @@ fn build_minimal_pe64_dll(dll_name: &str, exports: &[&str]) -> Vec<u8> {
     for i in 0..n {
         push_u16(&mut edata, i as u16);
     }
-    while edata.len() % 4 != 0 {
+    while !edata.len().is_multiple_of(4) {
         edata.push(0);
     }
 

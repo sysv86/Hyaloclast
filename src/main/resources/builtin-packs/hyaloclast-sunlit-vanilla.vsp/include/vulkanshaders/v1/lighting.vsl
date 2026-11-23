@@ -7,6 +7,28 @@
 // Obsidian Meridian (Hyaloclast) lighting, optics, rain wetness, caustics, LabPBR, and SHaRC primitives.
 // Tier 0/1: CSM / SSGI; Tier 2/3: RayQuery / Hardware Path Tracing + SHaRC + ReSTIR DI.
 
+#ifdef VS_HIGH_END_GPU
+const float VS_FROXEL_MAX_DIST = 224.0;
+#else
+const float VS_FROXEL_MAX_DIST = 144.0;
+#endif
+
+vec4 vsSampleFroxelFog(sampler2DArray fog, vec2 uv, float distanceToCamera) {
+    if (distanceToCamera <= 12.0) {
+        return vec4(0.0, 0.0, 0.0, 1.0);
+    }
+    int layerCount = max(textureSize(fog, 0).z, 1);
+    float depth01 = log(clamp(distanceToCamera, 12.0, VS_FROXEL_MAX_DIST) / 12.0)
+        / log(VS_FROXEL_MAX_DIST / 12.0);
+    float layerPosition = depth01 * float(layerCount) - 1.0;
+    int layer0 = clamp(int(floor(layerPosition)), 0, layerCount - 1);
+    int layer1 = min(layer0 + 1, layerCount - 1);
+    float blend = clamp(layerPosition - float(layer0), 0.0, 1.0);
+    vec4 a = textureLod(fog, vec3(uv, float(layer0)), 0.0);
+    vec4 b = textureLod(fog, vec3(uv, float(layer1)), 0.0);
+    return mix(a, b, blend);
+}
+
 float vsTraceShadow(vec3 worldPos, vec3 normal, vec3 lightDir, float coneRadius) {
     float ndotl = max(dot(normal, lightDir), 0.0);
     float bias = clamp(coneRadius * 0.5, 0.01, 0.15);

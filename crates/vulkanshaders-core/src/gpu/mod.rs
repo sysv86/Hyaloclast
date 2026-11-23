@@ -13,31 +13,52 @@ pub use profiler::{GpuPassTiming, GpuTimestampProfiler};
 
 use ash::{
     Device, Entry, Instance,
-    khr::{
-        acceleration_structure, dynamic_rendering, push_descriptor, ray_tracing_pipeline,
-        synchronization2,
-    },
+    khr::{acceleration_structure, dynamic_rendering, ray_tracing_pipeline, synchronization2},
     vk::{self, Handle},
 };
-use parking_lot::ReentrantMutex;
+use parking_lot::{ReentrantMutex, ReentrantMutexGuard};
+use std::cell::RefCell;
 use std::sync::{
     OnceLock,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 /// Reentrant mutex shared between Java (`VulkanQueue`, `VulkanGpuSurface`, `VulkanCommandEncoder`)
 /// and Rust (`PresentThread`, async BLAS builders) to serialize all `VkQueue` operations.
 static QUEUE_MUTEX: OnceLock<ReentrantMutex<()>> = OnceLock::new();
 static QUEUE_LOCK_COUNT: AtomicU64 = AtomicU64::new(0);
+static SER_REORDERING_ENABLED: AtomicBool = AtomicBool::new(true);
+
+thread_local! {
+    static QUEUE_GUARDS: RefCell<Vec<ReentrantMutexGuard<'static, ()>>> = const { RefCell::new(Vec::new()) };
+}
 
 fn queue_mutex() -> &'static ReentrantMutex<()> {
     QUEUE_MUTEX.get_or_init(|| ReentrantMutex::new(()))
 }
 
+pub fn set_ser_reordering_enabled(enabled: bool) {
+    SER_REORDERING_ENABLED.store(enabled, Ordering::Release);
+}
+
+pub fn ser_reordering_enabled() -> bool {
+    SER_REORDERING_ENABLED.load(Ordering::Acquire)
+        && ser_reordering_enabled_by_environment()
+        && !crate::crash::global_device_lost_guard().is_rt_vsp_disabled()
+}
+
+pub fn ser_reordering_enabled_by_environment() -> bool {
+    !matches!(
+        std::env::var("VS_CORE_ENABLE_SER")
+            .map(|value| value.trim().to_ascii_lowercase())
+            .as_deref(),
+        Ok("0" | "false" | "off")
+    )
+}
+
 /// Acquires the global reentrant Vulkan queue lock (callable from FFM and internal Rust threads).
 pub fn lock_queue() {
-    // Keep the reentrant owner and depth across the Java call's try/finally.
-    std::mem::forget(queue_mutex().lock());
+    QUEUE_GUARDS.with(|guards| guards.borrow_mut().push(queue_mutex().lock()));
     QUEUE_LOCK_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -45,9 +66,12 @@ pub fn lock_queue() {
 ///
 /// # Safety
 /// The calling thread must currently hold a lock acquired via [`lock_queue`].
-pub unsafe fn unlock_queue() {
-    unsafe {
-        queue_mutex().force_unlock();
+pub fn unlock_queue() {
+    let guard = QUEUE_GUARDS.with(|guards| guards.borrow_mut().pop());
+    if let Some(guard) = guard {
+        drop(guard);
+    } else {
+        eprintln!("[vulkanshaders-core] unlock_queue called without a matching lock_queue");
     }
 }
 
@@ -75,8 +99,16 @@ mod queue_tests {
         let nested = queue_mutex().try_lock();
         let acquired = nested.is_some();
         drop(nested);
-        unsafe { unlock_queue() };
+        unlock_queue();
         assert!(acquired);
+    }
+
+    #[test]
+    fn unmatched_ffi_unlock_does_not_release_another_lock() {
+        with_queue_lock(|| {
+            unlock_queue();
+            assert!(queue_mutex().try_lock().is_some());
+        });
     }
 }
 
@@ -446,7 +478,6 @@ pub struct VulkanContext {
     pub compute_queue: vk::Queue,
     pub graphics_queue_family_index: u32,
     pub compute_queue_family_index: u32,
-    pub vma_allocator_raw: u64,
     pub capabilities: DeviceCapabilities,
     pub timestamp_period_ns: f32,
     pub memory_allocator: Option<buffer::GpuMemoryAllocator>,
@@ -456,7 +487,6 @@ pub struct VulkanContext {
     pub rt_pipeline_ext: Option<ray_tracing_pipeline::Device>,
     pub sync2_ext: synchronization2::Device,
     pub dyn_rendering_ext: dynamic_rendering::Device,
-    pub push_desc_ext: push_descriptor::Device,
 }
 
 impl VulkanContext {
@@ -470,7 +500,6 @@ impl VulkanContext {
         vk_device_raw: u64,
         graphics_queue_raw: u64,
         compute_queue_raw: u64,
-        vma_allocator_raw: u64,
     ) -> Result<Self, &'static str> {
         unsafe {
             Self::from_raw_handles_with_families(
@@ -481,7 +510,6 @@ impl VulkanContext {
                 compute_queue_raw,
                 0,
                 0,
-                vma_allocator_raw,
             )
         }
     }
@@ -499,7 +527,6 @@ impl VulkanContext {
         compute_queue_raw: u64,
         graphics_queue_family_index: u32,
         compute_queue_family_index: u32,
-        vma_allocator_raw: u64,
     ) -> Result<Self, &'static str> {
         if vk_instance_raw == 0 || vk_physical_device_raw == 0 || vk_device_raw == 0 {
             return Err("Null Vulkan handle passed to VulkanContext::from_raw_handles");
@@ -548,6 +575,7 @@ impl VulkanContext {
             physical_device,
             device.clone(),
             caps.buffer_device_address,
+            caps.vram_bytes,
         )
         .ok();
 
@@ -576,7 +604,6 @@ impl VulkanContext {
             .then(|| ray_tracing_pipeline::Device::new(&instance, &device));
         let sync2_ext = synchronization2::Device::new(&instance, &device);
         let dyn_rendering_ext = dynamic_rendering::Device::new(&instance, &device);
-        let push_desc_ext = push_descriptor::Device::new(&instance, &device);
 
         Ok(Self {
             entry,
@@ -587,7 +614,6 @@ impl VulkanContext {
             compute_queue,
             graphics_queue_family_index,
             compute_queue_family_index,
-            vma_allocator_raw,
             capabilities: caps,
             timestamp_period_ns,
             memory_allocator,
@@ -597,7 +623,6 @@ impl VulkanContext {
             rt_pipeline_ext,
             sync2_ext,
             dyn_rendering_ext,
-            push_desc_ext,
         })
     }
 

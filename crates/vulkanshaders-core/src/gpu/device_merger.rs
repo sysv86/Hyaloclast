@@ -60,7 +60,7 @@ pub fn set_instance_proc_addr(pfn_raw: u64) {
 }
 
 /// Loads an `ash::Entry` using LWJGL's `vkGetInstanceProcAddr` when available, or falls back to
-/// `Entry::load()`.
+/// `Entry::linked()`.
 pub fn load_vulkan_entry() -> Entry {
     let raw = LWJGL_GET_INSTANCE_PROC_ADDR.load(Ordering::Acquire);
     if raw != 0 {
@@ -70,7 +70,7 @@ pub fn load_vulkan_entry() -> Entry {
         };
         unsafe { Entry::from_static_fn(static_fn) }
     } else {
-        unsafe { Entry::load() }.expect("Failed to dynamically load Vulkan loader")
+        Entry::linked()
     }
 }
 
@@ -571,13 +571,14 @@ pub unsafe fn create_merged_device(
         .ray_tracing_invocation_reorder_reordering_hint
         .as_raw();
     let ser_ext_hint = ser_ext_props.ray_tracing_invocation_reorder_reordering_hint;
-    let ser_reordering_active = evaluate_ser_activation(
-        gpu_arch,
-        supports_ser_nv,
-        ser_nv_hint,
-        supports_ser_ext,
-        ser_ext_hint,
-    );
+    let ser_reordering_active = super::ser_reordering_enabled_by_environment()
+        && evaluate_ser_activation(
+            gpu_arch,
+            supports_ser_nv,
+            ser_nv_hint,
+            supports_ser_ext,
+            ser_ext_hint,
+        );
     let supports_opacity_micromap = has_omm && supp_omm.micromap == vk::TRUE;
 
     let has_portability_subset = seen.contains(&c"VK_KHR_portability_subset".to_owned());

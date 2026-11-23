@@ -36,15 +36,25 @@ impl GpuMemoryAllocator {
         physical_device: vk::PhysicalDevice,
         device: ash::Device,
         buffer_device_address: bool,
+        vram_bytes: u64,
     ) -> Result<Self, AllocationError> {
         let device_raw = device.handle().as_raw();
+        const MB: u64 = 1024 * 1024;
+        const GB: u64 = 1024 * MB;
+        let allocation_sizes = if vram_bytes <= 8 * GB {
+            AllocationSizes::new(32 * MB, 16 * MB)
+                .with_max_device_memblock_size(64 * MB)
+                .with_max_host_memblock_size(32 * MB)
+        } else {
+            AllocationSizes::default()
+        };
         let allocator = Allocator::new(&AllocatorCreateDesc {
             instance,
             device,
             physical_device,
             debug_settings: AllocatorDebugSettings::default(),
             buffer_device_address,
-            allocation_sizes: AllocationSizes::default(),
+            allocation_sizes,
         })?;
         Ok(Self {
             inner: Arc::new(Mutex::new(allocator)),
@@ -59,6 +69,7 @@ impl GpuMemoryAllocator {
             ctx.physical_device,
             ctx.device.clone(),
             ctx.capabilities.buffer_device_address,
+            ctx.capabilities.vram_bytes,
         )
     }
 
@@ -201,12 +212,13 @@ impl Drop for PooledImageAllocation {
 /// `GpuBufferAllocation` instances allocated through `gpu-allocator`. This preserves
 /// `GpuBufferAllocation`'s exact public field layout while guaranteeing clean, leak-free
 /// deallocation back into `gpu-allocator` inside [`GpuBufferAllocation::destroy`].
-static POOLED_BUFFER_REGISTRY: OnceLock<
-    Mutex<HashMap<(u64, u64), (GpuMemoryAllocator, Allocation)>>,
-> = OnceLock::new();
+type PooledBufferKey = (u64, u64);
+type PooledBufferValue = (GpuMemoryAllocator, Allocation);
+type PooledBufferRegistry = Mutex<HashMap<PooledBufferKey, PooledBufferValue>>;
 
-fn pooled_buffer_registry() -> &'static Mutex<HashMap<(u64, u64), (GpuMemoryAllocator, Allocation)>>
-{
+static POOLED_BUFFER_REGISTRY: OnceLock<PooledBufferRegistry> = OnceLock::new();
+
+fn pooled_buffer_registry() -> &'static PooledBufferRegistry {
     POOLED_BUFFER_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -688,6 +700,9 @@ impl SlabArenaAllocator {
         let req_size = GpuBufferAllocation::align_up(size.max(256), align);
 
         let mut guard = self.inner.lock();
+        if guard.slabs.is_empty() && ctx.capabilities.vram_bytes <= 8 * 1024 * 1024 * 1024 {
+            guard.slab_size = guard.slab_size.min(16 * 1024 * 1024);
+        }
         if req_size > guard.slab_size / 2 {
             // Oversized allocation gets its own dedicated buffer
             let usage = guard.usage;
@@ -846,18 +861,19 @@ impl SlabArenaAllocator {
                     && s.free_spans[0].size == s.allocation.size
             })
             .count();
-        if empty_count > 1 && guard.slabs.len() > 1 {
-            if let Some(empty_idx) = guard.slabs.iter().position(|s| {
+        if empty_count > 1
+            && guard.slabs.len() > 1
+            && let Some(empty_idx) = guard.slabs.iter().position(|s| {
                 s.slab_id == slab_id
                     && s.free_spans.len() == 1
                     && s.free_spans[0].offset == 0
                     && s.free_spans[0].size == s.allocation.size
-            }) {
-                let mut reclaimed = guard.slabs.swap_remove(empty_idx);
-                drop(guard);
-                unsafe {
-                    reclaimed.allocation.destroy(device);
-                }
+            })
+        {
+            let mut reclaimed = guard.slabs.swap_remove(empty_idx);
+            drop(guard);
+            unsafe {
+                reclaimed.allocation.destroy(device);
             }
         }
     }

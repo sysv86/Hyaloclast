@@ -17,7 +17,7 @@ layout(std140, set = 0, binding = 7) uniform CsmShadowUBO {
     vec4 texelSizes;
 } uCsm;
 layout(set = 0, binding = 8) uniform sampler2D uSsgiIndirect;
-layout(set = 0, binding = 9) uniform sampler2D uVolumetricFog;
+layout(set = 0, binding = 9) uniform sampler2DArray uVolumetricFog;
 layout(set = 0, binding = 10) uniform sampler2D uDhAlbedo;
 layout(set = 0, binding = 11) uniform sampler2D uDhNormal;
 layout(set = 0, binding = 12) uniform sampler2D uDhMaterial;
@@ -603,8 +603,8 @@ void main() {
             float daySky = (dimId == 0) ? smoothstep(-0.10, 0.24, sunDir.y) : 0.0;
             procSky = vsWaterTint(vec3(0.0), 1.0, daySky);
         } else {
-            vec4 skyVolFog = textureLod(uVolumetricFog, uv, 0.0);
-            procSky += clamp(skyVolFog.rgb, vec3(0.0), vec3(1.5)) * 0.65;
+            vec4 skyVolFog = vsSampleFroxelFog(uVolumetricFog, uv, clamp(vsWorld.depthFar, 64.0, 384.0));
+            procSky = procSky * skyVolFog.a + skyVolFog.rgb;
         }
 
         imageStore(outHdrRadiance, pixel, vec4(max(procSky, vec3(0.0)), 1.0));
@@ -650,31 +650,9 @@ void main() {
         vec3 waterFogTint = vsWaterTint(vec3(0.0), 1.0, dayFactor);
         colorHdr = vsWaterTransmission(colorHdr, waterFogTint, distToCam);
     } else {
-        float activeDepth = isDhPixel ? dhDepth : mcDepth;
-        vec4 volFog = vec4(0.0, 0.0, 0.0, 1.0);
-        float fogWeightSum = 0.0;
-        const vec2 fogOffsets[4] = vec2[4](
-            vec2(-0.5, -0.5), vec2(0.5, -0.5), vec2(-0.5, 0.5), vec2(0.5, 0.5)
-        );
-        for (int fi = 0; fi < 4; ++fi) {
-            vec2 fuv = clamp(uv + fogOffsets[fi] * texelSize * 1.5, vec2(0.001), vec2(0.999));
-            float tapDepth = isDhPixel ? textureLod(uDhDepth, fuv, 0.0).r : textureLod(gDepth, fuv, 0.0).r;
-            if (tapDepth <= 1e-6) continue;
-            float relD = abs(activeDepth - tapDepth) / max(activeDepth, 1e-4);
-            float fw = exp(-relD * 12.0);
-            vec4 tapFog = textureLod(uVolumetricFog, fuv, 0.0);
-            tapFog.a = (tapFog.a > 0.0) ? clamp(tapFog.a, 0.34, 1.0) : 1.0;
-            volFog += tapFog * fw;
-            fogWeightSum += fw;
-        }
-        if (fogWeightSum > 1e-4) {
-            volFog /= fogWeightSum;
-        } else {
-            volFog = textureLod(uVolumetricFog, uv, 0.0);
-            volFog.a = (volFog.a > 0.0) ? clamp(volFog.a, 0.34, 1.0) : 1.0;
-        }
+        vec4 volFog = vsSampleFroxelFog(uVolumetricFog, uv, distToCam);
         vec3 fogScatter = clamp(volFog.rgb, vec3(0.0), vec3(2.5));
-        vec3 fogTransmittance = vec3(clamp(volFog.a, 0.34, 1.0));
+        vec3 fogTransmittance = vec3(clamp(volFog.a, 0.14, 1.0));
         vs_dispatch_hook_fog(distToCam, rayDir, fogScatter, fogTransmittance);
         colorHdr = colorHdr * fogTransmittance + fogScatter;
 

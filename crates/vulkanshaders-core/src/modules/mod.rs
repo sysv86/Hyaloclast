@@ -17,6 +17,14 @@ use vsp_compiler::{
     ShaderStageKind, SpirvReflection, VspCompiler,
 };
 
+type PendingDescriptorWrite<'a> = (
+    vk::WriteDescriptorSet<'a>,
+    Option<usize>,
+    Option<usize>,
+    Option<usize>,
+);
+type ShadowLayerGroup = (bool, u32, u64, u64, [i32; 3], u32, u32);
+
 /// Exact 528-byte `std140` uniform buffer matching `WorldStateCollector.kt` and `common.vsl`:
 /// - `0..63`:   `cur_view_proj` (`mat4`)
 /// - `64..127`: `prev_view_proj` (`mat4`)
@@ -453,6 +461,8 @@ pub struct GpuPipelineManager {
     pub compute_pipelines: HashMap<String, ComputePipelineBundle>,
     pub graphics_pipelines: HashMap<String, GraphicsPipelineBundle>,
     pub rt_pipeline: Option<RayTracingPipelineBundle>,
+    pub rt_uses_reservoirs: bool,
+    pub rt_sharc_enabled: bool,
     pub active_spec_constants: Vec<(u32, u32)>,
     pub last_overlay_depth_params: Option<DepthReprojectPushConstants>,
     pub hdr_push_constants: HdrComposePushConstants,
@@ -808,6 +818,8 @@ impl GpuPipelineManager {
 
     /// Compiles the pack and installs both the Set 2 bindless layout and the Set 3 pack-resource
     /// layout before constructing all pipelines.
+    // Carries both descriptor layouts and optional retirement state into compilation.
+    #[allow(clippy::too_many_arguments)]
     pub fn compile_pack_directory_with_layouts(
         &mut self,
         ctx: &VulkanContext,
@@ -839,8 +851,12 @@ impl GpuPipelineManager {
         retire_queue: Option<&RetireQueue>,
     ) -> usize {
         let hw_caps = vsp_compiler::preprocessor::HardwareShaderCaps {
-            ser_ext: ctx.capabilities.supports_ser_ext && ctx.capabilities.ser_reordering_active,
-            ser_nv: ctx.capabilities.supports_ser_nv && ctx.capabilities.ser_reordering_active,
+            ser_ext: crate::gpu::ser_reordering_enabled()
+                && ctx.capabilities.supports_ser_ext
+                && ctx.capabilities.ser_reordering_active,
+            ser_nv: crate::gpu::ser_reordering_enabled()
+                && ctx.capabilities.supports_ser_nv
+                && ctx.capabilities.ser_reordering_active,
             ada_or_newer: ctx.capabilities.gpu_arch.is_ada_or_newer(),
             high_end_gpu: ctx.capabilities.gpu_tier_class.is_high_end(),
             opacity_micromap: ctx.capabilities.supports_opacity_micromap,
@@ -906,11 +922,13 @@ impl GpuPipelineManager {
     ) -> usize {
         // Keep in-flight sets in their old pool while the replacement generation is built.
         self.retire_active_pipelines(ctx, retire_queue);
+        self.rt_uses_reservoirs = false;
+        self.rt_sharc_enabled = false;
         if self.ensure_descriptor_pool_and_sampler(ctx).is_err() {
             return 0;
         }
 
-        let entry_name = CStr::from_bytes_with_nul(b"main\0").unwrap();
+        let entry_name = c"main";
         let (spec_entries, spec_bytes) =
             Self::build_specialization_entries(&self.active_spec_constants);
         let spec_info = vk::SpecializationInfo::default()
@@ -1135,6 +1153,22 @@ impl GpuPipelineManager {
             }
         }
 
+        let declares_reservoirs = |reflection: &vsp_compiler::SpirvReflection| {
+            reflection
+                .bindings
+                .iter()
+                .any(|binding| binding.set == 1 && binding.binding == 4)
+        };
+        self.rt_uses_reservoirs = self
+            .rt_pipeline
+            .as_ref()
+            .is_some_and(|pipeline| declares_reservoirs(&pipeline.reflection))
+            || self
+                .compute_pipelines
+                .get("rayquery_lighting.comp")
+                .is_some_and(|pipeline| declares_reservoirs(&pipeline.reflection));
+        self.rt_sharc_enabled = self.compute_pipelines.contains_key("sharc_resolve.comp");
+
         compiled_count
     }
 
@@ -1230,7 +1264,7 @@ impl GpuPipelineManager {
             .push_constant_ranges(&pc_range);
         let pipeline_layout = unsafe { ctx.device.create_pipeline_layout(&layout_info, None)? };
 
-        let entry = CStr::from_bytes_with_nul(b"main\0").unwrap();
+        let entry = c"main";
         let mut vs_stage = vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::VERTEX)
             .module(vs)
@@ -1987,6 +2021,16 @@ impl GpuPipelineManager {
         let wg_y = bundle.workgroup_size[1].max(1);
         let groups_x = width.div_ceil(wg_x);
         let groups_y = height.div_ceil(wg_y);
+        let groups_z = if pass_kind == PassKind::ComputeVolumetricFog {
+            graph
+                .internal_targets
+                .get(&RenderGraph::RES_VOLUMETRIC_FOG)
+                .map(|target| target.array_layers.max(1))
+                .unwrap_or(1)
+                .div_ceil(bundle.workgroup_size[2].max(1))
+        } else {
+            1
+        };
 
         unsafe {
             ctx.device
@@ -2048,7 +2092,7 @@ impl GpuPipelineManager {
                     ctx.device.cmd_dispatch(cmd, groups_x, groups_y, 1);
                 }
                 _ => {
-                    ctx.device.cmd_dispatch(cmd, groups_x, groups_y, 1);
+                    ctx.device.cmd_dispatch(cmd, groups_x, groups_y, groups_z);
                 }
             }
         }
@@ -2205,17 +2249,22 @@ impl GpuPipelineManager {
             if b.set == 1 {
                 match b.binding {
                     1 => blas
-                        .map(|m| m.instance_meta_buffer_for_slot(frame_slot).0)
+                        .map(|manager| manager.instance_meta_buffer_for_slot(frame_slot).0)
                         .unwrap_or(vk::Buffer::null()),
                     2 => blas
-                        .map(|m| m.sharc.config_buffer(frame_slot).0)
+                        .map(|manager| manager.sharc.config_buffer(frame_slot).0)
                         .filter(|&buffer| buffer != vk::Buffer::null())
                         .unwrap_or(sharc_fallback_buf),
                     3 => blas
-                        .map(|m| m.emissive_lights.light_buffer_for_slot(frame_slot).0)
+                        .map(|manager| manager.emissive_lights.light_buffer_for_slot(frame_slot).0)
                         .unwrap_or(vk::Buffer::null()),
                     4 => blas
-                        .map(|m| m.emissive_lights.reservoir_buffer_for_slot(frame_slot).0)
+                        .map(|manager| {
+                            manager
+                                .emissive_lights
+                                .reservoir_buffer_for_slot(frame_slot)
+                                .0
+                        })
                         .unwrap_or(vk::Buffer::null()),
                     _ => ubo_buf,
                 }
@@ -2328,12 +2377,7 @@ impl GpuPipelineManager {
         let mut img_infos: Vec<[vk::DescriptorImageInfo; 1]> = Vec::with_capacity(cap);
         let mut as_infos: Vec<vk::WriteDescriptorSetAccelerationStructureKHR> =
             Vec::with_capacity(2);
-        let mut pending_writes: Vec<(
-            vk::WriteDescriptorSet,
-            Option<usize>,
-            Option<usize>,
-            Option<usize>,
-        )> = Vec::with_capacity(cap);
+        let mut pending_writes: Vec<PendingDescriptorWrite<'_>> = Vec::with_capacity(cap);
 
         for b in &refl.bindings {
             // Set 2 (bindless) and Set 3 (pack resources) are global sets bound by the engine and
@@ -2477,12 +2521,11 @@ impl GpuPipelineManager {
         };
 
         match pass_kind {
-            // volumetric_fog.comp: b0 WorldUBO, b1 DEPTH, b2 CsmShadowUBO, b3 SHADOW_CSM,
-            // b4 VOLUMETRIC_FOG (write), b5 DH_DEPTH, b6 uDh UBO.
+            // volumetric_fog.comp: b0 WorldUBO, b1 FOG_HISTORY, b2 CsmShadowUBO,
+            // b3 SHADOW_CSM, b4 VOLUMETRIC_FOG (write).
             PassKind::ComputeVolumetricFog => match binding {
-                1 => active_depth,
+                1 => R::RES_VOLUMETRIC_FOG_HISTORY,
                 3 => R::RES_SHADOW_CSM,
-                5 => R::RES_DH_DEPTH,
                 _ => R::RES_VOLUMETRIC_FOG,
             },
             // ssgi.comp: b0 WorldUBO, b1 ALBEDO, b2 NORMAL, b3 DEPTH, b4 VELOCITY,
@@ -2532,7 +2575,8 @@ impl GpuPipelineManager {
                 _ => R::RES_RAW_RADIANCE,
             },
             // pathtrace.rgen/.rchit/.rmiss Set0: b0 WorldUBO, b1 RAW_RADIANCE, b2 NORMAL,
-            // b3 VELOCITY, b4 LINEAR_DEPTH, b5 PT_ALBEDO, b6 SHARP_RADIANCE, b7 GBUFFER_MATERIAL.
+            // b3 VELOCITY, b4 LINEAR_DEPTH, b5 PT_ALBEDO, b6 SHARP_RADIANCE, b7 GBUFFER_MATERIAL,
+            // b8 VOLUMETRIC_FOG.
             PassKind::FullPathTracing => match binding {
                 1 => R::RES_RAW_RADIANCE,
                 2 => R::RES_GBUFFER_NORMAL,
@@ -2541,6 +2585,7 @@ impl GpuPipelineManager {
                 5 => R::RES_PT_ALBEDO,
                 6 => R::RES_SHARP_RADIANCE,
                 7 => R::RES_GBUFFER_MATERIAL,
+                8 => R::RES_VOLUMETRIC_FOG,
                 _ => R::RES_RAW_RADIANCE,
             },
             // svgf_temporal.comp: b0 WorldUBO, b1 RAW_RADIANCE, b2 NORMAL, b3 VELOCITY,
@@ -2567,6 +2612,7 @@ impl GpuPipelineManager {
             },
             PassKind::PostGradeAndToneMap => match binding {
                 0 | 1 => radiance_after_upscale,
+                10 => R::RES_SVGF_MOMENTS,
                 _ => {
                     if cfg.post_writes_directly_to_hudless() {
                         R::RES_HUDLESS_COLOR
@@ -2610,10 +2656,9 @@ impl GpuPipelineManager {
     ) -> ResourceId {
         if let PassKind::Custom(custom_idx) = pass_kind
             && let Some(spec) = graph.custom_passes.get(&custom_idx)
+            && let Some(&explicit_id) = spec.bindings.get(&binding)
         {
-            if let Some(&explicit_id) = spec.bindings.get(&binding) {
-                return explicit_id;
-            }
+            return explicit_id;
         }
         for spec in graph.custom_passes.values() {
             if spec.kind == pass_kind
@@ -2643,6 +2688,13 @@ impl GpuPipelineManager {
             let lower = name.trim().to_ascii_lowercase();
             match lower.as_str() {
                 "udepth" | "uactive_depth" | "uactivedepth" => return active_depth,
+                "uactivealbedo" => {
+                    return if cfg.tier == RenderTier::Tier3PathTracing {
+                        RenderGraph::RES_PT_ALBEDO
+                    } else {
+                        RenderGraph::RES_GBUFFER_ALBEDO
+                    };
+                }
                 "uinradiance" | "uradiance" => {
                     return match pass_kind {
                         PassKind::UpscalerTsrOrVendor => radiance_after_denoise,
@@ -3213,6 +3265,8 @@ impl GpuPipelineManager {
 
     /// Copies `src_id` (in `GENERAL`) into `dst_id` (in `SHADER_READ_ONLY_OPTIMAL`) using explicit
     /// `TRANSFER_SRC_OPTIMAL` / `TRANSFER_DST_OPTIMAL` barriers and restores both layouts.
+    // Source and destination resources need independent image dimensions and IDs.
+    #[allow(clippy::too_many_arguments)]
     fn copy_temporal_history_pair(
         &self,
         ctx: &VulkanContext,
@@ -3229,12 +3283,24 @@ impl GpuPipelineManager {
         ) && src != vk::Image::null()
             && dst != vk::Image::null()
         {
+            let layer_count = graph
+                .bound_images
+                .get(&src_id)
+                .map(|bound| bound.array_layers.max(1))
+                .unwrap_or(1)
+                .min(
+                    graph
+                        .bound_images
+                        .get(&dst_id)
+                        .map(|bound| bound.array_layers.max(1))
+                        .unwrap_or(1),
+                );
             let subrange = vk::ImageSubresourceRange {
                 aspect_mask: vk::ImageAspectFlags::COLOR,
                 base_mip_level: 0,
                 level_count: 1,
                 base_array_layer: 0,
-                layer_count: 1,
+                layer_count,
             };
             let pre = [
                 vk::ImageMemoryBarrier2::default()
@@ -3284,14 +3350,14 @@ impl GpuPipelineManager {
                     aspect_mask: vk::ImageAspectFlags::COLOR,
                     mip_level: 0,
                     base_array_layer: 0,
-                    layer_count: 1,
+                    layer_count,
                 },
                 src_offset: vk::Offset3D { x: 0, y: 0, z: 0 },
                 dst_subresource: vk::ImageSubresourceLayers {
                     aspect_mask: vk::ImageAspectFlags::COLOR,
                     mip_level: 0,
                     base_array_layer: 0,
-                    layer_count: 1,
+                    layer_count,
                 },
                 dst_offset: vk::Offset3D { x: 0, y: 0, z: 0 },
                 extent: vk::Extent3D {
@@ -3820,16 +3886,16 @@ impl GpuPipelineManager {
             sun_dir
         };
         // Triple-buffered CsmShadowUBO per frame slot with world-locked texel snapping.
-        if self.csm_ubo_slots[slot].is_none() {
-            if let Ok(mut alloc) = GpuBufferAllocation::allocate_host_visible_bda(
+        if self.csm_ubo_slots[slot].is_none()
+            && let Ok(mut alloc) = GpuBufferAllocation::allocate_host_visible_bda(
                 ctx,
                 std::mem::size_of::<CsmShadowUBO>() as vk::DeviceSize,
                 vk::BufferUsageFlags::UNIFORM_BUFFER,
-            ) {
-                let zero_ubo: CsmShadowUBO = bytemuck::Zeroable::zeroed();
-                alloc.write_bytes(0, bytemuck::bytes_of(&zero_ubo));
-                self.csm_ubo_slots[slot] = Some(alloc);
-            }
+            )
+        {
+            let zero_ubo: CsmShadowUBO = bytemuck::Zeroable::zeroed();
+            alloc.write_bytes(0, bytemuck::bytes_of(&zero_ubo));
+            self.csm_ubo_slots[slot] = Some(alloc);
         }
         let mut csm_ubo = CsmShadowUBO::from_sun_dir_snapped(
             effective_light_dir,
@@ -4098,7 +4164,12 @@ impl GpuPipelineManager {
             || geometry_sig != self.csm_last_geometry_sig;
         self.csm_frame_counter = self.csm_frame_counter.wrapping_add(1);
         let mut cascade_needs_update = [false; 4];
-        for layer in 0..active_cascades.min(4) {
+        let active_layer_count = active_cascades.min(4);
+        for (layer, needs_update) in cascade_needs_update
+            .iter_mut()
+            .enumerate()
+            .take(active_layer_count)
+        {
             let needs = if layer < 2 || !self.csm_cascade_valid[layer] || any_dirty_chunk {
                 true
             } else {
@@ -4114,13 +4185,13 @@ impl GpuPipelineManager {
                 let dz = self.camera_pos_world[2] - last_cam[2];
                 let cam_moved = (dx * dx + dy * dy + dz * dz) > 256.0; // > 16 blocks
                 let cadence_hit = if layer == 2 {
-                    self.csm_frame_counter % 2 == 0
+                    self.csm_frame_counter.is_multiple_of(2)
                 } else {
-                    self.csm_frame_counter % 4 == 0
+                    self.csm_frame_counter.is_multiple_of(4)
                 };
                 sun_moved || cam_moved || cadence_hit
             };
-            cascade_needs_update[layer] = needs;
+            *needs_update = needs;
             self.csm_inactive_cleared[layer] = false;
             if needs {
                 self.csm_cached_cascade_vp[layer] = csm_ubo.cascade_view_proj[layer];
@@ -4133,15 +4204,22 @@ impl GpuPipelineManager {
                 let dy = (self.camera_pos_world[1] - last_cam[1]) as f32;
                 let dz = (self.camera_pos_world[2] - last_cam[2]) as f32;
                 let mut m = self.csm_cached_cascade_vp[layer];
-                for row in 0..3 {
-                    m[3][row] += m[0][row] * dx + m[1][row] * dy + m[2][row] * dz;
+                let x_column = m[0];
+                let y_column = m[1];
+                let z_column = m[2];
+                for (row, value) in m[3][..3].iter_mut().enumerate() {
+                    *value += x_column[row] * dx + y_column[row] * dy + z_column[row] * dz;
                 }
                 csm_ubo.cascade_view_proj[layer] = m;
             }
         }
-        for layer in active_cascades.min(4)..4 {
+        for (layer, needs_update) in cascade_needs_update
+            .iter_mut()
+            .enumerate()
+            .skip(active_layer_count)
+        {
             if !self.csm_inactive_cleared[layer] {
-                cascade_needs_update[layer] = true;
+                *needs_update = true;
                 self.csm_inactive_cleared[layer] = true;
             }
         }
@@ -4180,7 +4258,7 @@ impl GpuPipelineManager {
             // Build indirect draw lists only for cascades updating this frame.
             let cmd_stride = std::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u64;
             let mut all_indirect_cmds: Vec<vk::DrawIndexedIndirectCommand> = Vec::new();
-            let mut layer_groups: [Vec<(bool, u32, u64, u64, [i32; 3], u32, u32)>; 4] =
+            let mut layer_groups: [Vec<ShadowLayerGroup>; 4] =
                 [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
             let mut layer_base_cmd: [u64; 4] = [0; 4];
 
@@ -4245,10 +4323,9 @@ impl GpuPipelineManager {
                     ctx,
                     alloc_bytes,
                     vk::BufferUsageFlags::INDIRECT_BUFFER,
-                ) {
-                    if let Some(old_ind) = self.csm_indirect_slots[slot].replace(new_buf) {
-                        self.retired_csm_ibos.push(old_ind);
-                    }
+                ) && let Some(old_ind) = self.csm_indirect_slots[slot].replace(new_buf)
+                {
+                    self.retired_csm_ibos.push(old_ind);
                 }
             }
 
@@ -4844,8 +4921,10 @@ impl PersistentPipelineDiskCache {
             return None;
         }
         let words: Vec<u32> = bytes
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|chunk| u32::from_le_bytes(*chunk))
             .collect();
         if words.first().copied() != Some(Self::SPIRV_MAGIC) {
             return None;

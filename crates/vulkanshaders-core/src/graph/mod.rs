@@ -241,7 +241,6 @@ pub struct BoundBufferResource {
 /// Per-frame Distant Horizons uniform block (`80` bytes, `std140`) bound at:
 /// - `compute_lighting.comp` Set 0 binding 14 (`uDh`)
 /// - `rayquery_lighting.comp` Set 0 binding 13 (`uDh`)
-/// - `volumetric_fog.comp` Set 0 binding 6 (`uDh`)
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct DhFrameUniforms {
@@ -453,6 +452,19 @@ pub struct RenderGraph {
     pub persistent_layouts:
         HashMap<ResourceId, (vk::PipelineStageFlags2, vk::AccessFlags2, vk::ImageLayout)>,
     pub tracked_image_layouts: HashMap<vk::Image, vk::ImageLayout>,
+    frame_live_image_states: HashMap<
+        vk::Image,
+        (
+            vk::PipelineStageFlags2,
+            vk::AccessFlags2,
+            vk::ImageLayout,
+            vk::ImageAspectFlags,
+        ),
+    >,
+    frame_mojang_owned_images: Vec<(vk::Image, vk::ImageAspectFlags)>,
+    frame_init_clear_ids: Vec<(ResourceId, [f32; 4], bool)>,
+    frame_exit_barriers: Vec<vk::ImageMemoryBarrier2<'static>>,
+    frame_seen_exit_images: HashSet<vk::Image>,
     pub internal_targets: HashMap<ResourceId, InternalImageTarget>,
     pub internal_render_size: (u32, u32),
     pub internal_target_size: (u32, u32),
@@ -484,6 +496,11 @@ impl Default for RenderGraph {
             bound_buffers: HashMap::new(),
             persistent_layouts: HashMap::new(),
             tracked_image_layouts: HashMap::new(),
+            frame_live_image_states: HashMap::with_capacity(256),
+            frame_mojang_owned_images: Vec::with_capacity(32),
+            frame_init_clear_ids: Vec::with_capacity(32),
+            frame_exit_barriers: Vec::with_capacity(32),
+            frame_seen_exit_images: HashSet::with_capacity(32),
             internal_targets: HashMap::new(),
             internal_render_size: (0, 0),
             internal_target_size: (0, 0),
@@ -536,6 +553,7 @@ impl RenderGraph {
     pub const RES_SVGF_MOMENTS: ResourceId = ResourceId(24);
     pub const RES_TSR_HISTORY: ResourceId = ResourceId(25);
     pub const RES_VOLUMETRIC_FOG: ResourceId = ResourceId(26);
+    pub const RES_VOLUMETRIC_FOG_HISTORY: ResourceId = ResourceId(30);
     pub const RES_EMISSIVE_LIGHTS: ResourceId = ResourceId(27);
     pub const RES_RESTIR_RESERVOIRS: ResourceId = ResourceId(28);
     // Tier-3 path tracing writes the primary albedo/normal from rgen/rchit into this
@@ -612,11 +630,14 @@ impl RenderGraph {
             ("uHistoryMoments", Self::RES_SVGF_HISTORY_MOMENTS),
             ("svgf_moments", Self::RES_SVGF_MOMENTS),
             ("uMoments", Self::RES_SVGF_MOMENTS),
+            ("uSvgfMoments", Self::RES_SVGF_MOMENTS),
             ("tsr_history", Self::RES_TSR_HISTORY),
             ("uTsrHistory", Self::RES_TSR_HISTORY),
             ("volumetric_fog", Self::RES_VOLUMETRIC_FOG),
             ("uVolumetricFog", Self::RES_VOLUMETRIC_FOG),
             ("uOutVolumetricFog", Self::RES_VOLUMETRIC_FOG),
+            ("volumetric_fog_history", Self::RES_VOLUMETRIC_FOG_HISTORY),
+            ("uFogHistory", Self::RES_VOLUMETRIC_FOG_HISTORY),
             ("emissive_lights", Self::RES_EMISSIVE_LIGHTS),
             ("restir_reservoirs", Self::RES_RESTIR_RESERVOIRS),
             ("pt_albedo", Self::RES_PT_ALBEDO),
@@ -923,6 +944,7 @@ impl RenderGraph {
                 | Self::RES_SHARC_HASH_TABLE
                 | Self::RES_INTERPOLATED_FRAME
                 | Self::RES_SSGI_HISTORY
+                | Self::RES_VOLUMETRIC_FOG_HISTORY
                 | Self::RES_SVGF_HISTORY_RADIANCE
                 | Self::RES_SVGF_HISTORY_MOMENTS
                 | Self::RES_TSR_HISTORY
@@ -1165,10 +1187,11 @@ impl RenderGraph {
                     aspect,
                 );
             } else {
-                if let Some(old) = self.bound_images.remove(&res_id) {
-                    if old.owned_view && old.view != vk::ImageView::null() {
-                        self.retired_views.push(old.view);
-                    }
+                if let Some(old) = self.bound_images.remove(&res_id)
+                    && old.owned_view
+                    && old.view != vk::ImageView::null()
+                {
+                    self.retired_views.push(old.view);
                 }
                 self.resource_images.remove(&res_id);
             }
@@ -1184,14 +1207,14 @@ impl RenderGraph {
         frame_slot: usize,
     ) {
         let slot = frame_slot % 3;
-        if self.dh_ubo_slots[slot].is_none() {
-            if let Ok(alloc) = GpuBufferAllocation::allocate_host_visible_bda(
+        if self.dh_ubo_slots[slot].is_none()
+            && let Ok(alloc) = GpuBufferAllocation::allocate_host_visible_bda(
                 ctx,
                 std::mem::size_of::<DhFrameUniforms>() as vk::DeviceSize,
                 vk::BufferUsageFlags::UNIFORM_BUFFER,
-            ) {
-                self.dh_ubo_slots[slot] = Some(alloc);
-            }
+            )
+        {
+            self.dh_ubo_slots[slot] = Some(alloc);
         }
         if let Some(ref mut buf) = self.dh_ubo_slots[slot] {
             buf.write_bytes(0, bytemuck::bytes_of(&self.dh_uniforms));
@@ -1223,17 +1246,17 @@ impl RenderGraph {
         };
 
         let mut init_images = Vec::new();
-        if self.dh_dummy_color.is_none() {
-            if let Some(target) = create_dummy_1x1(vk::Format::R8G8B8A8_UNORM) {
-                init_images.push(target.image);
-                self.dh_dummy_color = Some(target);
-            }
+        if self.dh_dummy_color.is_none()
+            && let Some(target) = create_dummy_1x1(vk::Format::R8G8B8A8_UNORM)
+        {
+            init_images.push(target.image);
+            self.dh_dummy_color = Some(target);
         }
-        if self.dh_dummy_depth.is_none() {
-            if let Some(target) = create_dummy_1x1(vk::Format::R32_SFLOAT) {
-                init_images.push(target.image);
-                self.dh_dummy_depth = Some(target);
-            }
+        if self.dh_dummy_depth.is_none()
+            && let Some(target) = create_dummy_1x1(vk::Format::R32_SFLOAT)
+        {
+            init_images.push(target.image);
+            self.dh_dummy_depth = Some(target);
         }
 
         if !init_images.is_empty() {
@@ -1374,6 +1397,7 @@ impl RenderGraph {
             Self::RES_PREV_HUDLESS_COLOR,
             Self::RES_INTERPOLATED_FRAME,
             Self::RES_VOLUMETRIC_FOG,
+            Self::RES_VOLUMETRIC_FOG_HISTORY,
             Self::RES_NRD_IN_DIFF,
             Self::RES_NRD_IN_SPEC,
             Self::RES_NRD_OUT_SPEC,
@@ -1433,9 +1457,26 @@ impl RenderGraph {
             self.internal_render_size = (0, 0);
             self.internal_target_size = (0, 0);
         }
+        let cfg = self.config;
+        let restir_gi_target = self
+            .custom_targets
+            .values()
+            .find(|target| target.name == "restir_gi_reservoir");
+        let restir_gi_allocation_mismatch = restir_gi_target.is_some_and(|target| {
+            let target_allocated = self.internal_targets.contains_key(&target.id);
+            let history_allocated = target
+                .history_id
+                .is_some_and(|history| self.internal_targets.contains_key(&history));
+            if cfg.tier == RenderTier::Tier3PathTracing {
+                !target_allocated || !history_allocated
+            } else {
+                target_allocated || history_allocated
+            }
+        });
         if self.internal_render_size == (rw, rh)
             && self.internal_target_size == (ow, oh)
             && !self.internal_targets.is_empty()
+            && !restir_gi_allocation_mismatch
         {
             return;
         }
@@ -1446,19 +1487,19 @@ impl RenderGraph {
         }
         self.destroy_internal_targets(ctx, retire);
 
-        let cfg = self.config;
         let rgba16 = vk::Format::R16G16B16A16_SFLOAT;
         let mut specs: Vec<(ResourceId, vk::Format, u32, u32, u32)> = vec![
             // Pre-upscale targets at (render_w, render_h)
             (Self::RES_RAW_RADIANCE, rgba16, rw, rh, 1),
             (Self::RES_SHARP_RADIANCE, rgba16, rw, rh, 1),
             (Self::RES_DENOISED_RADIANCE, rgba16, rw, rh, 1),
+            (Self::RES_SVGF_MOMENTS, rgba16, rw, rh, 1),
             (
                 Self::RES_VOLUMETRIC_FOG,
                 rgba16,
-                (rw / 2).max(1),
-                (rh / 2).max(1),
-                1,
+                (rw / 8).max(1),
+                (rh / 8).max(1),
+                16,
             ),
             // Post-upscale targets at (out_w, out_h)
             (Self::RES_UPSCALED_HDR, rgba16, ow, oh, 1),
@@ -1484,7 +1525,6 @@ impl RenderGraph {
             specs.push((Self::RES_SVGF_PING, rgba16, rw, rh, 1));
             specs.push((Self::RES_SVGF_HISTORY_RADIANCE, rgba16, rw, rh, 1));
             specs.push((Self::RES_SVGF_HISTORY_MOMENTS, rgba16, rw, rh, 1));
-            specs.push((Self::RES_SVGF_MOMENTS, rgba16, rw, rh, 1));
         }
         if cfg.effective_denoiser_active() && (cfg.denoiser_mode == 2 || cfg.denoiser_mode == 3) {
             specs.push((Self::RES_NRD_IN_DIFF, rgba16, rw, rh, 1));
@@ -1514,8 +1554,23 @@ impl RenderGraph {
         }
 
         for tgt in self.custom_targets.values() {
-            let scaled_w = ((ow as f32) * tgt.scale).round().max(1.0) as u32;
-            let scaled_h = ((oh as f32) * tgt.scale).round().max(1.0) as u32;
+            if tgt.name == "restir_gi_reservoir" && cfg.tier != RenderTier::Tier3PathTracing {
+                continue;
+            }
+            let (base_w, base_h) =
+                if tgt.id == Self::RES_VOLUMETRIC_FOG || tgt.name == "restir_gi_reservoir" {
+                    (rw, rh)
+                } else {
+                    (ow, oh)
+                };
+            let (scaled_w, scaled_h) = if tgt.name == "restir_gi_reservoir" {
+                (base_w.div_ceil(4), base_h.div_ceil(4))
+            } else {
+                (
+                    ((base_w as f32) * tgt.scale).round().max(1.0) as u32,
+                    ((base_h as f32) * tgt.scale).round().max(1.0) as u32,
+                )
+            };
             if let Some(pos) = specs.iter().position(|(id, ..)| *id == tgt.id) {
                 specs[pos] = (tgt.id, tgt.format, scaled_w, scaled_h, tgt.array_layers);
             } else {
@@ -1638,16 +1693,15 @@ impl RenderGraph {
             .internal_targets
             .get(&Self::RES_SHADOW_CSM)
             .is_some_and(|t| t.width != desired_shadow_res || t.height != desired_shadow_res);
-        if shadow_res_changed {
-            if let Some(old) = self.internal_targets.remove(&Self::RES_SHADOW_CSM) {
-                self.bound_images.remove(&Self::RES_SHADOW_CSM);
-                self.resource_images.remove(&Self::RES_SHADOW_CSM);
-                self.tracked_image_layouts.remove(&old.image);
-                let dev = ctx.device.clone();
-                retire.retire_later(move || unsafe {
-                    old.destroy(&dev);
-                });
-            }
+        if shadow_res_changed && let Some(old) = self.internal_targets.remove(&Self::RES_SHADOW_CSM)
+        {
+            self.bound_images.remove(&Self::RES_SHADOW_CSM);
+            self.resource_images.remove(&Self::RES_SHADOW_CSM);
+            self.tracked_image_layouts.remove(&old.image);
+            let dev = ctx.device.clone();
+            retire.retire_later(move || unsafe {
+                old.destroy(&dev);
+            });
         }
         if !self.bound_images.contains_key(&Self::RES_SHADOW_CSM) {
             self.create_shadow_csm_target(ctx);
@@ -2167,16 +2221,16 @@ impl RenderGraph {
             pipelines.descriptor_sig_cache.clear();
         }
         self.ensure_dh_resources(ctx, cmd, frame_slot);
-        let mut live_image_states: HashMap<
-            vk::Image,
-            (
-                vk::PipelineStageFlags2,
-                vk::AccessFlags2,
-                vk::ImageLayout,
-                vk::ImageAspectFlags,
-            ),
-        > = HashMap::new();
-        let mut mojang_owned_images: Vec<(vk::Image, vk::ImageAspectFlags)> = Vec::new();
+        let mut live_image_states = std::mem::take(&mut self.frame_live_image_states);
+        let mut mojang_owned_images = std::mem::take(&mut self.frame_mojang_owned_images);
+        let mut init_clear_ids = std::mem::take(&mut self.frame_init_clear_ids);
+        let mut exit_barriers = std::mem::take(&mut self.frame_exit_barriers);
+        let mut seen_exit = std::mem::take(&mut self.frame_seen_exit_images);
+        live_image_states.clear();
+        mojang_owned_images.clear();
+        init_clear_ids.clear();
+        exit_barriers.clear();
+        seen_exit.clear();
 
         for (&res_id, &bound) in &self.bound_images {
             if bound.image == vk::Image::null() {
@@ -2220,13 +2274,18 @@ impl RenderGraph {
 
         // Clear uninitialized temporal history images, Tier 0 RES_SSGI_OUT (no producer on Tier 0),
         // and custom targets with clear_color so no shader ever samples undefined VRAM.
-        let mut init_clear_ids: Vec<(ResourceId, [f32; 4], bool)> = vec![
+        init_clear_ids.extend([
+            (
+                Self::RES_SVGF_MOMENTS,
+                [0.0; 4],
+                !self.config.effective_denoiser_active(),
+            ),
             (Self::RES_SVGF_HISTORY_MOMENTS, [0.0; 4], false),
             (Self::RES_SVGF_HISTORY_RADIANCE, [0.0; 4], false),
             (Self::RES_SSGI_HISTORY, [0.0; 4], false),
             (Self::RES_TSR_HISTORY, [0.0; 4], false),
             (Self::RES_PREV_HUDLESS_COLOR, [0.0; 4], false),
-        ];
+        ]);
         if self.config.tier == RenderTier::Tier0Raster {
             init_clear_ids.push((Self::RES_SSGI_OUT, [0.0; 4], false));
         }
@@ -2238,7 +2297,7 @@ impl RenderGraph {
                 init_clear_ids.push((hid, [0.0; 4], false));
             }
         }
-        for (res_id, clear_rgba, every_frame) in init_clear_ids {
+        for (res_id, clear_rgba, every_frame) in init_clear_ids.drain(..) {
             let Some(&image) = self.resource_images.get(&res_id) else {
                 continue;
             };
@@ -2257,7 +2316,12 @@ impl RenderGraph {
             let range = vk::ImageSubresourceRange::default()
                 .aspect_mask(vk::ImageAspectFlags::COLOR)
                 .level_count(1)
-                .layer_count(1);
+                .layer_count(
+                    self.bound_images
+                        .get(&res_id)
+                        .map(|bound| bound.array_layers.max(1))
+                        .unwrap_or(1),
+                );
             let barrier = [vk::ImageMemoryBarrier2::default()
                 .src_stage_mask(src_stage)
                 .src_access_mask(src_access)
@@ -2361,6 +2425,24 @@ impl RenderGraph {
                                     vk::PipelineStageFlags2::ACCELERATION_STRUCTURE_BUILD_KHR,
                                 )
                                 .src_access_mask(vk::AccessFlags2::ACCELERATION_STRUCTURE_WRITE_KHR)
+                                .dst_stage_mask(dst_stage)
+                                .dst_access_mask(dst_access),
+                        );
+                    } else if matches!(
+                        res_id,
+                        Self::RES_SHARC_HASH_TABLE | Self::RES_RESTIR_RESERVOIRS
+                    ) {
+                        let (mut dst_stage, dst_access, _) = access.to_sync2_masks();
+                        if !ctx.capabilities.ray_tracing_pipeline {
+                            dst_stage &= !vk::PipelineStageFlags2::RAY_TRACING_SHADER_KHR;
+                        }
+                        if dst_stage.is_empty() {
+                            dst_stage = vk::PipelineStageFlags2::ALL_COMMANDS;
+                        }
+                        mem_barriers.push(
+                            vk::MemoryBarrier2::default()
+                                .src_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+                                .src_access_mask(vk::AccessFlags2::MEMORY_WRITE)
                                 .dst_stage_mask(dst_stage)
                                 .dst_access_mask(dst_access),
                         );
@@ -2491,6 +2573,26 @@ impl RenderGraph {
                             Some(blas),
                             Some(retire),
                         );
+                        if let Some(target) = self.custom_targets.get(&Self::RES_VOLUMETRIC_FOG)
+                            && target.temporal
+                            && let Some(history_id) = target.history_id
+                        {
+                            pipelines.copy_custom_temporal_history(
+                                ctx,
+                                cmd,
+                                self,
+                                Self::RES_VOLUMETRIC_FOG,
+                                history_id,
+                                vf_w,
+                                vf_h,
+                            );
+                            if let Some(&history_image) = self.resource_images.get(&history_id) {
+                                self.tracked_image_layouts.insert(
+                                    history_image,
+                                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                                );
+                            }
+                        }
                     }
                     PassKind::ComputeSsgi => {
                         let (ssgi_w, ssgi_h) = self
@@ -2518,9 +2620,7 @@ impl RenderGraph {
                                 .insert(hist_img, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
                         }
                     }
-                    PassKind::ComputeFroxelGi
-                    | PassKind::RayQueryLighting
-                    | PassKind::FullPathTracing => {
+                    PassKind::ComputeFroxelGi | PassKind::RayQueryLighting => {
                         pipelines.dispatch_pass_with_graph(
                             ctx,
                             cmd,
@@ -2535,6 +2635,47 @@ impl RenderGraph {
                             Some(blas),
                             Some(retire),
                         );
+                    }
+                    PassKind::FullPathTracing => {
+                        pipelines.dispatch_pass_with_graph(
+                            ctx,
+                            cmd,
+                            step_kind,
+                            self,
+                            bindless,
+                            pack_set,
+                            tlas_handle,
+                            frame_slot,
+                            rw,
+                            rh,
+                            Some(blas),
+                            Some(retire),
+                        );
+                        if tlas_handle != vk::AccelerationStructureKHR::null()
+                            && let Some(target) = self
+                                .custom_targets
+                                .values()
+                                .find(|target| target.name == "restir_gi_reservoir")
+                            && target.temporal
+                            && let Some(history_id) = target.history_id
+                            && let Some(internal) = self.internal_targets.get(&target.id)
+                        {
+                            pipelines.copy_custom_temporal_history(
+                                ctx,
+                                cmd,
+                                self,
+                                target.id,
+                                history_id,
+                                internal.width,
+                                internal.height,
+                            );
+                            if let Some(&history_image) = self.resource_images.get(&history_id) {
+                                self.tracked_image_layouts.insert(
+                                    history_image,
+                                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                                );
+                            }
+                        }
                     }
                     PassKind::DepthReprojectOverlay => {
                         pipelines.dispatch_depth_blit(
@@ -2946,10 +3087,10 @@ impl RenderGraph {
                                 }
                             }
                         }
-                        if let Some(ref mut mgr) = sdk {
-                            if dispatch.denoiser_mode == 1 {
-                                mgr.report_denoiser_status("SVGF active");
-                            }
+                        if let Some(ref mut mgr) = sdk
+                            && dispatch.denoiser_mode == 1
+                        {
+                            mgr.report_denoiser_status("SVGF active");
                         }
                         if !used_vendor {
                             pipelines.dispatch_svgf_denoise(
@@ -3300,9 +3441,7 @@ impl RenderGraph {
         if ctx.capabilities.ray_tracing_pipeline {
             exit_src_default |= vk::PipelineStageFlags2::RAY_TRACING_SHADER_KHR;
         }
-        let mut exit_barriers = Vec::new();
-        let mut seen_exit = HashSet::new();
-        for (img, default_aspect) in mojang_owned_images {
+        for (img, default_aspect) in mojang_owned_images.drain(..) {
             if !seen_exit.insert(img) {
                 continue;
             }
@@ -3371,6 +3510,12 @@ impl RenderGraph {
             }
         }
 
+        self.frame_live_image_states = live_image_states;
+        self.frame_mojang_owned_images = mojang_owned_images;
+        self.frame_init_clear_ids = init_clear_ids;
+        self.frame_exit_barriers = exit_barriers;
+        self.frame_seen_exit_images = seen_exit;
+
         executed_steps
     }
 
@@ -3390,7 +3535,6 @@ impl RenderGraph {
         frame_slot: usize,
         width: u32,
         height: u32,
-        blas: &ZeroCopyBlasManager,
         mut sdk: Option<&mut RuntimeSdkManager>,
         dispatch: &SdkDispatchParams,
         retire: &RetireQueue,
@@ -3553,7 +3697,7 @@ impl RenderGraph {
                 frame_slot,
                 out_w,
                 out_h,
-                Some(blas),
+                None,
                 Some(retire),
             );
             pipelines.hdr_push_constants.pad0 = prev_ui_only;
@@ -3671,7 +3815,7 @@ impl RenderGraph {
                     frame_slot,
                     out_w,
                     out_h,
-                    Some(blas),
+                    None,
                     Some(retire),
                 );
             } else if let Some(ref mut mgr) = sdk
@@ -3995,6 +4139,24 @@ impl RenderGraph {
                 Self::build_canonical_nodes(cfg)
             };
 
+        if cfg.tier == RenderTier::Tier3PathTracing
+            && let Some(target) = self
+                .custom_targets
+                .values()
+                .find(|target| target.name == "restir_gi_reservoir")
+            && let Some(history_id) = target.history_id
+            && let Some(pathtrace) = nodes
+                .iter_mut()
+                .find(|node| node.kind == PassKind::FullPathTracing)
+        {
+            pathtrace
+                .reads
+                .push((history_id, ResourceAccess::SampledRead));
+            pathtrace
+                .writes
+                .push((target.id, ResourceAccess::StorageImageWrite));
+        }
+
         if self.graph_mode == PipelineGraphMode::Extend && !self.custom_passes.is_empty() {
             let mut ordered: Vec<&CustomPassSpec> = self.custom_passes.values().collect();
             ordered.sort_by_key(|p| p.custom_index);
@@ -4045,42 +4207,49 @@ impl RenderGraph {
         nodes.iter().position(|n| {
             let name_l = n.name.to_ascii_lowercase();
             name_l == t
-                || match (n.kind, t.as_str()) {
-                    (PassKind::BlasTlasUpdate, "blas_tlas_update" | "rt_blas_tlas_update") => true,
-                    (PassKind::ShadowCsm, "shadow_csm" | "shadow_csm_pass" | "csm") => true,
-                    (PassKind::GbufferMrt, "gbuffer" | "gbuffer_mrt" | "gbuffer_mrt_pass") => true,
+                || matches!(
+                    (n.kind, t.as_str()),
                     (
+                        PassKind::BlasTlasUpdate,
+                        "blas_tlas_update" | "rt_blas_tlas_update"
+                    ) | (
+                        PassKind::ShadowCsm,
+                        "shadow_csm" | "shadow_csm_pass" | "csm"
+                    ) | (
+                        PassKind::GbufferMrt,
+                        "gbuffer" | "gbuffer_mrt" | "gbuffer_mrt_pass"
+                    ) | (
                         PassKind::ComputeVolumetricFog,
-                        "volumetric_fog" | "volumetric_fog_pass" | "fog",
-                    ) => true,
-                    (PassKind::ComputeSsgi, "ssgi" | "ssgi_screen_space_gi") => true,
-                    (
-                        PassKind::ComputeFroxelGi
-                        | PassKind::RayQueryLighting
-                        | PassKind::FullPathTracing,
-                        "lighting"
-                        | "compute_lighting"
-                        | "lighting_raster_compute_gi"
-                        | "lighting_hybrid_rayquery"
-                        | "lighting_full_path_tracing",
-                    ) => true,
-                    (PassKind::DenoiserSvgfOrNrd, "denoiser" | "denoiser_svgf_nrd" | "svgf") => {
-                        true
-                    }
-                    (PassKind::UpscalerTsrOrVendor, "upscaler" | "upscaler_tsr_vendor" | "tsr") => {
-                        true
-                    }
-                    (
-                        PassKind::PostGradeAndToneMap,
-                        "post_tonemap" | "post_grade_and_tonemap" | "tonemap",
-                    ) => true,
-                    (PassKind::HdrCompose, "hdr_compose" | "hdr_scrgb_compose") => true,
-                    (
-                        PassKind::FrameGenInterpolate,
-                        "framegen" | "framegen_optical_flow_present",
-                    ) => true,
-                    _ => false,
-                }
+                        "volumetric_fog" | "volumetric_fog_pass" | "fog"
+                    ) | (PassKind::ComputeSsgi, "ssgi" | "ssgi_screen_space_gi")
+                        | (
+                            PassKind::ComputeFroxelGi
+                                | PassKind::RayQueryLighting
+                                | PassKind::FullPathTracing,
+                            "lighting"
+                                | "compute_lighting"
+                                | "lighting_raster_compute_gi"
+                                | "lighting_hybrid_rayquery"
+                                | "lighting_full_path_tracing"
+                        )
+                        | (
+                            PassKind::DenoiserSvgfOrNrd,
+                            "denoiser" | "denoiser_svgf_nrd" | "svgf"
+                        )
+                        | (
+                            PassKind::UpscalerTsrOrVendor,
+                            "upscaler" | "upscaler_tsr_vendor" | "tsr"
+                        )
+                        | (
+                            PassKind::PostGradeAndToneMap,
+                            "post_tonemap" | "post_grade_and_tonemap" | "tonemap"
+                        )
+                        | (PassKind::HdrCompose, "hdr_compose" | "hdr_scrgb_compose")
+                        | (
+                            PassKind::FrameGenInterpolate,
+                            "framegen" | "framegen_optical_flow_present"
+                        )
+                )
         })
     }
 
@@ -4177,6 +4346,11 @@ impl RenderGraph {
         } else {
             Self::RES_MC_MAIN_DEPTH
         };
+        let active_albedo = if is_tier3 {
+            Self::RES_PT_ALBEDO
+        } else {
+            Self::RES_GBUFFER_ALBEDO
+        };
 
         nodes.push(GraphPassNode {
             kind: PassKind::BlasTlasUpdate,
@@ -4239,17 +4413,15 @@ impl RenderGraph {
         nodes.push(GraphPassNode {
             kind: PassKind::ComputeVolumetricFog,
             name: "volumetric_fog_pass".to_owned(),
-            reads: if is_tier3 {
-                vec![(Self::RES_LINEAR_DEPTH, ResourceAccess::SampledRead)]
-            } else {
-                vec![
-                    (Self::RES_MC_MAIN_DEPTH, ResourceAccess::SampledRead),
-                    (Self::RES_SHADOW_CSM, ResourceAccess::SampledRead),
-                    (Self::RES_DH_DEPTH, ResourceAccess::SampledRead),
-                ]
-            },
+            reads: vec![
+                (Self::RES_SHADOW_CSM, ResourceAccess::SampledRead),
+                (
+                    Self::RES_VOLUMETRIC_FOG_HISTORY,
+                    ResourceAccess::SampledRead,
+                ),
+            ],
             writes: vec![(Self::RES_VOLUMETRIC_FOG, ResourceAccess::StorageImageWrite)],
-            enabled: !is_tier3,
+            enabled: true,
             is_external_raster: false,
         });
 
@@ -4310,6 +4482,10 @@ impl RenderGraph {
                             Self::RES_SHARC_HASH_TABLE,
                             ResourceAccess::StorageBufferReadWrite,
                         ),
+                        (
+                            Self::RES_RESTIR_RESERVOIRS,
+                            ResourceAccess::StorageBufferReadWrite,
+                        ),
                         (Self::RES_SHADOW_CSM, ResourceAccess::SampledRead),
                         (Self::RES_GBUFFER_ALBEDO, ResourceAccess::SampledRead),
                         (Self::RES_GBUFFER_NORMAL, ResourceAccess::SampledRead),
@@ -4343,6 +4519,11 @@ impl RenderGraph {
                             Self::RES_SHARC_HASH_TABLE,
                             ResourceAccess::StorageBufferReadWrite,
                         ),
+                        (
+                            Self::RES_RESTIR_RESERVOIRS,
+                            ResourceAccess::StorageBufferReadWrite,
+                        ),
+                        (Self::RES_VOLUMETRIC_FOG, ResourceAccess::SampledRead),
                     ],
                     writes: vec![
                         (Self::RES_RAW_RADIANCE, ResourceAccess::StorageImageWrite),
@@ -4458,10 +4639,33 @@ impl RenderGraph {
         // In SDR mode (`!cfg.hdr_enabled`), `PostGradeAndToneMap` ACES-tonemaps linear radiance
         // into `RES_POST_OUTPUT` / `RES_HUDLESS_COLOR`. In HDR mode (`cfg.hdr_enabled`), this pass
         // is disabled so `HdrCompose` receives unclamped linear RGBA16F radiance.
+        let mut post_reads = vec![
+            (radiance_after_upscale, ResourceAccess::SampledRead),
+            (Self::RES_RAW_RADIANCE, ResourceAccess::SampledRead),
+            (Self::RES_SHARP_RADIANCE, ResourceAccess::SampledRead),
+            (active_albedo, ResourceAccess::SampledRead),
+            (Self::RES_GBUFFER_NORMAL, ResourceAccess::SampledRead),
+            (Self::RES_GBUFFER_MATERIAL, ResourceAccess::SampledRead),
+            (Self::RES_GBUFFER_VELOCITY, ResourceAccess::SampledRead),
+            (active_depth, ResourceAccess::SampledRead),
+            (Self::RES_SVGF_MOMENTS, ResourceAccess::SampledRead),
+        ];
+        if is_rt {
+            post_reads.extend([
+                (
+                    Self::RES_SHARC_HASH_TABLE,
+                    ResourceAccess::StorageBufferReadWrite,
+                ),
+                (
+                    Self::RES_RESTIR_RESERVOIRS,
+                    ResourceAccess::StorageBufferReadWrite,
+                ),
+            ]);
+        }
         nodes.push(GraphPassNode {
             kind: PassKind::PostGradeAndToneMap,
             name: "post_grade_and_tonemap".to_owned(),
-            reads: vec![(radiance_after_upscale, ResourceAccess::SampledRead)],
+            reads: post_reads,
             writes: post_writes,
             enabled: !cfg.hdr_enabled,
             is_external_raster: false,

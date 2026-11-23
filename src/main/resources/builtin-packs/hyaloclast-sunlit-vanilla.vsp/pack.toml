@@ -14,21 +14,28 @@ hdr_output = true
 mode = "extend"
 gbuffer_mrt_count = 4
 
+[targets.restir_gi_reservoir]
+format = "rgba16f"
+scale = 0.25
+array_layers = 3
+temporal = true
+
 [targets.volumetric_fog]
 format = "rgba16f"
-scale = 0.5
-temporal = false
+scale = 0.125
+array_layers = 16
+temporal = true
 
 [[passes]]
 id = "volumetric_fog_pass"
 kind = "compute"
 shader = "shaders/compute/volumetric_fog.comp"
 min_tier = 0
-max_tier = 2
+max_tier = 3
 replaces = "volumetric_fog_pass"
-reads = ["mc_main_depth", "shadow_csm"]
+reads = ["shadow_csm", "volumetric_fog_history"]
 writes = ["volumetric_fog"]
-scale = 0.5
+scale = 0.125
 
 [hooks]
 vertex_displace = "hooks/vertex_displace.vsl"
@@ -41,6 +48,25 @@ sky = "hooks/sky.vsl"
 clouds = "hooks/clouds.vsl"
 fog = "hooks/fog.vsl"
 post_grade = "hooks/post_grade.vsl"
+
+[settings.debug_view]
+label = "Shader Debug View"
+category = "Diagnostics"
+description = "Display internal render targets instead of the final image."
+type = "enum"
+default = "off"
+options = ["off", "radiance", "albedo", "encoded_normal", "normal", "roughness", "metallic", "emission", "material", "depth", "motion", "raw_radiance", "sharp_radiance", "sharc", "restir_di", "svgf_variance"]
+runtime = true
+
+[settings.restir_gi]
+label = "ReSTIR Indirect GI"
+category = "Lighting"
+description = "Reuse first-bounce diffuse samples over time to reduce path-traced indirect-light noise."
+type = "bool"
+default = false
+runtime = true
+min_tier = 3
+max_tier = 3
 
 [settings.sun_intensity]
 label = "Sun Intensity"

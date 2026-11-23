@@ -6,6 +6,7 @@ import dev.vulkanshaders.backend.NativeCoreBridge
 import dev.vulkanshaders.bridge.StandaloneRenderPearlBridge
 import dev.vulkanshaders.diagnostics.HyaloclastErrorLog
 import dev.vulkanshaders.pack.LoadedShaderPack
+import dev.vulkanshaders.pack.PackLocalization
 import dev.vulkanshaders.pack.ShaderPackManager
 import net.minecraft.ChatFormatting
 import net.minecraft.client.Options
@@ -92,9 +93,10 @@ class ShaderPacksScreen(
         }.build())
 
         for (pack in ShaderPackManager.discoveredPacks) {
-            val selected = active?.manifest?.id == pack.manifest.id
+            val manifest = localizedManifest(pack)
+            val selected = active?.manifest?.id == manifest.id
             list.addBig(
-                Button.builder(packLabel(Component.literal(pack.manifest.name), selected)) {
+                Button.builder(packLabel(Component.literal(manifest.name), selected)) {
                     if (!selected) {
                         NativeCoreBridge.startPackPrewarm(pack.rootPath)
                         val currentConfig = VulkanShaders.config
@@ -215,8 +217,13 @@ class ShaderPacksScreen(
     private fun packLabel(name: Component, active: Boolean): Component =
         if (active) text("active", name).withStyle(ChatFormatting.GREEN) else name
 
+    private fun localizedManifest(pack: LoadedShaderPack) = PackLocalization.localize(
+        pack.manifest,
+        PackLocalization.load(pack.rootPath, minecraft.languageManager.selected),
+    )
+
     private fun packDetails(pack: LoadedShaderPack): Component {
-        val manifest = pack.manifest
+        val manifest = localizedManifest(pack)
         val details = text("pack.info", manifest.version, manifest.author)
         if (pack.isBuiltin) details.append("\n").append(text("pack.builtin"))
         if (manifest.description.isNotBlank()) details.append("\n\n").append(manifest.description)

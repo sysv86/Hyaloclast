@@ -59,8 +59,8 @@ pub struct PipelinesAndCompiler {
 pub struct IgnisEngine {
     pub ctx: RwLock<VulkanContext>,
     pub retire: RetireQueue,
-    pub bindless: Mutex<BindlessTextureTable>,
-    pub pack_textures: Mutex<PackTextureTable>,
+    pub bindless: RwLock<BindlessTextureTable>,
+    pub pack_textures: RwLock<PackTextureTable>,
     pub blas_manager: Mutex<ZeroCopyBlasManager>,
     pub pipelines_and_compiler: Mutex<PipelinesAndCompiler>,
     pub framegen: Mutex<FrameGenController>,
@@ -68,6 +68,7 @@ pub struct IgnisEngine {
     pub render_graph: Mutex<RenderGraph>,
     pub world_ubo: RwLock<WorldUboData>,
     pub frame_index: AtomicU64,
+    pub last_built_tlas_handle: AtomicU64,
     pub framegen_mode: AtomicU32,
     pub timestamp_profiler: Mutex<Option<GpuTimestampProfiler>>,
     pub pipeline_disk_cache: Option<PersistentPipelineDiskCache>,
@@ -108,10 +109,11 @@ impl IgnisEngine {
     /// and resets the SHaRC spatial cache.
     pub fn poll_vram_budget_if_due(&self, force: bool) -> VramBudgetSnapshot {
         let frame_count = self.vram_poll_frame_counter.fetch_add(1, Ordering::AcqRel);
-        if !force && frame_count % Self::VRAM_POLL_INTERVAL_FRAMES != 0 {
-            if let Some(cached) = *self.last_vram_budget.read() {
-                return cached;
-            }
+        if !force
+            && !frame_count.is_multiple_of(Self::VRAM_POLL_INTERVAL_FRAMES)
+            && let Some(cached) = *self.last_vram_budget.read()
+        {
+            return cached;
         }
         let snapshot = self.ctx.read().query_vram_budget();
         *self.last_vram_budget.write() = Some(snapshot);

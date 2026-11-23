@@ -8,6 +8,7 @@ import dev.vulkanshaders.config.RenderTier
 import dev.vulkanshaders.pack.LoadedShaderPack
 import dev.vulkanshaders.pack.PackPresetDefinition
 import dev.vulkanshaders.pack.PackSettingDefinition
+import dev.vulkanshaders.pack.PackLocalization
 import dev.vulkanshaders.pack.SettingType
 import dev.vulkanshaders.pack.ShaderPackManager
 import dev.vulkanshaders.pipeline.GbufferPipelineRegistry
@@ -37,6 +38,12 @@ import kotlin.math.abs
 import kotlin.math.round
 import kotlin.math.roundToInt
 
+private fun localizedManifest(pack: LoadedShaderPack) =
+    PackLocalization.localize(
+        pack.manifest,
+        PackLocalization.load(pack.rootPath, Minecraft.getInstance().languageManager.selected),
+    )
+
 /**
  * Dynamic vanilla-styled settings screen generated from a `.vsp` shader pack's `[settings.*]` definitions.
  * Supports Low/Medium/High/Ultra quality presets, category tabs, live search, modified-only filtering,
@@ -50,8 +57,9 @@ class PackSettingsScreen(
 ) : OptionsSubScreen(
     returnScreen ?: TitleScreen(),
     options,
-    Component.translatable("vulkanshaders.screen.pack_settings.title", pack.manifest.name),
+    Component.translatable("vulkanshaders.screen.pack_settings.title", localizedManifest(pack).name),
 ) {
+    private val manifest = localizedManifest(pack)
     private var selectedCategory: String? = null
     private var searchQuery: String = ""
     private var modifiedOnly: Boolean = false
@@ -63,10 +71,10 @@ class PackSettingsScreen(
     private fun activeTier(): RenderTier = VulkanShaders.config.renderTier
 
     private fun visibleSettings(tierIndex: Int = activeTier().tierIndex): List<PackSettingDefinition> =
-        pack.manifest.settings.filter { it.appliesToTier(tierIndex) }
+        manifest.settings.filter { it.appliesToTier(tierIndex) }
 
     private fun availablePresets(tierIndex: Int = activeTier().tierIndex): List<PackPresetDefinition> {
-        val declared = pack.manifest.presets.filter { it.appliesToTier(tierIndex) }
+        val declared = manifest.presets.filter { it.appliesToTier(tierIndex) }
         if (declared.isNotEmpty()) return declared
         val visible = visibleSettings(tierIndex)
         if (visible.isEmpty()) return emptyList()
@@ -250,7 +258,7 @@ class PackSettingsScreen(
             }
             SettingType.ENUM -> {
                 val control = Button.builder(
-                    settingLabel(setting.label, modified).append(": $currentVal"),
+                    settingLabel(setting.label, modified).append(": ${displayOptionLabel(setting, currentVal)}"),
                 ) {
                     val opts = setting.options
                     if (opts.isNotEmpty()) {
@@ -757,6 +765,11 @@ class PackSettingsScreen(
 
     private fun currentValue(packId: String, setting: PackSettingDefinition): String =
         VulkanShaders.config.activePackOverrides(packId, activeTier())[setting.key] ?: setting.defaultValue
+
+    private fun displayOptionLabel(setting: PackSettingDefinition, rawValue: String): String {
+        val optionIndex = setting.options.indexOfFirst { it.equals(rawValue, ignoreCase = true) }
+        return setting.optionLabels.getOrNull(optionIndex)?.takeIf(String::isNotBlank) ?: rawValue
+    }
 
     private fun isModified(packId: String, setting: PackSettingDefinition): Boolean {
         val overrideVal = VulkanShaders.config.activePackOverrides(packId, activeTier())[setting.key] ?: return false

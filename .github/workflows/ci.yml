@@ -37,7 +37,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run Clippy
-        run: cargo clippy --workspace --all-targets -- -D clippy::correctness
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Run Rust workspace tests
         run: cargo test --workspace --locked
@@ -71,7 +71,7 @@ jobs:
         run: cargo test --locked -p vulkanshaders-core --test vendor_sdk_contract_test
 
       - name: Verify proprietary SDK headers, binaries, and FFI/FFM contracts
-        run: cargo run --locked -p vulkanshaders-sdk-bench -- verify --repo-root .
+        run: cargo run --locked -p vulkanshaders-sdk-bench -- verify --repo-root . --download
 
   natives:
     name: Native Core (${{ matrix.platform_dir }})
@@ -96,7 +96,7 @@ jobs:
             cross_arm64: false
           - platform_dir: macos-aarch64
             target: aarch64-apple-darwin
-            os: macos-15
+            os: macos-14
             lib_name: libvulkanshaders_core.dylib
             cross_arm64: false
     runs-on: ${{ matrix.os }}
@@ -204,13 +204,6 @@ jobs:
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
-
-      - name: Build sibling Pyroclast compileOnly dependency
-        run: |
-          set -euo pipefail
-          rm -rf ../Pyroclast
-          git clone --depth 1 https://github.com/sysv86/Pyroclast.git ../Pyroclast
-          (cd ../Pyroclast && chmod +x gradlew && ./gradlew jar --no-daemon)
 
       - name: Run Kotlin unit tests
         run: ./gradlew test -Pvs.cargo=false --no-daemon

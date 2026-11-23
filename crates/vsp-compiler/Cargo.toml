@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Vulkan Shader Package (.vsp) manifest parser, isolated VSL hook preprocessor, GLSL/RT->SPIR-V 1.6 compiler, and rspirv reflection/linker"
 
 [features]
@@ -18,8 +19,6 @@ rspirv.workspace = true
 spirv.workspace = true
 toml.workspace = true
 serde.workspace = true
-serde_json.workspace = true
 thiserror.workspace = true
 blake3.workspace = true
-tracing.workspace = true
 bytemuck.workspace = true

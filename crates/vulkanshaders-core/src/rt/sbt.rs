@@ -29,7 +29,7 @@ impl ShaderBindingTable {
         if align <= 1 {
             val
         } else {
-            (val + align - 1) / align * align
+            val.div_ceil(align) * align
         }
     }
 

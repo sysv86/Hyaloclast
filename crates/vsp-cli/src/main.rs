@@ -11,6 +11,8 @@ use vsp_compiler::{
     VslPreprocessor, VspCompiler, validate_pack_directory,
 };
 
+type PackStageJob = (String, ShaderStageKind, String);
+
 #[derive(Debug, Parser)]
 #[command(
     name = "vsp",
@@ -124,7 +126,7 @@ fn build_hw_caps(ser: bool, omm: bool) -> HardwareShaderCaps {
 
 fn collect_pack_stages(
     chain_dirs: &[PathBuf],
-) -> Result<Vec<(String, ShaderStageKind, String)>, Box<dyn std::error::Error>> {
+) -> Result<Vec<PackStageJob>, Box<dyn std::error::Error>> {
     let mut stage_jobs = Vec::new();
     let mut seen_stages: HashSet<(String, String)> = HashSet::new();
 
@@ -516,8 +518,8 @@ fn run_profile(
         hw_caps.opacity_micromap
     );
     println!(
-        "{:<30} {:<10} {:>9} {:>10} {:>10} {:>8} {:>6}  {}",
-        "STAGE", "KIND", "TIME(ms)", "WORDS", "BYTES", "PUSH(B)", "BINDS", "WORKGROUP / RT"
+        "{:<30} {:<10} {:>9} {:>10} {:>10} {:>8} {:>6}  WORKGROUP / RT",
+        "STAGE", "KIND", "TIME(ms)", "WORDS", "BYTES", "PUSH(B)", "BINDS"
     );
 
     let mut total_ms = 0.0f64;

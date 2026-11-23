@@ -52,6 +52,7 @@ data class VulkanShadersConfig(
     val enableOverlayPass: Boolean = true,
     val showF3DebugInfo: Boolean = true,
     val enableGpuProfiler: Boolean = false,
+    val enableSer: Boolean = true,
     val packOverrides: Map<String, Map<String, String>> = emptyMap(),
     val packOverridesByTier: Map<String, Map<Int, Map<String, String>>> = emptyMap(),
     val autoCalibrated: Boolean = false,

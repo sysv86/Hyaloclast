@@ -290,12 +290,12 @@ fn parse_elf64(
                     let bind = st_info >> 4;
                     let st_shndx = read_u16_le(sym_bytes, pos + 6).unwrap_or(0);
 
-                    if st_shndx != 0 && (bind == STB_GLOBAL || bind == STB_WEAK) {
-                        if let Some(name) = read_c_string(strtab, st_name) {
-                            if !name.is_empty() {
-                                exported_symbols.insert(name);
-                            }
-                        }
+                    if st_shndx != 0
+                        && (bind == STB_GLOBAL || bind == STB_WEAK)
+                        && let Some(name) = read_c_string(strtab, st_name)
+                        && !name.is_empty()
+                    {
+                        exported_symbols.insert(name);
                     }
 
                     pos = pos.saturating_add(entsize);
@@ -327,12 +327,11 @@ fn parse_elf64(
                         if let Some(dep) = read_c_string(strtab, d_val as usize) {
                             push_unique(&mut dependencies, dep);
                         }
-                    } else if d_tag == DT_SONAME {
-                        if let Some(soname) = read_c_string(strtab, d_val as usize) {
-                            if !soname.is_empty() {
-                                soname_or_dll_name = Some(soname);
-                            }
-                        }
+                    } else if d_tag == DT_SONAME
+                        && let Some(soname) = read_c_string(strtab, d_val as usize)
+                        && !soname.is_empty()
+                    {
+                        soname_or_dll_name = Some(soname);
                     }
                     pos = pos.saturating_add(entsize);
                 }
@@ -479,46 +478,38 @@ fn parse_pe32_plus(
     if num_rva_and_sizes > 0 && data_dir_off + 8 <= opt_off + size_of_opt_header {
         let export_rva = read_u32_le(bytes, data_dir_off).unwrap_or(0);
         let export_size = read_u32_le(bytes, data_dir_off + 4).unwrap_or(0);
-        if export_rva != 0 && export_size != 0 {
-            if let Some(exp_off) = pe_rva_to_offset(export_rva, &sections, bytes.len()) {
-                if exp_off.saturating_add(40) <= bytes.len() {
-                    let name_rva = read_u32_le(bytes, exp_off + 12).unwrap_or(0);
-                    if name_rva != 0 {
-                        if let Some(name_off) = pe_rva_to_offset(name_rva, &sections, bytes.len()) {
-                            if let Some(dll_name) = read_c_string(bytes, name_off) {
-                                if !dll_name.is_empty() {
-                                    soname_or_dll_name = Some(dll_name);
-                                }
-                            }
-                        }
-                    }
+        if export_rva != 0
+            && export_size != 0
+            && let Some(exp_off) = pe_rva_to_offset(export_rva, &sections, bytes.len())
+            && exp_off.saturating_add(40) <= bytes.len()
+        {
+            let name_rva = read_u32_le(bytes, exp_off + 12).unwrap_or(0);
+            if name_rva != 0
+                && let Some(name_off) = pe_rva_to_offset(name_rva, &sections, bytes.len())
+                && let Some(dll_name) = read_c_string(bytes, name_off)
+                && !dll_name.is_empty()
+            {
+                soname_or_dll_name = Some(dll_name);
+            }
 
-                    let number_of_names = read_u32_le(bytes, exp_off + 24).unwrap_or(0) as usize;
-                    let addr_of_names_rva = read_u32_le(bytes, exp_off + 32).unwrap_or(0);
-                    if number_of_names > 0 && addr_of_names_rva != 0 {
-                        if let Some(names_off) =
-                            pe_rva_to_offset(addr_of_names_rva, &sections, bytes.len())
-                        {
-                            for i in 0..number_of_names {
-                                let entry_off =
-                                    match i.checked_mul(4).and_then(|d| names_off.checked_add(d)) {
-                                        Some(o) if o + 4 <= bytes.len() => o,
-                                        _ => break,
-                                    };
-                                let sym_rva = read_u32_le(bytes, entry_off).unwrap_or(0);
-                                if sym_rva != 0 {
-                                    if let Some(sym_off) =
-                                        pe_rva_to_offset(sym_rva, &sections, bytes.len())
-                                    {
-                                        if let Some(sym_name) = read_c_string(bytes, sym_off) {
-                                            if !sym_name.is_empty() {
-                                                exported_symbols.insert(sym_name);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
+            let number_of_names = read_u32_le(bytes, exp_off + 24).unwrap_or(0) as usize;
+            let addr_of_names_rva = read_u32_le(bytes, exp_off + 32).unwrap_or(0);
+            if number_of_names > 0
+                && addr_of_names_rva != 0
+                && let Some(names_off) = pe_rva_to_offset(addr_of_names_rva, &sections, bytes.len())
+            {
+                for i in 0..number_of_names {
+                    let entry_off = match i.checked_mul(4).and_then(|d| names_off.checked_add(d)) {
+                        Some(o) if o + 4 <= bytes.len() => o,
+                        _ => break,
+                    };
+                    let sym_rva = read_u32_le(bytes, entry_off).unwrap_or(0);
+                    if sym_rva != 0
+                        && let Some(sym_off) = pe_rva_to_offset(sym_rva, &sections, bytes.len())
+                        && let Some(sym_name) = read_c_string(bytes, sym_off)
+                        && !sym_name.is_empty()
+                    {
+                        exported_symbols.insert(sym_name);
                     }
                 }
             }
@@ -529,34 +520,34 @@ fn parse_pe32_plus(
     if num_rva_and_sizes > 1 && data_dir_off + 16 <= opt_off + size_of_opt_header {
         let import_rva = read_u32_le(bytes, data_dir_off + 8).unwrap_or(0);
         let import_size = read_u32_le(bytes, data_dir_off + 12).unwrap_or(0);
-        if import_rva != 0 && import_size != 0 {
-            if let Some(mut imp_off) = pe_rva_to_offset(import_rva, &sections, bytes.len()) {
-                while imp_off.saturating_add(20) <= bytes.len() {
-                    let orig_first_thunk = read_u32_le(bytes, imp_off).unwrap_or(0);
-                    let time_date_stamp = read_u32_le(bytes, imp_off + 4).unwrap_or(0);
-                    let forwarder_chain = read_u32_le(bytes, imp_off + 8).unwrap_or(0);
-                    let name_rva = read_u32_le(bytes, imp_off + 12).unwrap_or(0);
-                    let first_thunk = read_u32_le(bytes, imp_off + 16).unwrap_or(0);
+        if import_rva != 0
+            && import_size != 0
+            && let Some(mut imp_off) = pe_rva_to_offset(import_rva, &sections, bytes.len())
+        {
+            while imp_off.saturating_add(20) <= bytes.len() {
+                let orig_first_thunk = read_u32_le(bytes, imp_off).unwrap_or(0);
+                let time_date_stamp = read_u32_le(bytes, imp_off + 4).unwrap_or(0);
+                let forwarder_chain = read_u32_le(bytes, imp_off + 8).unwrap_or(0);
+                let name_rva = read_u32_le(bytes, imp_off + 12).unwrap_or(0);
+                let first_thunk = read_u32_le(bytes, imp_off + 16).unwrap_or(0);
 
-                    if orig_first_thunk == 0
-                        && time_date_stamp == 0
-                        && forwarder_chain == 0
-                        && name_rva == 0
-                        && first_thunk == 0
-                    {
-                        break;
-                    }
-
-                    if name_rva != 0 {
-                        if let Some(name_off) = pe_rva_to_offset(name_rva, &sections, bytes.len()) {
-                            if let Some(dll_name) = read_c_string(bytes, name_off) {
-                                push_unique(&mut dependencies, dll_name);
-                            }
-                        }
-                    }
-
-                    imp_off = imp_off.saturating_add(20);
+                if orig_first_thunk == 0
+                    && time_date_stamp == 0
+                    && forwarder_chain == 0
+                    && name_rva == 0
+                    && first_thunk == 0
+                {
+                    break;
                 }
+
+                if name_rva != 0
+                    && let Some(name_off) = pe_rva_to_offset(name_rva, &sections, bytes.len())
+                    && let Some(dll_name) = read_c_string(bytes, name_off)
+                {
+                    push_unique(&mut dependencies, dll_name);
+                }
+
+                imp_off = imp_off.saturating_add(20);
             }
         }
     }
@@ -656,10 +647,10 @@ fn parse_unix_ar(
             && effective_data[4] == ELFCLASS64
             && effective_data[5] == ELFDATA2LSB
         {
-            if architecture == "unknown" {
-                if let Some(e_machine) = read_u16_le(effective_data, 18) {
-                    architecture = elf_machine_name(e_machine);
-                }
+            if architecture == "unknown"
+                && let Some(e_machine) = read_u16_le(effective_data, 18)
+            {
+                architecture = elf_machine_name(e_machine);
             }
             if !saw_symtab {
                 // Fallback: extract defined global/weak symbols directly from member object
@@ -776,12 +767,11 @@ fn parse_ar_bsd_symdef(data: &[u8], out: &mut BTreeSet<String>) {
     let num_entries = ranlib_bytes / 8;
     for i in 0..num_entries {
         let entry_off = 4 + i * 8;
-        if let Some(strx) = read_u32_le(data, entry_off) {
-            if let Some(sym) = read_c_string(strtab, strx as usize) {
-                if !sym.is_empty() {
-                    out.insert(sym);
-                }
-            }
+        if let Some(strx) = read_u32_le(data, entry_off)
+            && let Some(sym) = read_c_string(strtab, strx as usize)
+            && !sym.is_empty()
+        {
+            out.insert(sym);
         }
     }
 }

@@ -26,6 +26,7 @@ class ConfigMigrationAndPresetsTest {
             hdrPeakBrightnessNits = 1200f,
             hdrPaperWhiteNits = 250f,
             enableOverlayPass = true,
+            enableSer = false,
             packOverridesByTier = mapOf(
                 "hyaloclast-obsidian-showcase" to mapOf(
                     RenderTier.TIER_2_RAY_QUERY.tierIndex to mapOf("sun_intensity" to "3.1"),

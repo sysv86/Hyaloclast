@@ -454,7 +454,7 @@ impl<const N: usize> StackBuf<N> {
         let mut i = 0;
         while i < DIGITS {
             let shift = (DIGITS - 1 - i) * 4;
-            out[2 + i] = HEX[((v >> shift) & 0xF) as usize];
+            out[2 + i] = HEX[(v >> shift) & 0xF];
             i += 1;
         }
         self.push_bytes(&out[..(2 + DIGITS)]);

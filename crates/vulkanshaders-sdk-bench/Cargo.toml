@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Real SDK header, binary, and ABI verification benchmark harness for VulkanShaders (NGX, NRD, FSR3, XeSS)"
 
 [dependencies]

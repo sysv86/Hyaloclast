@@ -156,21 +156,21 @@ fn fetch_ngx(cfg: &DownloadConfig, res: &mut SdkDownloadResult) {
                     let Some(name) = entry.get("name").and_then(Value::as_str) else {
                         continue;
                     };
-                    if name.starts_with("libnvidia-ngx-dlss.so") {
-                        if let Some(dl_url) = entry.get("download_url").and_then(Value::as_str) {
-                            found_so = true;
-                            fetch_single(
-                                SdkKind::Ngx,
-                                "binary",
-                                name,
-                                dl_url,
-                                &binaries_dir.join(name),
-                                cfg,
-                                &mut res.binaries,
-                                &mut res.notes,
-                                &mut res.errors,
-                            );
-                        }
+                    if name.starts_with("libnvidia-ngx-dlss.so")
+                        && let Some(dl_url) = entry.get("download_url").and_then(Value::as_str)
+                    {
+                        found_so = true;
+                        fetch_single(
+                            SdkKind::Ngx,
+                            "binary",
+                            name,
+                            dl_url,
+                            &binaries_dir.join(name),
+                            cfg,
+                            &mut res.binaries,
+                            &mut res.notes,
+                            &mut res.errors,
+                        );
                     }
                 }
                 if !found_so {
@@ -282,13 +282,13 @@ fn fetch_nrd(cfg: &DownloadConfig, res: &mut SdkDownloadResult) {
                                     &mut res.notes,
                                     &mut res.errors,
                                 );
-                                if archive_path.is_file() {
-                                    if let Err(e) = extract_archive(&archive_path, &extracted_dir) {
-                                        res.errors.push(format!(
-                                            "Failed to extract NRD archive '{}': {e}",
-                                            archive_path.display()
-                                        ));
-                                    }
+                                if archive_path.is_file()
+                                    && let Err(e) = extract_archive(&archive_path, &extracted_dir)
+                                {
+                                    res.errors.push(format!(
+                                        "Failed to extract NRD archive '{}': {e}",
+                                        archive_path.display()
+                                    ));
                                 }
                             } else {
                                 res.notes.push(format!(
@@ -398,20 +398,20 @@ fn fetch_fsr3(cfg: &DownloadConfig, res: &mut SdkDownloadResult) {
                         && (lower.ends_with(".dll")
                             || lower.ends_with(".so")
                             || lower.contains(".so."));
-                    if is_vk_bin {
-                        if let Some(dl_url) = entry.get("download_url").and_then(Value::as_str) {
-                            fetch_single(
-                                SdkKind::Fsr3,
-                                "binary",
-                                name,
-                                dl_url,
-                                &binaries_dir.join(name),
-                                cfg,
-                                &mut res.binaries,
-                                &mut res.notes,
-                                &mut res.errors,
-                            );
-                        }
+                    if is_vk_bin
+                        && let Some(dl_url) = entry.get("download_url").and_then(Value::as_str)
+                    {
+                        fetch_single(
+                            SdkKind::Fsr3,
+                            "binary",
+                            name,
+                            dl_url,
+                            &binaries_dir.join(name),
+                            cfg,
+                            &mut res.binaries,
+                            &mut res.notes,
+                            &mut res.errors,
+                        );
                     }
                 }
             }
@@ -512,13 +512,13 @@ fn fetch_xess(cfg: &DownloadConfig, res: &mut SdkDownloadResult) {
         }
     } else if !extracted_dir.is_dir() || dir_is_empty(&extracted_dir) {
         // Offline: if an archive is already cached, extract it locally
-        if let Some(cached_zip) = find_first_zip(&archives_dir) {
-            if let Err(e) = extract_archive(&cached_zip, &extracted_dir) {
-                res.errors.push(format!(
-                    "Failed to extract cached XeSS archive '{}': {e}",
-                    cached_zip.display()
-                ));
-            }
+        if let Some(cached_zip) = find_first_zip(&archives_dir)
+            && let Err(e) = extract_archive(&cached_zip, &extracted_dir)
+        {
+            res.errors.push(format!(
+                "Failed to extract cached XeSS archive '{}': {e}",
+                cached_zip.display()
+            ));
         }
     }
 
@@ -588,14 +588,14 @@ fn fetch_single(
         return;
     }
 
-    if let Some(parent) = target_path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            errors.push(format!(
-                "Failed to create cache dir '{}': {e}",
-                parent.display()
-            ));
-            return;
-        }
+    if let Some(parent) = target_path.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        errors.push(format!(
+            "Failed to create cache dir '{}': {e}",
+            parent.display()
+        ));
+        return;
     }
 
     let part_path = part_file_path(target_path);

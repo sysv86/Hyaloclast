@@ -35,7 +35,7 @@ pub use omm::{
 };
 use sbt::ShaderBindingTable;
 pub use sharc::{SharcRuntime, SharcState};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use wind::{WindJobGpu, WindRefitScheduler};
 
 /// Per-TLAS-instance metadata uploaded to Set 1 binding 1 (`InstanceMetaBuffer`, `std430`),
@@ -68,6 +68,18 @@ const WORLD_MASK: u8 = !CRUMBLING_MASK;
 pub struct SectionLayerKey {
     pub allocation_key_id: u64,
     pub layer_ordinal: u32,
+}
+
+struct WindCandidate {
+    dist_sq: f64,
+    key: SectionLayerKey,
+    displaced_bda: u64,
+    rest_bda: u64,
+    vertex_count: u32,
+    is_region_shifted: bool,
+    ox: i32,
+    oy: i32,
+    oz: i32,
 }
 
 #[derive(Debug)]
@@ -190,11 +202,19 @@ pub struct ZeroCopyBlasManager {
     pub last_built_tlas_handle: vk::AccelerationStructureKHR,
     /// Cached sorted list of resident slice keys (invalidated on register/unregister/clear/build).
     cached_sorted_keys: Vec<SectionLayerKey>,
+    cached_terrain_instances: Vec<vk::AccelerationStructureInstanceKHR>,
+    cached_terrain_metas: Vec<InstanceMetaGpu>,
     sorted_keys_dirty: bool,
     /// Query pool (`ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR`) and pending compaction batch.
     compaction_query_pool: vk::QueryPool,
     compaction_query_capacity: u32,
     pending_compactions: Vec<(SectionLayerKey, vk::AccelerationStructureKHR, u64)>,
+    scratch_compact_handles: Vec<vk::AccelerationStructureKHR>,
+    scratch_refit_keys: Vec<SectionLayerKey>,
+    scratch_near_candidates: Vec<WindCandidate>,
+    scratch_reset_candidates: Vec<(SectionLayerKey, u64, u64, u32)>,
+    scratch_instances: Vec<vk::AccelerationStructureInstanceKHR>,
+    scratch_instance_metas: Vec<InstanceMetaGpu>,
 }
 
 impl Default for ZeroCopyBlasManager {
@@ -242,10 +262,18 @@ impl ZeroCopyBlasManager {
             last_built_tlas_address: 0,
             last_built_tlas_handle: vk::AccelerationStructureKHR::null(),
             cached_sorted_keys: Vec::with_capacity(2048),
+            cached_terrain_instances: Vec::with_capacity(2048),
+            cached_terrain_metas: Vec::with_capacity(2048),
             sorted_keys_dirty: true,
             compaction_query_pool: vk::QueryPool::null(),
             compaction_query_capacity: 0,
             pending_compactions: Vec::new(),
+            scratch_compact_handles: Vec::with_capacity(64),
+            scratch_refit_keys: Vec::with_capacity(64),
+            scratch_near_candidates: Vec::with_capacity(64),
+            scratch_reset_candidates: Vec::with_capacity(64),
+            scratch_instances: Vec::with_capacity(2048),
+            scratch_instance_metas: Vec::with_capacity(2048),
         }
     }
 
@@ -507,6 +535,7 @@ impl ZeroCopyBlasManager {
         self.cached_sorted_keys.clear();
         self.sorted_keys_dirty = true;
         self.wind_scheduler.prev_active_keys.clear();
+        self.wind_scheduler.current_active_keys.clear();
         self.wind_scheduler.active_jobs.clear();
         for (_, old) in self.slices.drain() {
             Self::retire_slice_resources(
@@ -744,26 +773,34 @@ impl ZeroCopyBlasManager {
         if ctx.capabilities.ray_tracing_pipeline {
             trace_stages |= vk::PipelineStageFlags2::RAY_TRACING_SHADER_KHR;
         }
-        // The next frame reuses BLAS scratch and updates wind geometry in place.
-        // Finish earlier traces and expose Minecraft's chunk uploads before those writes and builds.
+        // TLAS/BLAS work must wait for earlier traces that still read these structures.
         unsafe {
             ctx.cmd_memory_barrier2(
                 cmd,
-                trace_stages
-                    | vk::PipelineStageFlags2::ACCELERATION_STRUCTURE_BUILD_KHR
-                    | vk::PipelineStageFlags2::ALL_TRANSFER,
+                trace_stages | vk::PipelineStageFlags2::ACCELERATION_STRUCTURE_BUILD_KHR,
                 vk::AccessFlags2::ACCELERATION_STRUCTURE_WRITE_KHR
-                    | vk::AccessFlags2::SHADER_STORAGE_WRITE
-                    | vk::AccessFlags2::TRANSFER_WRITE,
-                vk::PipelineStageFlags2::ACCELERATION_STRUCTURE_BUILD_KHR
-                    | vk::PipelineStageFlags2::COMPUTE_SHADER
-                    | vk::PipelineStageFlags2::ALL_TRANSFER,
+                    | vk::AccessFlags2::ACCELERATION_STRUCTURE_READ_KHR,
+                vk::PipelineStageFlags2::ACCELERATION_STRUCTURE_BUILD_KHR,
                 vk::AccessFlags2::ACCELERATION_STRUCTURE_READ_KHR
-                    | vk::AccessFlags2::ACCELERATION_STRUCTURE_WRITE_KHR
-                    | vk::AccessFlags2::SHADER_READ
-                    | vk::AccessFlags2::TRANSFER_READ
-                    | vk::AccessFlags2::TRANSFER_WRITE,
+                    | vk::AccessFlags2::ACCELERATION_STRUCTURE_WRITE_KHR,
             );
+        }
+        let has_frame_upload_work = !self.pending_build_queue.is_empty()
+            || !self.lod_blas.pending_builds.is_empty()
+            || !self.entity_blas.staged_batches.is_empty()
+            || !self.wind_scheduler.prev_active_keys.is_empty();
+        if has_frame_upload_work {
+            unsafe {
+                ctx.cmd_memory_barrier2(
+                    cmd,
+                    vk::PipelineStageFlags2::ALL_TRANSFER,
+                    vk::AccessFlags2::TRANSFER_WRITE,
+                    vk::PipelineStageFlags2::ACCELERATION_STRUCTURE_BUILD_KHR
+                        | vk::PipelineStageFlags2::COMPUTE_SHADER,
+                    vk::AccessFlags2::ACCELERATION_STRUCTURE_READ_KHR
+                        | vk::AccessFlags2::SHADER_READ,
+                );
+            }
         }
 
         // 1. Ensure shared quad index buffer BDA is ready (sized for largest terrain slice, LOD slice, or entity quad batch)
@@ -805,7 +842,7 @@ impl ZeroCopyBlasManager {
                 let pending = std::mem::take(&mut self.pending_compactions);
                 let mut compacted_any = false;
                 for ((key, src_handle, orig_size), comp_size) in
-                    pending.into_iter().zip(compacted_sizes.into_iter())
+                    pending.into_iter().zip(compacted_sizes)
                 {
                     if comp_size == 0 || comp_size >= orig_size {
                         continue;
@@ -835,6 +872,7 @@ impl ZeroCopyBlasManager {
                             old_blas.retire(ctx, &self.slab_pool, retire_queue);
                         }
                         slice.compacted = true;
+                        self.sorted_keys_dirty = true;
                         compacted_any = true;
                     }
                 }
@@ -961,13 +999,11 @@ impl ZeroCopyBlasManager {
             if let Some(omm_input) = pending_omm
                 && ctx.capabilities.supports_opacity_micromap
                 && omm_input.triangles.len() == primitive_count as usize
-            {
-                if let Ok(built_omm) =
+                && let Ok(built_omm) =
                     self.omm_builder
                         .build_cutout_micromap(ctx, retire_queue, cmd, &omm_input)
-                {
-                    active_omm = Some(built_omm);
-                }
+            {
+                active_omm = Some(built_omm);
             }
 
             let mut triangles = vk::AccelerationStructureGeometryTrianglesDataKHR::default()
@@ -1174,7 +1210,8 @@ impl ZeroCopyBlasManager {
                 );
             }
 
-            let mut compact_handles: Vec<vk::AccelerationStructureKHR> = Vec::new();
+            let mut compact_handles = std::mem::take(&mut self.scratch_compact_handles);
+            compact_handles.clear();
             let can_queue_compaction =
                 self.pending_compactions.is_empty() && !self.vram_throttle_compaction;
             for p in prepared_builds {
@@ -1184,15 +1221,15 @@ impl ZeroCopyBlasManager {
                     if let Some(old_blas) = slice.blas.replace(p.new_blas) {
                         old_blas.retire(ctx, &self.slab_pool, retire_queue);
                     }
-                    if let Some(new_omm) = p.new_omm {
-                        if let Some(old_omm) = slice.omm.replace(new_omm) {
-                            old_omm.retire(
-                                ctx,
-                                &self.omm_builder.storage_slab,
-                                self.omm_builder.device.as_ref(),
-                                retire_queue,
-                            );
-                        }
+                    if let Some(new_omm) = p.new_omm
+                        && let Some(old_omm) = slice.omm.replace(new_omm)
+                    {
+                        old_omm.retire(
+                            ctx,
+                            &self.omm_builder.storage_slab,
+                            self.omm_builder.device.as_ref(),
+                            retire_queue,
+                        );
                     }
                     slice.dirty_blas_build = false;
                     slice.compacted = false;
@@ -1256,6 +1293,7 @@ impl ZeroCopyBlasManager {
                         );
                     }
                 }
+                self.scratch_compact_handles = compact_handles;
             }
         }
 
@@ -1287,23 +1325,15 @@ impl ZeroCopyBlasManager {
             .wind_scheduler
             .effective_reach_blocks(ctx.capabilities.gpu_tier_class);
         let reach_sq = wind_reach_blocks * wind_reach_blocks;
-        let mut current_wind_keys = HashSet::new();
-        let mut refit_keys = Vec::new();
+        let mut current_wind_keys = std::mem::take(&mut self.wind_scheduler.current_active_keys);
+        current_wind_keys.clear();
+        let mut refit_keys = std::mem::take(&mut self.scratch_refit_keys);
+        refit_keys.clear();
         let period = self.wind_scheduler.wind_period_blocks;
-
-        struct WindCandidate {
-            dist_sq: f64,
-            key: SectionLayerKey,
-            displaced_bda: u64,
-            rest_bda: u64,
-            vertex_count: u32,
-            is_region_shifted: bool,
-            ox: i32,
-            oy: i32,
-            oz: i32,
-        }
-        let mut near_candidates: Vec<WindCandidate> = Vec::new();
-        let mut reset_candidates: Vec<(SectionLayerKey, u64, u64, u32)> = Vec::new();
+        let mut near_candidates = std::mem::take(&mut self.scratch_near_candidates);
+        near_candidates.clear();
+        let mut reset_candidates = std::mem::take(&mut self.scratch_reset_candidates);
+        reset_candidates.clear();
 
         for (key, slice) in &self.slices {
             if !slice.has_foliage_wind
@@ -1359,7 +1389,7 @@ impl ZeroCopyBlasManager {
 
         // Sort near-camera foliage sections by distance and animate up to max_wind_sections closest.
         near_candidates.sort_by(|a, b| a.dist_sq.total_cmp(&b.dist_sq));
-        for (idx, c) in near_candidates.into_iter().enumerate() {
+        for (idx, c) in near_candidates.drain(..).enumerate() {
             let raw_key = (c.key.allocation_key_id, c.key.layer_ordinal);
             if idx < max_wind_sections {
                 current_wind_keys.insert(raw_key);
@@ -1398,7 +1428,7 @@ impl ZeroCopyBlasManager {
                 reset_candidates.push((c.key, c.displaced_bda, c.rest_bda, c.vertex_count));
             }
         }
-        for (key, displaced_bda, rest_bda, vertex_count) in reset_candidates {
+        for (key, displaced_bda, rest_bda, vertex_count) in reset_candidates.drain(..) {
             self.wind_scheduler.active_jobs.push(WindJobGpu {
                 positions_address: displaced_bda,
                 rest_address: rest_bda,
@@ -1413,7 +1443,12 @@ impl ZeroCopyBlasManager {
             });
             refit_keys.push(key);
         }
-        self.wind_scheduler.prev_active_keys = current_wind_keys;
+        std::mem::swap(
+            &mut self.wind_scheduler.prev_active_keys,
+            &mut current_wind_keys,
+        );
+        current_wind_keys.clear();
+        self.wind_scheduler.current_active_keys = current_wind_keys;
 
         if let Ok(Some(wind_pc)) = self.wind_scheduler.upload_frame_jobs(
             ctx,
@@ -1422,15 +1457,14 @@ impl ZeroCopyBlasManager {
             game_time_sec,
             1.0,
             1.0 + rain_level,
-        ) {
-            if let Some(pipe_mgr) = pipelines {
-                pipe_mgr.dispatch_wind_displace(
-                    ctx,
-                    cmd,
-                    &wind_pc,
-                    self.wind_scheduler.max_job_vertex_count,
-                );
-            }
+        ) && let Some(pipe_mgr) = pipelines
+        {
+            pipe_mgr.dispatch_wind_displace(
+                ctx,
+                cmd,
+                &wind_pc,
+                self.wind_scheduler.max_job_vertex_count,
+            );
         }
 
         // Batch all in-place BLAS UPDATE refits into a single `cmd_build_acceleration_structures` call.
@@ -1444,7 +1478,7 @@ impl ZeroCopyBlasManager {
             let mut prepared_refits: Vec<PreparedRefit> = Vec::with_capacity(refit_keys.len());
             let mut total_refit_scratch: u64 = 0;
 
-            for key in refit_keys {
+            for key in refit_keys.drain(..) {
                 let Some(slice) = self.slices.get(&key) else {
                     continue;
                 };
@@ -1549,10 +1583,23 @@ impl ZeroCopyBlasManager {
                 }
             }
         }
+        self.scratch_refit_keys = refit_keys;
+        self.scratch_near_candidates = near_candidates;
+        self.scratch_reset_candidates = reset_candidates;
 
         // 4. Collect all resident chunk BLAS instances + per-instance metadata + dynamic Entity BLAS + LOD BLAS
-        let (mut instances, mut instance_metas) =
-            self.build_terrain_instances_and_meta(ctx, bindless, camera_pos, quad_index_bda);
+        let mut instances = std::mem::take(&mut self.scratch_instances);
+        instances.clear();
+        let mut instance_metas = std::mem::take(&mut self.scratch_instance_metas);
+        instance_metas.clear();
+        self.build_terrain_instances_and_meta(
+            ctx,
+            bindless,
+            camera_pos,
+            quad_index_bda,
+            &mut instances,
+            &mut instance_metas,
+        );
 
         let entity_records = self.entity_blas.record_frame_batches(
             ctx,
@@ -1628,22 +1675,8 @@ impl ZeroCopyBlasManager {
 
         // 4c. Upload EmissiveLightSSBO + ensure ReSTIR DI reservoirs using actual held light and viewport
         let (vp_w, vp_h) = self.emissive_lights.viewport_dimensions;
-        let uses_reservoirs = pipelines.is_some_and(|p| {
-            let has_reservoirs = |reflection: &vsp_compiler::SpirvReflection| {
-                reflection
-                    .bindings
-                    .iter()
-                    .any(|b| b.set == 1 && b.binding == 4)
-            };
-            p.rt_pipeline
-                .as_ref()
-                .is_some_and(|rt| has_reservoirs(&rt.reflection))
-                || p.compute_pipelines
-                    .get("rayquery_lighting.comp")
-                    .is_some_and(|compute| has_reservoirs(&compute.reflection))
-        });
-        let sharc_enabled =
-            pipelines.is_some_and(|p| p.compute_pipelines.contains_key("sharc_resolve.comp"));
+        let uses_reservoirs = pipelines.is_some_and(|p| p.rt_uses_reservoirs);
+        let sharc_enabled = pipelines.is_some_and(|p| p.rt_sharc_enabled);
         if sharc_enabled || uses_reservoirs {
             let shader_stages = vk::PipelineStageFlags2::COMPUTE_SHADER
                 | if ctx.capabilities.ray_tracing_pipeline {
@@ -1713,6 +1746,9 @@ impl ZeroCopyBlasManager {
         } else {
             vk::AccelerationStructureKHR::null()
         };
+
+        self.scratch_instances = instances;
+        self.scratch_instance_metas = instance_metas;
 
         Ok(tlas_addr)
     }
@@ -1791,82 +1827,115 @@ impl ZeroCopyBlasManager {
         bindless: Option<&crate::gpu::bindless::BindlessTextureTable>,
         camera_pos: [f64; 3],
         quad_index_bda: vk::DeviceAddress,
-    ) -> (
-        Vec<vk::AccelerationStructureInstanceKHR>,
-        Vec<InstanceMetaGpu>,
+        instances: &mut Vec<vk::AccelerationStructureInstanceKHR>,
+        metas: &mut Vec<InstanceMetaGpu>,
     ) {
+        let rebuild_cache = self.sorted_keys_dirty;
         self.refresh_sorted_keys();
-        let mut instances = Vec::with_capacity(self.cached_sorted_keys.len());
-        let mut metas = Vec::with_capacity(self.cached_sorted_keys.len());
+        instances.clear();
+        metas.clear();
 
-        for &key in &self.cached_sorted_keys {
+        if rebuild_cache {
+            self.cached_terrain_instances.clear();
+            self.cached_terrain_metas.clear();
+            for (idx, &key) in self.cached_sorted_keys.iter().enumerate() {
+                let Some(slice) = self.slices.get(&key) else {
+                    continue;
+                };
+                let Some(ref blas) = slice.blas else {
+                    continue;
+                };
+                if blas.device_address == 0 {
+                    continue;
+                }
+
+                let vertex_bda = if slice.has_foliage_wind
+                    && let Some(ref disp_buf) = slice.displaced_vertex_buf
+                    && disp_buf.device_address != 0
+                {
+                    disp_buf.device_address
+                } else if slice.cached_vertex_bda != 0 {
+                    slice.cached_vertex_bda
+                } else if slice.vk_buffer != 0 {
+                    let base_bda =
+                        unsafe { ctx.buffer_device_address(vk::Buffer::from_raw(slice.vk_buffer)) };
+                    if base_bda != 0 {
+                        base_bda + slice.byte_offset
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                };
+                let (live_normal, live_specular) = bindless
+                    .map(|table| table.companions_for_albedo(slice.bindless_albedo_slot))
+                    .unwrap_or((0, 0));
+
+                self.cached_terrain_instances.push(Self::make_tlas_instance(
+                    slice,
+                    blas.device_address,
+                    idx as u32,
+                    camera_pos,
+                ));
+                self.cached_terrain_metas.push(InstanceMetaGpu {
+                    vertex_bda,
+                    index_bda: quad_index_bda,
+                    vertex_stride: slice.vertex_stride,
+                    layer_ordinal: slice.key.layer_ordinal,
+                    bindless_albedo_slot: slice.bindless_albedo_slot,
+                    bindless_normal_slot: if live_normal != 0 {
+                        live_normal
+                    } else {
+                        slice.bindless_normal_slot
+                    },
+                    bindless_specular_slot: if live_specular != 0 {
+                        live_specular
+                    } else {
+                        slice.bindless_specular_slot
+                    },
+                    material_flags: slice.material_flags
+                        | if slice.omm.is_some() {
+                            INSTANCE_FLAG_HAS_OMM
+                        } else {
+                            0
+                        },
+                    _pad: [0; 2],
+                    region_origin_rel: slice.compute_region_origin_rel(camera_pos),
+                });
+            }
+        }
+
+        for idx in 0..self.cached_terrain_instances.len() {
+            let key = self.cached_sorted_keys[idx];
             let Some(slice) = self.slices.get(&key) else {
                 continue;
             };
-            let Some(ref blas) = slice.blas else {
+            let Some(blas) = &slice.blas else {
                 continue;
             };
-            if blas.device_address == 0 {
-                continue;
-            }
+            let mut instance = self.cached_terrain_instances[idx];
+            instance.transform = slice.compute_tlas_transform(camera_pos);
+            instance.acceleration_structure_reference.device_handle = blas.device_address;
+            self.cached_terrain_instances[idx] = instance;
 
-            let vertex_bda = if slice.has_foliage_wind
-                && let Some(ref disp_buf) = slice.displaced_vertex_buf
-                && disp_buf.device_address != 0
-            {
-                disp_buf.device_address
-            } else if slice.cached_vertex_bda != 0 {
-                slice.cached_vertex_bda
-            } else if slice.vk_buffer != 0 {
-                let base_bda =
-                    unsafe { ctx.buffer_device_address(vk::Buffer::from_raw(slice.vk_buffer)) };
-                if base_bda != 0 {
-                    base_bda + slice.byte_offset
-                } else {
-                    0
-                }
-            } else {
-                0
-            };
-
-            let idx = instances.len() as u32;
-            instances.push(Self::make_tlas_instance(
-                slice,
-                blas.device_address,
-                idx,
-                camera_pos,
-            ));
+            let meta = &mut self.cached_terrain_metas[idx];
+            meta.region_origin_rel = slice.compute_region_origin_rel(camera_pos);
             let (live_normal, live_specular) = bindless
-                .map(|b| b.companions_for_albedo(slice.bindless_albedo_slot))
+                .map(|table| table.companions_for_albedo(slice.bindless_albedo_slot))
                 .unwrap_or((0, 0));
-            metas.push(InstanceMetaGpu {
-                vertex_bda,
-                index_bda: quad_index_bda,
-                vertex_stride: slice.vertex_stride,
-                layer_ordinal: slice.key.layer_ordinal,
-                bindless_albedo_slot: slice.bindless_albedo_slot,
-                bindless_normal_slot: if live_normal != 0 {
-                    live_normal
-                } else {
-                    slice.bindless_normal_slot
-                },
-                bindless_specular_slot: if live_specular != 0 {
-                    live_specular
-                } else {
-                    slice.bindless_specular_slot
-                },
-                material_flags: slice.material_flags
-                    | if slice.omm.is_some() {
-                        INSTANCE_FLAG_HAS_OMM
-                    } else {
-                        0
-                    },
-                _pad: [0; 2],
-                region_origin_rel: slice.compute_region_origin_rel(camera_pos),
-            });
+            meta.bindless_normal_slot = if live_normal != 0 {
+                live_normal
+            } else {
+                slice.bindless_normal_slot
+            };
+            meta.bindless_specular_slot = if live_specular != 0 {
+                live_specular
+            } else {
+                slice.bindless_specular_slot
+            };
+            instances.push(instance);
+            metas.push(*meta);
         }
-
-        (instances, metas)
     }
 
     fn upload_instance_meta_slot(
@@ -1898,10 +1967,10 @@ impl ZeroCopyBlasManager {
             self.instance_meta_slots[slot_idx] = Some(new_buf);
         }
 
-        if let Some(ref mut buf) = self.instance_meta_slots[slot_idx] {
-            if !metas.is_empty() {
-                buf.write_bytes(0, bytemuck::cast_slice(metas));
-            }
+        if let Some(ref mut buf) = self.instance_meta_slots[slot_idx]
+            && !metas.is_empty()
+        {
+            buf.write_bytes(0, bytemuck::cast_slice(metas));
         }
 
         let _ = cmd;

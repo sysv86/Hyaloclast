@@ -31,7 +31,10 @@ public final class VulkanQueueLockMixins {
                 original.call();
                 return;
             }
-            NativeCoreBridge.lockQueue();
+            if (!NativeCoreBridge.lockQueue()) {
+                original.call();
+                return;
+            }
             try {
                 NativeCoreBridge.reflexMarker(NativeCoreBridge.REFLEX_MARKER_RENDERSUBMIT_START);
                 original.call();
@@ -50,7 +53,10 @@ public final class VulkanQueueLockMixins {
                 original.call();
                 return;
             }
-            NativeCoreBridge.lockQueue();
+            if (!NativeCoreBridge.lockQueue()) {
+                original.call();
+                return;
+            }
             try {
                 original.call();
             } finally {
@@ -98,7 +104,10 @@ public final class VulkanQueueLockMixins {
             }
             // The frame generation worker also needs the queue lock to finish presenting.
             NativeCoreBridge.waitPresentIdle();
-            NativeCoreBridge.lockQueue();
+            if (!NativeCoreBridge.lockQueue()) {
+                original.call();
+                return;
+            }
             try {
                 NativeCoreBridge.reflexMarker(NativeCoreBridge.REFLEX_MARKER_PRESENT_START);
                 original.call();
@@ -117,7 +126,10 @@ public final class VulkanQueueLockMixins {
                 return;
             }
             NativeCoreBridge.waitPresentIdle();
-            NativeCoreBridge.lockQueue();
+            if (!NativeCoreBridge.lockQueue()) {
+                original.call();
+                return;
+            }
             try {
                 original.call();
             } finally {

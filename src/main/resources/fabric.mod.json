@@ -8,8 +8,8 @@
     "VulkanShaders contributors"
   ],
   "contact": {
-    "homepage": "https://github.com/sysv86/Hyaloclast",
-    "sources": "https://github.com/sysv86/Hyaloclast"
+    "homepage": "https://github.com/vulkanshaders/hyaloclast",
+    "sources": "https://github.com/vulkanshaders/hyaloclast"
   },
   "license": "GPL-3.0-only",
   "custom": {
@@ -40,13 +40,13 @@
     "fabricloader": ">=0.20.1",
     "minecraft": "~26.3",
     "java": ">=25",
-    "vulkanturbo": ">=0.1.0-alpha.1",
     "fabric-language-kotlin": ">=1.14.2+kotlin.2.4.21",
     "fabric-resource-loader-v1": ">=3.1.0"
   },
   "suggests": {
     "modmenu": "*",
-    "distanthorizons": ">=3.0.0"
+    "distanthorizons": ">=3.0.0",
+    "pyroclast": ">=0.1.0-alpha.1"
   },
   "breaks": {
     "iris": "*",

@@ -4,39 +4,34 @@
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
-layout(set = 0, binding = 1) uniform sampler2D uDepth;
+layout(set = 0, binding = 1) uniform sampler2DArray uFogHistory;
+#if VS_ACTIVE_RENDER_TIER <= 2
 layout(std140, set = 0, binding = 2) uniform CsmShadowUBO {
     mat4 cascadeViewProj[4];
     vec4 cascadeSplits;
     vec4 texelSizes;
 } uCsm;
 layout(set = 0, binding = 3) uniform sampler2DArray uShadowCsm;
-layout(set = 0, binding = 4, rgba16f) uniform writeonly image2D uVolumetricFog;
-layout(set = 0, binding = 5) uniform sampler2D uDhDepth;
-layout(std140, set = 0, binding = 6) uniform DhFrameUBO {
-    mat4 dhInvViewProj;
-    float fadeStart;
-    float fadeEnd;
-    float dhFarClip;
-    uint dhActive;
-} uDh;
+#endif
+layout(set = 0, binding = 4, rgba16f) uniform writeonly image2DArray uVolumetricFog;
 layout(set = 1, binding = 2, std140) uniform SharcConfigUBO {
     SharcConfig cfg;
 } uSharc;
 
-vec3 reconstructCameraRelativePos(vec2 uv, float depth) {
-    vec4 ndc = vec4(uv * 2.0 - 1.0, depth, 1.0);
-    vec4 viewPos = vsWorld.invProj * ndc;
-    float w = abs(viewPos.w) > 1e-6 ? viewPos.w : (viewPos.w >= 0.0 ? 1e-6 : -1e-6);
-    viewPos /= w;
-    return (vsWorld.invView * vec4(viewPos.xyz, 1.0)).xyz;
-}
+#ifdef VS_HIGH_END_GPU
+const float VS_FOG_MAX_DIST = 224.0;
+#else
+const float VS_FOG_MAX_DIST = 144.0;
+#endif
+const float VS_FOG_START_DIST = 12.0;
 
-vec3 reconstructDhCameraRelativePos(vec2 uv, float depth) {
-    vec4 ndc = vec4(uv * 2.0 - 1.0, depth, 1.0);
-    vec4 worldPos = uDh.dhInvViewProj * ndc;
-    float w = abs(worldPos.w) > 1e-6 ? worldPos.w : (worldPos.w >= 0.0 ? 1e-6 : -1e-6);
-    return worldPos.xyz / w;
+vec3 reconstructRayDirection(vec2 uv) {
+    vec4 viewPos = vsWorld.invProj * vec4(uv * 2.0 - 1.0, 0.25, 1.0);
+    float w = abs(viewPos.w) > 1e-6 ? viewPos.w : (viewPos.w >= 0.0 ? 1e-6 : -1e-6);
+    vec3 worldDirection = (vsWorld.invView * vec4(viewPos.xyz / w, 0.0)).xyz;
+    return dot(worldDirection, worldDirection) > 1e-8
+        ? normalize(worldDirection)
+        : vec3(0.0, 0.0, -1.0);
 }
 
 float miePhase(float cosTheta, float g) {
@@ -45,6 +40,7 @@ float miePhase(float cosTheta, float g) {
     return (1.0 - g2) / (12.56637061 * pow(denom, 1.5));
 }
 
+#if VS_ACTIVE_RENDER_TIER <= 2
 float sampleCsmVisibility(vec3 P, float dist) {
     if (uCsm.cascadeSplits.w <= 0.0 || dist > uCsm.cascadeSplits.w) {
         return 1.0;
@@ -67,167 +63,132 @@ float sampleCsmVisibility(vec3 P, float dist) {
         return 1.0;
     }
     float blocker = textureLod(uShadowCsm, vec3(suv, float(c)), 0.0).r;
-    return (ndc.z - 0.0012 <= blocker) ? 1.0 : 0.0;
+    return ndc.z - 0.0012 <= blocker ? 1.0 : 0.0;
 }
+#endif
 
-// Gentle 3D spatial modulation for valley mist pockets
 float mistPocketMod(vec3 worldPos, float timeSec) {
     vec2 p = worldPos.xz * 0.018 + vec2(timeSec * 0.006, -timeSec * 0.004);
     float n = sin(p.x + sin(p.y * 1.2)) * 0.5 + cos(p.y * 1.15 - cos(p.x * 0.9)) * 0.5;
     return mix(0.75, 1.35, clamp(n * 0.5 + 0.5, 0.0, 1.0));
 }
 
+float sliceDistance(float normalizedSlice) {
+    return VS_FOG_START_DIST * pow(
+        VS_FOG_MAX_DIST / VS_FOG_START_DIST,
+        clamp(normalizedSlice, 0.0, 1.0)
+    );
+}
+
 void main() {
-    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
-    ivec2 size = imageSize(uVolumetricFog);
-    if (px.x >= size.x || px.y >= size.y) {
+    ivec3 voxel = ivec3(gl_GlobalInvocationID.xyz);
+    ivec3 size = imageSize(uVolumetricFog);
+    if (any(greaterThanEqual(voxel, size))) {
         return;
     }
 
-#ifdef VS_HIGH_END_GPU
-    const float VS_FOG_MAX_DIST = 224.0;
-    const int VS_FOG_STEPS = 16;
-#else
-    const float VS_FOG_MAX_DIST = 144.0;
-    const int VS_FOG_STEPS = 8;
-#endif
-
-    vec2 uv = (vec2(px) + 0.5) / vec2(size);
-    float mcDepth = textureLod(uDepth, uv, 0.0).r;
-    vec3 rayDir;
-    float geomDist;
-
-    if (mcDepth > 1e-6) {
-        vec3 farPos = reconstructCameraRelativePos(uv, mcDepth);
-        geomDist = length(farPos);
-        if (geomDist <= 1e-4) {
-            imageStore(uVolumetricFog, px, vec4(0.0, 0.0, 0.0, 1.0));
-            return;
-        }
-        rayDir = farPos / geomDist;
-    } else {
-        float dhDepth = (uDh.dhActive != 0u) ? textureLod(uDhDepth, uv, 0.0).r : 0.0;
-        if (uDh.dhActive != 0u && dhDepth > 1e-6) {
-            vec3 farPos = reconstructDhCameraRelativePos(uv, dhDepth);
-            geomDist = length(farPos);
-            if (geomDist <= 1e-4) {
-                imageStore(uVolumetricFog, px, vec4(0.0, 0.0, 0.0, 1.0));
-                return;
-            }
-            rayDir = farPos / geomDist;
-        } else {
-            // Sky pixel: march crepuscular god rays out to VS_FOG_MAX_DIST so shafts do not clip at terrain silhouettes.
-            vec3 rayDelta = reconstructCameraRelativePos(uv, 0.25) - reconstructCameraRelativePos(uv, 0.90);
-            rayDir = dot(rayDelta, rayDelta) > 1e-8 ? normalize(rayDelta) : vec3(0.0, 0.0, -1.0);
-            geomDist = VS_FOG_MAX_DIST;
-        }
-    }
-
+    vec2 uv = (vec2(voxel.xy) + 0.5) / vec2(size.xy);
+    vec3 rayDir = reconstructRayDirection(uv);
+    float sliceT = float(voxel.z + 1) / float(size.z);
+    float endDist = sliceDistance(sliceT);
     vec3 sunDir = dot(vsWorld.sunDir, vsWorld.sunDir) > 1e-6
         ? normalize(vsWorld.sunDir)
         : normalize(vec3(0.4, 0.85, 0.2));
+    vec4 integrated = vec4(0.0, 0.0, 0.0, 1.0);
 
-    // Smooth underwater & lava optical volume media
     if (vsWorld.eyeInFluid == 1) {
         float dayW = smoothstep(-0.10, 0.22, sunDir.y);
-        float waterDist = min(geomDist, 96.0);
-        float avgTrans = clamp(exp(-waterDist * 0.085), 0.14, 1.0);
-        float fwd = miePhase(dot(rayDir, sunDir), 0.72);
+        float trans = clamp(exp(-endDist * 0.085), 0.14, 1.0);
+        float phase = miePhase(dot(rayDir, sunDir), 0.72);
         vec3 baseWater = mix(vec3(0.005, 0.022, 0.044), vec3(0.016, 0.112, 0.162), dayW);
-        vec3 sunShaft = vec3(0.09, 0.26, 0.30) * (fwd * 0.24 * dayW * smoothstep(-0.15, 0.55, rayDir.y));
-        imageStore(uVolumetricFog, px, vec4((baseWater + sunShaft) * (1.0 - avgTrans), avgTrans));
-        return;
-    }
-    if (vsWorld.eyeInFluid == 2) {
-        float trans = clamp(exp(-geomDist * 0.50), 0.05, 1.0);
-        imageStore(uVolumetricFog, px, vec4(vec3(0.86, 0.22, 0.03) * (1.0 - trans), trans));
-        return;
-    }
+        vec3 shaft = vec3(0.09, 0.26, 0.30) * (phase * 0.24 * dayW * smoothstep(-0.15, 0.55, rayDir.y));
+        integrated = vec4((baseWater + shaft) * (1.0 - trans), trans);
+    } else if (vsWorld.eyeInFluid == 2) {
+        float trans = clamp(exp(-endDist * 0.50), 0.05, 1.0);
+        integrated = vec4(vec3(0.86, 0.22, 0.03) * (1.0 - trans), trans);
+    } else {
+        int dimId = vsDimensionId();
+        float biomeDensity = vsBiomeFogDensityScale();
+        float baseDensity = clamp(VS_PARAM_FOG_DENSITY, 0.0, 0.02) * biomeDensity
+            * (1.0 + vsWorld.rain * 0.85 + vsWorld.thunder * 0.30);
 
-    int dimId = vsDimensionId();
-    float biomeDensity = vsBiomeFogDensityScale();
-    float baseDensity = clamp(VS_PARAM_FOG_DENSITY, 0.0, 0.02) * biomeDensity
-        * (1.0 + vsWorld.rain * 0.85 + vsWorld.thunder * 0.30);
-    if (baseDensity <= 1e-6) {
-        imageStore(uVolumetricFog, px, vec4(0.0, 0.0, 0.0, 1.0));
-        return;
-    }
+        if (dimId == 1) {
+            float density = clamp(baseDensity * 3.6, 0.004, 0.045);
+            float trans = clamp(exp(-max(endDist - 9.0, 0.0) * density * 0.44), 0.18, 1.0);
+            vec3 tint = vsHasBiomeTelemetry() ? vsBiomeFogTint() : vec3(0.26, 0.065, 0.03);
+            integrated = vec4(tint * (1.0 - trans), trans);
+        } else if (dimId == 2) {
+            float trans = clamp(exp(-max(endDist - 24.0, 0.0) * baseDensity * 0.25), 0.28, 1.0);
+            integrated = vec4(vec3(0.020, 0.013, 0.044) * (1.0 - trans), trans);
+        } else if (baseDensity > 1e-6 && endDist > VS_FOG_START_DIST) {
+            float dayFactor = smoothstep(-0.10, 0.22, sunDir.y);
+            float goldenFactor = smoothstep(-0.14, 0.04, sunDir.y)
+                * (1.0 - smoothstep(0.10, 0.34, sunDir.y));
+            float sunIntensity = clamp(VS_PARAM_SUN_INTENSITY, 0.5, 8.0);
+            float godrayScale = clamp(VS_PARAM_GODRAYS_INTENSITY, 0.0, 2.0);
+            float humidity = vsBiomeHumidity();
+            vec3 sunColor = mix(
+                vec3(0.06, 0.11, 0.22),
+                vec3(1.00, 0.92, 0.80) * (0.65 + sunIntensity * 0.12),
+                dayFactor
+            );
+            sunColor = mix(sunColor, vec3(1.24, 0.50, 0.18) * (0.68 + sunIntensity * 0.12), goldenFactor);
+            sunColor *= 1.0 - vsWorld.rain * 0.62;
+            vec3 baseSky = mix(vec3(0.012, 0.022, 0.046), vec3(0.30, 0.46, 0.70), dayFactor);
+            vec3 skyAmbient = mix(baseSky, vsBiomeFogTint() * mix(0.08, 0.66, dayFactor),
+                vsHasBiomeTelemetry() ? 0.55 : 0.0);
+            skyAmbient = mix(skyAmbient,
+                vec3(0.18, 0.22, 0.28) * mix(0.16, 1.0, dayFactor), vsWorld.rain * 0.75);
+            float cosTheta = dot(rayDir, sunDir);
+            float phase = (miePhase(cosTheta, 0.76) * 0.85 + miePhase(cosTheta, 0.30) * 0.25)
+                * mix(1.0, 1.55, goldenFactor);
 
-    // Nether & End analytic volumetric veils
-    if (dimId == 1) {
-        float d = clamp(baseDensity * 3.6, 0.004, 0.045);
-        float trans = clamp(exp(-max(geomDist - 9.0, 0.0) * d * 0.44), 0.18, 1.0);
-        vec3 netherCol = vsHasBiomeTelemetry() ? vsBiomeFogTint() : vec3(0.26, 0.065, 0.03);
-        imageStore(uVolumetricFog, px, vec4(netherCol * (1.0 - trans), trans));
-        return;
-    }
-    if (dimId == 2) {
-        float trans = clamp(exp(-max(geomDist - 24.0, 0.0) * baseDensity * 0.25), 0.28, 1.0);
-        imageStore(uVolumetricFog, px, vec4(vec3(0.020, 0.013, 0.044) * (1.0 - trans), trans));
-        return;
-    }
-
-    const float startDist = 12.0;
-    float maxDist = min(geomDist, VS_FOG_MAX_DIST);
-    if (maxDist <= startDist) {
-        imageStore(uVolumetricFog, px, vec4(0.0, 0.0, 0.0, 1.0));
-        return;
-    }
-
-    vec2 bnUv = (vec2(px & 63) + 0.5) / 64.0 + vec2(float(vsWorld.frameIndex & 31) * 0.61803399);
-    float jitter = vsSamplePackTexture_blue_noise(bnUv).r;
-
-    const int STEPS = VS_FOG_STEPS;
-    float stepLen = (maxDist - startDist) * (1.0 / float(STEPS));
-
-    float dayFactor = smoothstep(-0.10, 0.22, sunDir.y);
-    float goldenFactor = smoothstep(-0.14, 0.04, sunDir.y) * (1.0 - smoothstep(0.10, 0.34, sunDir.y));
-    float sunIntensity = clamp(VS_PARAM_SUN_INTENSITY, 0.5, 8.0);
-    float godrayScale = clamp(VS_PARAM_GODRAYS_INTENSITY, 0.0, 2.0);
-    float bHum = vsBiomeHumidity();
-
-    vec3 sunColor = mix(
-        vec3(0.06, 0.11, 0.22),
-        vec3(1.00, 0.92, 0.80) * (0.65 + sunIntensity * 0.12),
-        dayFactor
-    );
-    sunColor = mix(sunColor, vec3(1.24, 0.50, 0.18) * (0.68 + sunIntensity * 0.12), goldenFactor);
-    sunColor *= (1.0 - vsWorld.rain * 0.62);
-
-    vec3 baseSkyAmb = mix(vec3(0.012, 0.022, 0.046), vec3(0.30, 0.46, 0.70), dayFactor);
-    vec3 skyAmb = mix(baseSkyAmb, vsBiomeFogTint() * mix(0.08, 0.66, dayFactor), vsHasBiomeTelemetry() ? 0.55 : 0.0);
-    skyAmb = mix(skyAmb, vec3(0.18, 0.22, 0.28) * mix(0.16, 1.0, dayFactor), vsWorld.rain * 0.75);
-
-    // Dual-lobe Mie phase for crisp golden-hour crepuscular light shafts + soft surrounding glow
-    float cosTheta = dot(rayDir, sunDir);
-    float phaseTight = miePhase(cosTheta, 0.76);
-    float phaseBroad = miePhase(cosTheta, 0.30);
-    float shaftBoost = mix(1.0, 1.55, goldenFactor);
-    float combinedPhase = (phaseTight * 0.85 + phaseBroad * 0.25) * shaftBoost;
-
-    float transmittance = 1.0;
-    vec3 accumScatter = vec3(0.0);
-
-    for (int i = 0; i < STEPS; ++i) {
-        float t = startDist + (float(i) + jitter) * stepLen;
-        vec3 samplePos = rayDir * t;
-        vec3 worldPos = samplePos + uSharc.cfg.cameraPosition.xyz;
-
-        // Height-stratified valley mist: pools softly below Y=72 and clears over mountain peaks
-        float altitudeDecay = exp(-clamp((worldPos.y - 64.0) * 0.024, -0.40, 3.0));
-        float valleyPocket = mix(1.0, mistPocketMod(worldPos, vsWorld.gameTimeSec), smoothstep(82.0, 56.0, worldPos.y) * (0.45 + 0.55 * bHum));
-        float heightDensity = baseDensity * altitudeDecay * valleyPocket;
-
-        if (heightDensity > 1e-5) {
-            float shadowVis = sampleCsmVisibility(samplePos, t);
-            vec3 stepLight = skyAmb * 0.28 + sunColor * shadowVis * (0.22 + 1.05 * combinedPhase * godrayScale);
-            float sigmaE = heightDensity * 0.058;
-            float stepTrans = exp(-sigmaE * stepLen);
-            accumScatter += transmittance * stepLight * (1.0 - stepTrans);
-            transmittance *= stepTrans;
+            float transmittance = 1.0;
+            vec3 scatter = vec3(0.0);
+            for (int i = 0; i <= voxel.z; ++i) {
+                float t0 = sliceDistance(float(i) / float(size.z));
+                float t1 = sliceDistance(float(i + 1) / float(size.z));
+                float stepLen = t1 - t0;
+                float t = (t0 + t1) * 0.5;
+                vec3 samplePos = rayDir * t;
+                vec3 worldPos = samplePos + uSharc.cfg.cameraPosition.xyz;
+                float altitude = exp(-clamp((worldPos.y - 64.0) * 0.024, -0.40, 3.0));
+                float pocket = mix(1.0, mistPocketMod(worldPos, vsWorld.gameTimeSec),
+                    smoothstep(82.0, 56.0, worldPos.y) * (0.45 + 0.55 * humidity));
+                float sigma = baseDensity * altitude * pocket * 0.058;
+                float stepTrans = exp(-sigma * stepLen);
+#if VS_ACTIVE_RENDER_TIER <= 2
+                float shadow = sampleCsmVisibility(samplePos, t);
+#else
+                float shadow = 1.0;
+#endif
+                vec3 stepLight = skyAmbient * 0.28
+                    + sunColor * shadow * (0.22 + 1.05 * phase * godrayScale);
+                scatter += transmittance * stepLight * (1.0 - stepTrans);
+                transmittance *= stepTrans;
+            }
+            integrated = vec4(clamp(scatter, vec3(0.0), vec3(2.8)), clamp(transmittance, 0.32, 1.0));
         }
     }
 
-    transmittance = clamp(transmittance, 0.32, 1.0);
-    imageStore(uVolumetricFog, px, vec4(clamp(accumScatter, vec3(0.0), vec3(2.8)), transmittance));
+    if (vsWorld.frameIndex != 0) {
+        vec3 prevPos = rayDir * endDist + vsWorld.cameraDelta;
+        vec4 prevClip = vsWorld.prevViewProj * vec4(prevPos, 1.0);
+        if (prevClip.w > 1e-5) {
+            vec2 prevUv = prevClip.xy / prevClip.w * 0.5 + 0.5;
+            float prevDist = length(prevPos);
+            bool inBounds = all(greaterThanEqual(prevUv, vec2(0.0)))
+                && all(lessThanEqual(prevUv, vec2(1.0)))
+                && prevDist >= VS_FOG_START_DIST && prevDist <= VS_FOG_MAX_DIST;
+            if (inBounds && length(vsWorld.cameraDelta) < 2.5) {
+                float prevSlice = log(prevDist / VS_FOG_START_DIST)
+                    / log(VS_FOG_MAX_DIST / VS_FOG_START_DIST) * float(size.z) - 1.0;
+                int prevLayer = clamp(int(floor(prevSlice + 0.5)), 0, size.z - 1);
+                vec4 history = textureLod(uFogHistory, vec3(prevUv, float(prevLayer)), 0.0);
+                integrated = mix(integrated, history, 0.82);
+            }
+        }
+    }
+
+    imageStore(uVolumetricFog, voxel, integrated);
 }

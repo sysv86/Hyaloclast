@@ -19,7 +19,6 @@ object VulkanDeviceContext {
     @JvmField @Volatile var vkInstance: Long = 0L
     @JvmField @Volatile var vkPhysicalDevice: Long = 0L
     @JvmField @Volatile var vkDevice: Long = 0L
-    @JvmField @Volatile var vmaAllocator: Long = 0L
     @JvmField @Volatile var graphicsQueue: Long = 0L
     @JvmField @Volatile var computeQueue: Long = 0L
     @JvmField @Volatile var graphicsQueueFamilyIndex: Int = 0
@@ -49,7 +48,6 @@ object VulkanDeviceContext {
         vkInstance = vkDev.instance().vkInstance().address()
         vkPhysicalDevice = vkDev.vkDevice().physicalDevice.address()
         vkDevice = vkDev.vkDevice().address()
-        vmaAllocator = vkDev.vma()
         graphicsQueue = vkDev.graphicsQueue().vkQueue().address()
         computeQueue = vkDev.computeQueue().vkQueue().address()
         graphicsQueueFamilyIndex = vkDev.graphicsQueue().queueFamilyIndex()
@@ -101,7 +99,6 @@ object VulkanDeviceContext {
             vkDevice = vkDevice,
             graphicsQueue = graphicsQueue,
             computeQueue = computeQueue,
-            vmaAllocator = vmaAllocator,
             graphicsQueueFamilyIndex = graphicsQueueFamilyIndex,
             computeQueueFamilyIndex = computeQueueFamilyIndex,
             timelineSemaphore = encoderTimelineSemaphore,
@@ -119,7 +116,6 @@ object VulkanDeviceContext {
         vkInstance = 0L
         vkPhysicalDevice = 0L
         vkDevice = 0L
-        vmaAllocator = 0L
         graphicsQueue = 0L
         computeQueue = 0L
         encoderTimelineSemaphore = 0L

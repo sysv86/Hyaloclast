@@ -331,30 +331,28 @@ pub fn extract_symbols_from_rust_sdk_source(source: &str) -> BTreeSet<String> {
             && bytes[i] == b'b'
             && bytes[i + 1] == b'"'
             && (i == 0 || !is_ident_char(bytes[i - 1]))
+            && let Some((lit, end)) = parse_quoted_literal(&cleaned, i + 1)
         {
-            if let Some((lit, end)) = parse_quoted_literal(&cleaned, i + 1) {
-                if let Some(sym) = lit.strip_suffix("\\0") {
-                    if is_c_symbol_ident(sym) {
-                        symbols.insert(sym.to_string());
-                    }
-                }
-                i = end;
-                continue;
+            if let Some(sym) = lit.strip_suffix("\\0")
+                && is_c_symbol_ident(sym)
+            {
+                symbols.insert(sym.to_string());
             }
+            i = end;
+            continue;
         }
         // Match C-string literals: c"..."
         if i + 2 < bytes.len()
             && bytes[i] == b'c'
             && bytes[i + 1] == b'"'
             && (i == 0 || !is_ident_char(bytes[i - 1]))
+            && let Some((lit, end)) = parse_quoted_literal(&cleaned, i + 1)
         {
-            if let Some((lit, end)) = parse_quoted_literal(&cleaned, i + 1) {
-                if is_c_symbol_ident(&lit) && lit != "main" {
-                    symbols.insert(lit);
-                }
-                i = end;
-                continue;
+            if is_c_symbol_ident(&lit) && lit != "main" {
+                symbols.insert(lit);
             }
+            i = end;
+            continue;
         }
         i += 1;
     }
@@ -366,12 +364,12 @@ pub fn extract_symbols_from_rust_sdk_source(source: &str) -> BTreeSet<String> {
             let abs = search_from + pos + needle.len();
             let window_end = (abs + 200).min(cleaned.len());
             let window = &cleaned[abs..window_end];
-            if let Some(q) = window.find('"') {
-                if let Some((lit, _)) = parse_quoted_literal(window, q) {
-                    let trimmed = lit.strip_suffix("\\0").unwrap_or(&lit);
-                    if is_c_symbol_ident(trimmed) {
-                        symbols.insert(trimmed.to_string());
-                    }
+            if let Some(q) = window.find('"')
+                && let Some((lit, _)) = parse_quoted_literal(window, q)
+            {
+                let trimmed = lit.strip_suffix("\\0").unwrap_or(&lit);
+                if is_c_symbol_ident(trimmed) {
+                    symbols.insert(trimmed.to_string());
                 }
             }
             search_from = abs;
@@ -558,10 +556,10 @@ pub fn extract_ngx_param_constants(ngx_source: &str) -> Vec<(String, String)> {
         let name = slice[..colon].trim().to_string();
         if let Some(semi) = slice.find(';') {
             let stmt = &slice[..semi];
-            if let Some(c_pos) = stmt.find("c\"") {
-                if let Some((val, _)) = parse_quoted_literal(stmt, c_pos + 1) {
-                    out.push((name, val));
-                }
+            if let Some(c_pos) = stmt.find("c\"")
+                && let Some((val, _)) = parse_quoted_literal(stmt, c_pos + 1)
+            {
+                out.push((name, val));
             }
             idx = abs + semi + 1;
         } else {
@@ -569,28 +567,6 @@ pub fn extract_ngx_param_constants(ngx_source: &str) -> Vec<(String, String)> {
         }
     }
     out
-}
-
-fn parse_c_int_expr(raw: &str) -> Option<i64> {
-    let s = raw
-        .trim()
-        .trim_start_matches('(')
-        .trim_end_matches(')')
-        .trim()
-        .trim_end_matches(|c: char| matches!(c, 'u' | 'U' | 'l' | 'L'));
-    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-        u64::from_str_radix(hex, 16).ok().map(|v| v as i64)
-    } else if let Some((lhs, rhs)) = s.split_once("<<") {
-        let a = parse_c_int_expr(lhs)?;
-        let b = parse_c_int_expr(rhs)?;
-        Some(a << b)
-    } else if let Some((lhs, rhs)) = s.split_once('|') {
-        let a = parse_c_int_expr(lhs)?;
-        let b = parse_c_int_expr(rhs)?;
-        Some(a | b)
-    } else {
-        s.parse::<i64>().ok()
-    }
 }
 
 fn header_lookup_int(headers: &[(String, &ParsedHeader)], key: &str) -> Option<i64> {
@@ -672,10 +648,10 @@ pub fn verify_c_header_abi_parity(opts: &VerifyOptions<'_>) -> SuiteReport {
             ("NVSDK_NGX_Result_Fail", 0xBAD0_0000_u32 as i64),
         ];
         for &(k, want) in expected_ints {
-            if let Some(got) = header_lookup_int(ngx_hdrs, k) {
-                if (got as u32) != (want as u32) {
-                    mismatches.push(format!("{k}: header={got:#x} != rust={want:#x}"));
-                }
+            if let Some(got) = header_lookup_int(ngx_hdrs, k)
+                && (got as u32) != (want as u32)
+            {
+                mismatches.push(format!("{k}: header={got:#x} != rust={want:#x}"));
             }
         }
         let mut missing_params = Vec::new();
@@ -743,15 +719,15 @@ pub fn verify_c_header_abi_parity(opts: &VerifyOptions<'_>) -> SuiteReport {
                 mismatches.push(format!("missing enum {expected_enum}"));
             }
         }
-        if let Some(v) = header_lookup_int(nrd_hdrs, "IN_MV") {
-            if v != 0 {
-                mismatches.push(format!("ResourceType::IN_MV={v} != 0"));
-            }
+        if let Some(v) = header_lookup_int(nrd_hdrs, "IN_MV")
+            && v != 0
+        {
+            mismatches.push(format!("ResourceType::IN_MV={v} != 0"));
         }
-        if let Some(v) = header_lookup_int(nrd_hdrs, "PERMANENT_POOL") {
-            if v != 31 {
-                mismatches.push(format!("ResourceType::PERMANENT_POOL={v} != 31"));
-            }
+        if let Some(v) = header_lookup_int(nrd_hdrs, "PERMANENT_POOL")
+            && v != 31
+        {
+            mismatches.push(format!("ResourceType::PERMANENT_POOL={v} != 31"));
         }
         for &f in NRD_REQUIRED {
             if !header_has_function(nrd_hdrs, f) {
@@ -796,10 +772,10 @@ pub fn verify_c_header_abi_parity(opts: &VerifyOptions<'_>) -> SuiteReport {
             ("FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATION", 0x0002_0003),
         ];
         for &(k, want) in expected_ints {
-            if let Some(got) = header_lookup_int(fsr3_hdrs, k) {
-                if got != want {
-                    mismatches.push(format!("{k}: header={got:#x} != rust={want:#x}"));
-                }
+            if let Some(got) = header_lookup_int(fsr3_hdrs, k)
+                && got != want
+            {
+                mismatches.push(format!("{k}: header={got:#x} != rust={want:#x}"));
             }
         }
         for expected_enum in ["FfxApiSurfaceFormat", "FfxApiUpscaleQualityMode"] {
@@ -849,10 +825,10 @@ pub fn verify_c_header_abi_parity(opts: &VerifyOptions<'_>) -> SuiteReport {
             ("XESS_QUALITY_SETTING_AA", 106),
         ];
         for &(k, want) in expected_ints {
-            if let Some(got) = header_lookup_int(xess_hdrs, k) {
-                if got != want {
-                    mismatches.push(format!("{k}: header={got} != rust={want}"));
-                }
+            if let Some(got) = header_lookup_int(xess_hdrs, k)
+                && got != want
+            {
+                mismatches.push(format!("{k}: header={got} != rust={want}"));
             }
         }
         for &f in XESS_REQUIRED {
@@ -1395,19 +1371,18 @@ fn extract_kotlin_cap_consts(kt_src: &str) -> BTreeMap<String, u32> {
     let mut map = BTreeMap::new();
     for line in kt_src.lines() {
         let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("const val CAP_") {
-            if let Some((name_part, rhs)) = rest.split_once('=') {
-                let const_name =
-                    format!("CAP_{}", name_part.split(':').next().unwrap_or("").trim());
-                if let Some((_, shift_str)) = rhs.split_once("shl") {
-                    let digits: String = shift_str
-                        .trim()
-                        .chars()
-                        .take_while(|c| c.is_ascii_digit())
-                        .collect();
-                    if let Ok(bit) = digits.parse::<u32>() {
-                        map.insert(const_name, bit);
-                    }
+        if let Some(rest) = trimmed.strip_prefix("const val CAP_")
+            && let Some((name_part, rhs)) = rest.split_once('=')
+        {
+            let const_name = format!("CAP_{}", name_part.split(':').next().unwrap_or("").trim());
+            if let Some((_, shift_str)) = rhs.split_once("shl") {
+                let digits: String = shift_str
+                    .trim()
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect();
+                if let Ok(bit) = digits.parse::<u32>() {
+                    map.insert(const_name, bit);
                 }
             }
         }
@@ -1598,10 +1573,10 @@ fn extract_glsl_set_bindings(clean_src: &str) -> Vec<(u32, u32)> {
 fn extract_glsl_layout_num(inner: &str, key: &str) -> Option<u32> {
     for part in inner.split(',') {
         let p = part.trim();
-        if let Some((lhs, rhs)) = p.split_once('=') {
-            if lhs.trim() == key {
-                return rhs.trim().parse::<u32>().ok();
-            }
+        if let Some((lhs, rhs)) = p.split_once('=')
+            && lhs.trim() == key
+        {
+            return rhs.trim().parse::<u32>().ok();
         }
     }
     None

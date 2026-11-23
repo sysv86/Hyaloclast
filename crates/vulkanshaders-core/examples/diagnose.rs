@@ -324,9 +324,7 @@ fn main() {
         entry.create_instance(
             &vk::InstanceCreateInfo::default().application_info(
                 &vk::ApplicationInfo::default()
-                    .application_name(
-                        CStr::from_bytes_with_nul(b"vulkanshaders-diagnose\0").unwrap(),
-                    )
+                    .application_name(c"vulkanshaders-diagnose")
                     .api_version(vk::API_VERSION_1_3),
             ),
             None,
@@ -388,7 +386,7 @@ fn main() {
     };
     let queue = unsafe { device.get_device_queue(qfi, 0) };
     let sync2 = synchronization2::Device::new(&instance, &device);
-    let timestamp2_name = CStr::from_bytes_with_nul(b"vkCmdWriteTimestamp2KHR\0").unwrap();
+    let timestamp2_name = c"vkCmdWriteTimestamp2KHR";
     let sync2_enabled = unsafe {
         instance
             .get_device_proc_addr(device.handle(), timestamp2_name.as_ptr())
@@ -397,24 +395,17 @@ fn main() {
 
     let resources = create_gpu_resources(&entry, &instance, physical_device, &device, qfi);
 
-    let gipa = unsafe {
-        std::mem::transmute::<_, vk::PFN_vkGetInstanceProcAddr>(
-            entry.static_fn().get_instance_proc_addr,
-        )
-    };
-    let gdpa = unsafe {
-        std::mem::transmute::<_, vk::PFN_vkGetDeviceProcAddr>(
-            instance.fp_v1_0().get_device_proc_addr,
-        )
-    };
+    let gipa = entry.static_fn().get_instance_proc_addr;
+    let gdpa = instance.fp_v1_0().get_device_proc_addr;
 
     let mut feature_reports: Vec<(String, FeatureReport)> = Vec::new();
 
     // NGX / DLSS — real init + real capability query.
     let vendor_id = unsafe { instance.get_physical_device_properties(physical_device) }.vendor_id;
     let ngx_init = if vendor_id != 0x10DE {
-        Err("skipped: NGX requires NVIDIA hardware (vendor_id != 0x10DE)".to_string())
-            .map_err(std::convert::Into::<String>::into)
+        Err(std::convert::Into::<String>::into(
+            "skipped: NGX requires NVIDIA hardware (vendor_id != 0x10DE)".to_string(),
+        ))
     } else {
         unsafe {
             mgr.initialize_ngx(
@@ -670,10 +661,15 @@ fn main() {
         Some(read_gpu_info(&instance, physical_device)),
     );
 
-    unsafe { mgr.teardown() };
+    unsafe {
+        let _ = device.device_wait_idle();
+        mgr.teardown();
+    }
     drop(resources);
-    drop(device);
-    drop(instance);
+    unsafe {
+        device.destroy_device(None);
+        instance.destroy_instance(None);
+    }
 }
 
 fn read_gpu_info(instance: &Instance, physical_device: vk::PhysicalDevice) -> String {

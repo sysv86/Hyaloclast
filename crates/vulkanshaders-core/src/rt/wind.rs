@@ -10,6 +10,7 @@ use std::collections::HashSet;
 ///   the section slice (`SectionSliceDescriptor::displaced_vertex_buf`).
 /// - `rest_address` points to the immutable static rest-pose geometry in `VulkanTurbo`'s
 ///   `UberGpuBuffer` (`base_bda + slice.byte_offset`).
+///
 /// This guarantees `wind_displace.comp` never overwrites static terrain geometry or accumulates
 /// unbounded vertex drift across frames.
 #[repr(C)]
@@ -104,6 +105,7 @@ pub struct WindRefitScheduler {
     pub job_buffers: [Option<GpuBufferAllocation>; 3],
     pub active_jobs: Vec<WindJobGpu>,
     pub prev_active_keys: HashSet<(u64, u32)>,
+    pub current_active_keys: HashSet<(u64, u32)>,
     pub max_job_vertex_count: u32,
     pub last_push_constants: Option<WindPushConstants>,
 }
@@ -135,6 +137,7 @@ impl WindRefitScheduler {
             job_buffers: [None, None, None],
             active_jobs: Vec::new(),
             prev_active_keys: HashSet::new(),
+            current_active_keys: HashSet::new(),
             max_job_vertex_count: 0,
             last_push_constants: None,
         }
@@ -246,6 +249,7 @@ impl WindRefitScheduler {
         let dev = ctx.device.clone();
         let bufs = std::mem::take(&mut self.job_buffers);
         self.prev_active_keys.clear();
+        self.current_active_keys.clear();
         self.active_jobs.clear();
         self.last_push_constants = None;
         retire_queue.retire_later(move || unsafe {

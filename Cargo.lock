@@ -274,15 +274,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
-name = "glam"
-version = "0.34.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "627003914c6057c9c8f0832ee4f870b5a4f599d0cfa83f4072675114860cd0ff"
-dependencies = [
- "bytemuck",
-]
-
-[[package]]
 name = "gpu-allocator"
 version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -444,7 +435,6 @@ dependencies = [
  "rustc-hash",
  "spirv",
  "thiserror",
- "unicode-ident",
 ]
 
 [[package]]
@@ -935,12 +925,10 @@ dependencies = [
  "naga",
  "rspirv",
  "serde",
- "serde_json",
  "shaderc",
  "spirv",
  "thiserror",
  "toml",
- "tracing",
 ]
 
 [[package]]
@@ -951,7 +939,6 @@ dependencies = [
  "bitflags",
  "blake3",
  "bytemuck",
- "glam",
  "gpu-allocator",
  "libloading",
  "parking_lot",

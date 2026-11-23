@@ -570,7 +570,7 @@ impl SpirvDiskCache {
             .as_chunks::<4>()
             .0
             .iter()
-            .map(|c| u32::from_le_bytes(*c))
+            .map(|chunk| u32::from_le_bytes(*chunk))
             .collect();
         if words.first().copied() != Some(spirv::MAGIC_NUMBER) {
             return None;

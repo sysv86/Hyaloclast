@@ -1674,6 +1674,8 @@ impl NrdVulkanDispatcher {
         })
     }
 
+    /// # Safety
+    /// The textures must not be referenced by in-flight GPU commands unless `retire` defers destruction.
     pub unsafe fn destroy_pool_textures(&mut self, retire: Option<&RetireQueue>) {
         let textures: Vec<NrdPoolTexture> = self
             .permanent_pool

@@ -198,7 +198,7 @@ impl TlasFrameBuilder {
 
         let count = instances.len();
         let instance_stride = std::mem::size_of::<vk::AccelerationStructureInstanceKHR>();
-        let needed_bytes = count * instance_stride;
+        let needed_bytes = std::mem::size_of_val(instances);
 
         let capacity_grew = self.instance_buffer.is_none() || self.instance_capacity < count;
         if capacity_grew {

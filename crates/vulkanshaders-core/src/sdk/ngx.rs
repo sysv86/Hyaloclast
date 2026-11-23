@@ -1114,6 +1114,8 @@ impl NgxVulkanContext {
     ///
     /// # Safety
     /// Vulkan handles and `gipa`/`gdpa` function pointers must remain valid until `shutdown()` or drop.
+    // Mirrors the initialization contract of the NGX Vulkan SDK.
+    #[allow(clippy::too_many_arguments)]
     pub unsafe fn init(
         lib: std::sync::Arc<NgxVulkanLibrary>,
         app_id: u64,
@@ -1139,7 +1141,10 @@ impl NgxVulkanContext {
         }
     }
 
+    // NGX initialization requires the library, app configuration, and Vulkan proc addresses.
     #[allow(clippy::too_many_arguments)]
+    /// # Safety
+    /// Vulkan handles and NGX proc addresses must remain valid until the context shuts down.
     pub unsafe fn init_with_snippet_dirs(
         lib: std::sync::Arc<NgxVulkanLibrary>,
         app_id: u64,
@@ -1293,6 +1298,7 @@ impl NgxVulkanContext {
     ///
     /// # Safety
     /// `cmd` must be recording on `self.device`.
+    #[allow(clippy::too_many_arguments)]
     pub unsafe fn create_dlss_sr(
         &self,
         cmd: vk::CommandBuffer,
@@ -1320,6 +1326,8 @@ impl NgxVulkanContext {
     ///
     /// # Safety
     /// `cmd` must be recording on `self.device`.
+    // Mirrors the dimensions and quality fields accepted by NGX.
+    #[allow(clippy::too_many_arguments)]
     pub unsafe fn create_dlss_rr(
         &self,
         cmd: vk::CommandBuffer,
@@ -1400,15 +1408,19 @@ pub struct NgxOwnedParameters {
     destroy_fn: PfnNvSdkNgxVulkanDestroyParameters,
 }
 
-impl NgxOwnedParameters {
-    pub fn as_ref(&self) -> &NvSdkNgxParameter {
+impl AsRef<NvSdkNgxParameter> for NgxOwnedParameters {
+    fn as_ref(&self) -> &NvSdkNgxParameter {
         unsafe { &*self.ptr }
     }
+}
 
-    pub fn as_mut(&mut self) -> &mut NvSdkNgxParameter {
+impl AsMut<NvSdkNgxParameter> for NgxOwnedParameters {
+    fn as_mut(&mut self) -> &mut NvSdkNgxParameter {
         unsafe { &mut *self.ptr }
     }
+}
 
+impl NgxOwnedParameters {
     /// Helper setting a `String` parameter key by name (allocating a `CString`).
     pub fn set_u32_named(&mut self, key: &str, value: u32) -> Result<(), NgxError> {
         let ckey = CString::new(key).map_err(|_| NgxError::InvalidString(key.to_string()))?;

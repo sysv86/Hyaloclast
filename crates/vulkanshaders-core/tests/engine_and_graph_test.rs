@@ -1,6 +1,6 @@
 use vsp_compiler::{PackManifest, RenderTier};
 use vulkanshaders_core::{
-    graph::{GraphConfig, PassKind, RenderGraph},
+    graph::{GraphConfig, PassKind, RenderGraph, ResourceAccess},
     modules::{CsmShadowUBO, DepthReprojectPushConstants, GpuPipelineManager},
     rt::{SectionLayerKey, SectionSliceDescriptor},
 };
@@ -172,6 +172,98 @@ writes = ["hudless_color", "mc_main_depth"]
             &graph,
         ),
         bloom_id
+    );
+}
+
+#[test]
+fn builtin_froxel_fog_uses_temporal_array_on_every_render_tier() {
+    let manifest = PackManifest::parse_and_validate(include_str!(
+        "../../../src/main/resources/builtin-packs/hyaloclast-sunlit-vanilla.vsp/pack.toml"
+    ))
+    .expect("parse built-in pack manifest");
+    let mut graph = RenderGraph::default();
+    graph.register_pack_manifest_graph(&manifest);
+
+    let fog_target = graph
+        .custom_targets
+        .get(&RenderGraph::RES_VOLUMETRIC_FOG)
+        .expect("register volumetric fog target");
+    assert_eq!(fog_target.scale, 0.125);
+    assert_eq!(fog_target.array_layers, 16);
+    assert!(fog_target.temporal);
+    assert_eq!(
+        fog_target.history_id,
+        Some(RenderGraph::RES_VOLUMETRIC_FOG_HISTORY)
+    );
+
+    assert_eq!(
+        GpuPipelineManager::resolve_resource_for_binding(
+            PassKind::ComputeVolumetricFog,
+            1,
+            false,
+            &graph.config,
+        ),
+        RenderGraph::RES_VOLUMETRIC_FOG_HISTORY
+    );
+    assert_eq!(
+        GpuPipelineManager::resolve_resource_for_binding(
+            PassKind::FullPathTracing,
+            8,
+            false,
+            &graph.config,
+        ),
+        RenderGraph::RES_VOLUMETRIC_FOG
+    );
+
+    let gi_target = graph
+        .custom_targets
+        .values()
+        .find(|target| target.name == "restir_gi_reservoir")
+        .expect("register ReSTIR GI reservoir target");
+    assert_eq!(gi_target.scale, 0.25);
+    assert_eq!(gi_target.array_layers, 3);
+    assert!(gi_target.temporal);
+    let gi_target_id = gi_target.id;
+    let gi_history_id = gi_target.history_id.expect("register GI history target");
+    assert_eq!(
+        GpuPipelineManager::resolve_resource_for_binding_named(
+            PassKind::FullPathTracing,
+            9,
+            "uRestirGiReservoirHistory",
+            false,
+            &graph,
+        ),
+        gi_history_id
+    );
+    assert_eq!(
+        GpuPipelineManager::resolve_resource_for_binding_named(
+            PassKind::FullPathTracing,
+            10,
+            "uRestirGiReservoir",
+            true,
+            &graph,
+        ),
+        gi_target_id
+    );
+
+    graph.rebuild(GraphConfig {
+        tier: RenderTier::Tier3PathTracing,
+        ..GraphConfig::default()
+    });
+    let pathtrace = graph
+        .compiled_steps
+        .iter()
+        .find(|step| step.kind == PassKind::FullPathTracing)
+        .expect("compile path tracing pass");
+    assert!(
+        pathtrace
+            .reads
+            .contains(&(gi_history_id, ResourceAccess::SampledRead))
+    );
+    assert!(
+        pathtrace
+            .writes
+            .contains(&(gi_target_id, ResourceAccess::StorageImageWrite))
     );
 }
 
@@ -794,6 +886,13 @@ fn gpu_timestamp_profiler_converts_ticks_and_tracks_toggle_and_passes() {
     assert!((timings[1].duration_ms - 4.5).abs() < 1e-6);
     assert!((timings[2].duration_ms - 1.25).abs() < 1e-6);
     assert!((profiler.last_total_gpu_ms() - 7.0).abs() < 1e-6);
+    assert_eq!(profiler.average_total_gpu_ms(), None);
+    for frame in 0..35 {
+        profiler.resolve_synthetic_passes(frame, &[("render", 0, 2_000_000)]);
+    }
+    assert!((profiler.average_total_gpu_ms().unwrap() - (77.0 / 36.0)).abs() < 1e-6);
+    profiler.set_enabled(false);
+    assert_eq!(profiler.average_total_gpu_ms(), None);
 }
 
 #[test]

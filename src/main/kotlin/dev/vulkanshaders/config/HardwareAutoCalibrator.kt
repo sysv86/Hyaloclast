@@ -46,6 +46,8 @@ object HardwareAutoCalibrator {
         val cpuCores: Int = 4,
         val maxJvmHeapMb: Long = 4096L,
         val lastFrameDtMs: Double = 0.0,
+        val averageGpuFrameTimeMs: Double? = null,
+        val vramBudgetMb: Long = 0L,
     )
 
     data class CalibrationResult(
@@ -61,6 +63,7 @@ object HardwareAutoCalibrator {
      */
     fun probeCurrentHardware(): HardwareProbe {
         val profile = NativeCoreBridge.getHardwareProfile()
+        val vramBudget = NativeCoreBridge.getVramBudgetSnapshot()
         val caps = profile.capabilitiesMask
 
         var width = 1920
@@ -110,6 +113,8 @@ object HardwareAutoCalibrator {
             cpuCores = cpuCores,
             maxJvmHeapMb = maxHeapMb,
             lastFrameDtMs = profile.lastFrameDtMs,
+            averageGpuFrameTimeMs = NativeCoreBridge.getAverageGpuFrameTimeMs(),
+            vramBudgetMb = vramBudget?.budgetMb ?: 0L,
         )
     }
 
@@ -136,6 +141,11 @@ object HardwareAutoCalibrator {
         val pixelLoad = (width.toDouble() * height.toDouble()) / REFERENCE_1080P_PIXELS
         val is4kOrHigher = pixelLoad >= 3.5
         val isAbove1440p = pixelLoad > 1.85
+        val usableVramMb = when {
+            probe.vramMb > 0L && probe.vramBudgetMb > 0L -> minOf(probe.vramMb, probe.vramBudgetMb)
+            probe.vramBudgetMb > 0L -> probe.vramBudgetMb
+            else -> probe.vramMb
+        }
 
         val bestUpscaler = selectBestUpscaler(probe)
         val bestRtDenoiser = selectBestRtDenoiser(probe)
@@ -145,8 +155,8 @@ object HardwareAutoCalibrator {
 
         var chosenTier: RenderTier
         var presetId: String
-        var upscaler: UpscalerMode
-        var upscalerQuality: UpscalerQuality
+        var upscaler = UpscalerMode.NONE
+        var upscalerQuality = UpscalerQuality.NATIVE_AA
         var denoiser: DenoiserMode
         var frameGen: FrameGenMode
         var shadowRes: Int
@@ -154,7 +164,7 @@ object HardwareAutoCalibrator {
 
         when {
             // Enthusiast + RT Pipeline (e.g., RTX 4080/4090/5080/5090, >=16 GB VRAM)
-            tierClass == "enthusiast" && probe.rtPipeline -> {
+            tierClass == "enthusiast" && probe.rtPipeline && usableVramMb >= 12_288L -> {
                 chosenTier = RenderTier.TIER_3_PATH_TRACING
                 upscaler = bestUpscaler
                 denoiser = bestRtDenoiser
@@ -175,13 +185,11 @@ object HardwareAutoCalibrator {
             }
 
             // High + RT Pipeline (e.g., RTX 4070/5070/3080/3090, 12 GB+)
-            tierClass == "high" && probe.rtPipeline -> {
+            tierClass == "high" && probe.rtPipeline && usableVramMb >= 8_192L -> {
                 val nonNvidiaNoHardwareDenoiser = !isNvidia && !probe.nrd && !probe.dlssRr
                 if (nonNvidiaNoHardwareDenoiser && isAbove1440p) {
                     chosenTier = RenderTier.TIER_2_RAY_QUERY
                     presetId = "ultra"
-                    upscaler = bestUpscaler
-                    upscalerQuality = if (is4kOrHigher) UpscalerQuality.BALANCED else UpscalerQuality.QUALITY
                     denoiser = DenoiserMode.SVGF
                 } else {
                     chosenTier = RenderTier.TIER_3_PATH_TRACING
@@ -204,15 +212,9 @@ object HardwareAutoCalibrator {
             }
 
             // Mid (or High/Enthusiast without RT Pipeline) + RayQuery (e.g., RTX 2060/3060/4060, RX 6700/7600, 8 GB)
-            probe.rayQuery && tierClass != "low" -> {
+            probe.rayQuery && tierClass != "low" && usableVramMb >= 4_096L -> {
                 chosenTier = RenderTier.TIER_2_RAY_QUERY
                 presetId = if (is4kOrHigher) "low" else "medium"
-                upscaler = bestUpscaler
-                upscalerQuality = when {
-                    is4kOrHigher -> UpscalerQuality.PERFORMANCE
-                    isAbove1440p -> UpscalerQuality.BALANCED
-                    else -> UpscalerQuality.QUALITY
-                }
                 denoiser = DenoiserMode.SVGF
                 frameGen = FrameGenMode.NONE
                 shadowRes = 2048
@@ -220,15 +222,9 @@ object HardwareAutoCalibrator {
             }
 
             // Mid without RT or Low discrete with >= 4 GB VRAM (6-8 GB class)
-            tierClass == "mid" || (tierClass == "low" && probe.vramMb >= 4096L) -> {
+            tierClass == "mid" || (tierClass == "low" && usableVramMb >= 4096L) -> {
                 chosenTier = RenderTier.TIER_1_COMPUTE_GI
-                presetId = if (probe.vramMb in 1L..6143L || isAbove1440p) "low" else "medium"
-                upscaler = if (pixelLoad > 1.2 || probe.vramMb < 6144L) bestUpscaler else UpscalerMode.NONE
-                upscalerQuality = when {
-                    is4kOrHigher -> UpscalerQuality.PERFORMANCE
-                    isAbove1440p -> UpscalerQuality.BALANCED
-                    else -> UpscalerQuality.QUALITY
-                }
+                presetId = if (usableVramMb in 1L..6143L || isAbove1440p) "low" else "medium"
                 denoiser = DenoiserMode.SVGF
                 frameGen = FrameGenMode.NONE
                 shadowRes = 2048
@@ -239,8 +235,6 @@ object HardwareAutoCalibrator {
             else -> {
                 chosenTier = RenderTier.TIER_0_RASTER
                 presetId = "low"
-                upscaler = if (pixelLoad > 1.0) bestUpscaler else UpscalerMode.NONE
-                upscalerQuality = if (isAbove1440p) UpscalerQuality.PERFORMANCE else UpscalerQuality.BALANCED
                 denoiser = DenoiserMode.NONE
                 frameGen = FrameGenMode.NONE
                 shadowRes = 1024
@@ -266,7 +260,8 @@ object HardwareAutoCalibrator {
 
         // Incorporate live frame time telemetry when available: if the current tier is already
         // exceeding 22 ms/frame (~45 FPS), step upscaler quality down one notch (or preset down).
-        if (probe.lastFrameDtMs > HEAVY_FRAME_DT_MS && chosenTier == currentConfig.renderTier) {
+        val measuredFrameMs = probe.averageGpuFrameTimeMs?.takeIf { it > 0.0 } ?: probe.lastFrameDtMs
+        if (measuredFrameMs > HEAVY_FRAME_DT_MS && chosenTier == currentConfig.renderTier) {
             if (chosenTier != RenderTier.TIER_3_PATH_TRACING) {
                 presetId = stepDownPreset(presetId)
             } else if (upscaler == UpscalerMode.NONE) {

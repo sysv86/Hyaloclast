@@ -338,7 +338,7 @@ impl LodBlasManager {
             return false;
         }
         let mut horizontal_bounds = [[f32::INFINITY; 2], [f32::NEG_INFINITY; 2]];
-        for vertex in vertex_bytes[..min_vertex_bytes].chunks_exact(28) {
+        for vertex in vertex_bytes[..min_vertex_bytes].as_chunks::<28>().0 {
             let x = f32::from_ne_bytes(vertex[0..4].try_into().unwrap());
             let z = f32::from_ne_bytes(vertex[8..12].try_into().unwrap());
             for (axis, value) in [x, z].into_iter().enumerate() {

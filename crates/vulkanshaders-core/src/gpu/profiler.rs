@@ -1,5 +1,8 @@
 use ash::vk;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::{
+    collections::VecDeque,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 /// Resolved GPU execution duration for a single named render pass.
 #[derive(Debug, Clone, PartialEq)]
@@ -37,6 +40,7 @@ pub struct GpuTimestampProfiler {
     enabled: AtomicBool,
     slots: Vec<FrameQuerySlot>,
     last_resolved: Vec<GpuPassTiming>,
+    recent_frame_totals_ms: VecDeque<f64>,
 }
 
 impl GpuTimestampProfiler {
@@ -71,6 +75,7 @@ impl GpuTimestampProfiler {
             enabled: AtomicBool::new(valid_period),
             slots: vec![FrameQuerySlot::default(); frames],
             last_resolved: Vec::new(),
+            recent_frame_totals_ms: VecDeque::with_capacity(60),
         })
     }
 
@@ -96,6 +101,7 @@ impl GpuTimestampProfiler {
             enabled: AtomicBool::new(false),
             slots: vec![FrameQuerySlot::default(); frames],
             last_resolved: Vec::new(),
+            recent_frame_totals_ms: VecDeque::with_capacity(60),
         }
     }
 
@@ -105,8 +111,12 @@ impl GpuTimestampProfiler {
     }
 
     /// Toggles GPU timestamp profiling on or off at runtime.
-    pub fn set_enabled(&self, enabled: bool) {
+    pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled.store(enabled, Ordering::Release);
+        if !enabled {
+            self.last_resolved.clear();
+            self.recent_frame_totals_ms.clear();
+        }
     }
 
     /// Returns the physical device's timestamp period in nanoseconds per tick.
@@ -122,6 +132,27 @@ impl GpuTimestampProfiler {
     /// Returns the total duration in milliseconds across all passes in `last_timings()`.
     pub fn last_total_gpu_ms(&self) -> f64 {
         self.last_resolved.iter().map(|t| t.duration_ms).sum()
+    }
+
+    /// Returns a rolling mean after at least 30 completed frame samples, up to the latest 60.
+    pub fn average_total_gpu_ms(&self) -> Option<f64> {
+        (self.recent_frame_totals_ms.len() >= 30).then(|| {
+            self.recent_frame_totals_ms.iter().sum::<f64>()
+                / self.recent_frame_totals_ms.len() as f64
+        })
+    }
+
+    fn record_frame_total(&mut self, timings: &[GpuPassTiming]) {
+        if timings.is_empty() {
+            return;
+        }
+        let total_ms = timings.iter().map(|timing| timing.duration_ms).sum::<f64>();
+        if total_ms.is_finite() && total_ms >= 0.0 {
+            if self.recent_frame_totals_ms.len() == 60 {
+                self.recent_frame_totals_ms.pop_front();
+            }
+            self.recent_frame_totals_ms.push_back(total_ms);
+        }
     }
 
     /// Converts raw GPU timestamp ticks `(start_ticks, end_ticks)` using `timestamp_period_ns`
@@ -319,6 +350,7 @@ impl GpuTimestampProfiler {
 
         if !timings.is_empty() {
             self.last_resolved = timings.clone();
+            self.record_frame_total(&timings);
         }
         timings
     }
@@ -353,6 +385,7 @@ impl GpuTimestampProfiler {
             });
         }
         self.last_resolved = timings.clone();
+        self.record_frame_total(&timings);
         timings
     }
 

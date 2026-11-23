@@ -137,37 +137,6 @@ fn classify_binary_sdk(path: &Path) -> Option<SdkKind> {
     }
 }
 
-#[cfg(test)]
-mod verify_path_tests {
-    use super::{SdkKind, classify_binary_sdk};
-    use std::path::Path;
-
-    #[test]
-    fn binary_classifier_ignores_headers_and_partial_downloads() {
-        assert_eq!(classify_binary_sdk(Path::new("NRDSettings.h")), None);
-        assert_eq!(
-            classify_binary_sdk(Path::new("amd_fidelityfx_vk.dll.part")),
-            None
-        );
-    }
-
-    #[test]
-    fn binary_classifier_keeps_sdk_shared_and_static_libraries() {
-        assert_eq!(
-            classify_binary_sdk(Path::new("libnvidia-ngx-dlss.so.310.9.16")),
-            Some(SdkKind::Ngx)
-        );
-        assert_eq!(
-            classify_binary_sdk(Path::new("amd_fidelityfx_vk.dll")),
-            Some(SdkKind::Fsr3)
-        );
-        assert_eq!(
-            classify_binary_sdk(Path::new("xess.dll")),
-            Some(SdkKind::Xess)
-        );
-    }
-}
-
 fn classify_header_sdk(path: &Path) -> Option<SdkKind> {
     let name = path
         .file_name()
@@ -209,7 +178,7 @@ fn print_report(report: &BenchReport) {
         report.overall_status, report.total_pass, report.total_warn, report.total_fail
     );
     println!();
-    println!("{:<6} | {:<44} | {}", "STATUS", "CHECK", "DETAIL");
+    println!("{:<6} | {:<44} | DETAIL", "STATUS", "CHECK");
     println!("{:-<6}-+-{:-<44}-+-{:-<60}", "", "", "");
 
     for suite in &report.suites {
@@ -291,10 +260,10 @@ fn run_verify(
         let mut files = Vec::new();
         collect_local_files(&dir, &mut files);
         for p in files {
-            if let Some(kind) = classify_binary_sdk(&p) {
-                if let Ok(parsed) = parse_binary_file(&p, true) {
-                    owned_binaries.entry(kind).or_default().push(parsed);
-                }
+            if let Some(kind) = classify_binary_sdk(&p)
+                && let Ok(parsed) = parse_binary_file(&p, true)
+            {
+                owned_binaries.entry(kind).or_default().push(parsed);
             }
         }
     }
@@ -303,17 +272,16 @@ fn run_verify(
         let mut files = Vec::new();
         collect_local_files(&dir, &mut files);
         for p in files {
-            if p.extension().and_then(|e| e.to_str()) == Some("h") {
-                if let Some(kind) = classify_header_sdk(&p) {
-                    if let Ok(parsed) = parse_c_header_file(&p) {
-                        let fname = p
-                            .file_name()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or("header.h")
-                            .to_string();
-                        owned_headers.entry(kind).or_default().push((fname, parsed));
-                    }
-                }
+            if p.extension().and_then(|e| e.to_str()) == Some("h")
+                && let Some(kind) = classify_header_sdk(&p)
+                && let Ok(parsed) = parse_c_header_file(&p)
+            {
+                let fname = p
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("header.h")
+                    .to_string();
+                owned_headers.entry(kind).or_default().push((fname, parsed));
             }
         }
     }
@@ -379,10 +347,7 @@ fn run_download(sdk: SdkSelection, cache_dir: Option<PathBuf>) -> ExitCode {
         .map(|kind| fetch_sdk_artifacts(kind, &cfg))
         .collect();
 
-    println!(
-        "{:<8} | {:<8} | {:<64} | {}",
-        "SDK", "KIND", "BLAKE3", "PATH"
-    );
+    println!("{:<8} | {:<8} | {:<64} | PATH", "SDK", "KIND", "BLAKE3");
     println!("{:-<8}-+-{:-<8}-+-{:-<64}-+-{:-<40}", "", "", "", "");
 
     let mut had_error = false;
@@ -484,5 +449,36 @@ fn main() -> ExitCode {
         ),
         Commands::Download { sdk, cache_dir } => run_download(sdk, cache_dir),
         Commands::InspectBinary { path, filter } => run_inspect_binary(&path, filter.as_deref()),
+    }
+}
+
+#[cfg(test)]
+mod verify_path_tests {
+    use super::{SdkKind, classify_binary_sdk};
+    use std::path::Path;
+
+    #[test]
+    fn binary_classifier_ignores_headers_and_partial_downloads() {
+        assert_eq!(classify_binary_sdk(Path::new("NRDSettings.h")), None);
+        assert_eq!(
+            classify_binary_sdk(Path::new("amd_fidelityfx_vk.dll.part")),
+            None
+        );
+    }
+
+    #[test]
+    fn binary_classifier_keeps_sdk_shared_and_static_libraries() {
+        assert_eq!(
+            classify_binary_sdk(Path::new("libnvidia-ngx-dlss.so.310.9.16")),
+            Some(SdkKind::Ngx)
+        );
+        assert_eq!(
+            classify_binary_sdk(Path::new("amd_fidelityfx_vk.dll")),
+            Some(SdkKind::Fsr3)
+        );
+        assert_eq!(
+            classify_binary_sdk(Path::new("xess.dll")),
+            Some(SdkKind::Xess)
+        );
     }
 }

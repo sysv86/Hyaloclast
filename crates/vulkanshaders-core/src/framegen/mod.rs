@@ -4,7 +4,7 @@ use crate::gpu::{VulkanContext, with_queue_lock};
 use ash::vk::{self, Handle};
 use present_thread::{PresentJob, PresentThread};
 use std::{
-    ffi::{CStr, c_void},
+    ffi::c_void,
     ptr,
     time::{Duration, Instant},
 };
@@ -153,9 +153,9 @@ impl FrameGenController {
             return;
         }
         unsafe {
-            let sleep_mode_name = CStr::from_bytes_with_nul_unchecked(b"vkSetLatencySleepModeNV\0");
-            let sleep_name = CStr::from_bytes_with_nul_unchecked(b"vkLatencySleepNV\0");
-            let marker_name = CStr::from_bytes_with_nul_unchecked(b"vkSetLatencyMarkerNV\0");
+            let sleep_mode_name = c"vkSetLatencySleepModeNV";
+            let sleep_name = c"vkLatencySleepNV";
+            let marker_name = c"vkSetLatencyMarkerNV";
             let f1 = ctx
                 .instance
                 .get_device_proc_addr(ctx.device.handle(), sleep_mode_name.as_ptr());

@@ -507,20 +507,9 @@ fn compiles_builtin_path_tracing_with_both_ser_extensions() {
             high_end_gpu: true,
             ..Default::default()
         };
-        let result =
-            compiler.compile_pack_dir_with_caps(&pack_dir, RenderTier::Tier3PathTracing, caps);
-        let artifacts = match result {
-            Ok(artifacts) => artifacts,
-            Err(error)
-                if ser_ext
-                    && error
-                        .to_string()
-                        .contains("GL_EXT_shader_invocation_reorder") =>
-            {
-                continue;
-            }
-            Err(error) => panic!("could not compile {caps:?}: {error}"),
-        };
+        let artifacts = compiler
+            .compile_pack_dir_with_caps(&pack_dir, RenderTier::Tier3PathTracing, caps)
+            .unwrap_or_else(|error| panic!("could not compile {caps:?}: {error}"));
         assert!(
             artifacts
                 .iter()
@@ -1156,8 +1145,6 @@ fn ser_and_omm_defines_and_spirv_1_6_compilation() {
 #extension GL_EXT_ray_tracing : require
 #if defined(VS_HAS_SER) && defined(VS_HAS_SER_EXT)
 #extension GL_EXT_shader_invocation_reorder : require
-#elif defined(VS_HAS_SER)
-#extension GL_NV_shader_invocation_reorder : require
 #endif
 
 layout(set = 1, binding = 0) uniform accelerationStructureEXT topLevelAS;
@@ -1182,58 +1169,19 @@ void main() {
     );
     reorderThreadEXT(hitObj, 1u, 4u);
     hitObjectExecuteShaderEXT(hitObj, 0);
-#elif defined(VS_HAS_SER)
-    hitObjectNV hitObj;
-    hitObjectTraceRayNV(
-        hitObj,
-        topLevelAS,
-        gl_RayFlagsOpaqueEXT,
-        0xFFu,
-        0u,
-        0u,
-        0u,
-        vec3(0.0),
-        0.01,
-        vec3(0.0, 1.0, 0.0),
-        64.0,
-        0
-    );
-    reorderThreadNV(hitObj, 1u, 4u);
-    hitObjectExecuteShaderNV(hitObj, 0);
 #else
     traceRayEXT(topLevelAS, gl_RayFlagsOpaqueEXT, 0xFFu, 0u, 0u, 0u, vec3(0.0), 0.01, vec3(0.0, 1.0, 0.0), 64.0, 0);
 #endif
 }
 "#;
-    let words = match VspCompiler::compile_glsl_to_spirv_with_caps(
+    let words = VspCompiler::compile_glsl_to_spirv_with_caps(
         "ser_test.rgen",
         ShaderStageKind::RayGen,
         ser_rgen,
         ser_ext_caps,
         None,
-    ) {
-        Ok(words) => words,
-        Err(error)
-            if error
-                .to_string()
-                .contains("GL_EXT_shader_invocation_reorder") =>
-        {
-            let nv_caps = HardwareShaderCaps {
-                ser_nv: true,
-                opacity_micromap: true,
-                ..Default::default()
-            };
-            VspCompiler::compile_glsl_to_spirv_with_caps(
-                "ser_test.rgen",
-                ShaderStageKind::RayGen,
-                ser_rgen,
-                nv_caps,
-                None,
-            )
-            .expect("SER NV raygen shader must compile cleanly to SPIR-V 1.6 with VS_HAS_SER")
-        }
-        Err(error) => panic!("SER raygen shader failed: {error}"),
-    };
+    )
+    .expect("SER raygen shader must compile cleanly to SPIR-V 1.6 with VS_HAS_SER");
     assert!(words.len() > 40);
     assert_eq!(words[0], 0x0723_0203);
 }
