@@ -56,8 +56,8 @@ float vsEmissiveShadowRange(VsEmissiveLight light, vec3 shadowOrigin, out vec3 s
     float dist = max(length(delta), 0.001);
     shadowDir = delta / dist;
     if (vsIsHeldLight(light)) {
-        // Leave a small clearance around the player's hand so close walls never self-shadow.
-        return dist - 0.08;
+        // Leave clearance around the player's hand/torch so close walls never self-shadow.
+        return max(dist - 0.18, 0.0);
     }
     if ((vsLightFlags(light) & 16u) != 0u) {
         // Stop the ray where it enters the torch stem's narrow footprint.
@@ -83,7 +83,8 @@ float vsEmissiveAttenuation(float distSq, float radius) {
     float r = clamp(radius, 0.5, 48.0);
     float ratioSq = distSq / (r * r);
     float window = clamp(1.0 - ratioSq * ratioSq, 0.0, 1.0);
-    return (window * window) / (distSq + 0.35);
+    // Physical sphere-light softening prevents near-wall blowout while preserving far tunnel falloff.
+    return (window * window) / (distSq + 0.72);
 }
 
 void vsRestirInit(out VsRestirReservoir r) {

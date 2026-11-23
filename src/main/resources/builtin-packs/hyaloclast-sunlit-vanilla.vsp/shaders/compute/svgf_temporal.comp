@@ -17,15 +17,9 @@ layout(set = 0, binding = 10) uniform sampler2D uSharpRadiance;
 #endif
 
 const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
-#if VS_ACTIVE_RENDER_TIER >= 3
-const float MAX_HISTORY_LENGTH = 64.0;
-const float MIN_HISTORY_ALPHA = 0.025;
-const float MIN_HISTORY_NORMAL_ALIGNMENT = 0.86;
-#else
 const float MAX_HISTORY_LENGTH = 24.0;
 const float MIN_HISTORY_ALPHA = 0.06;
 const float MIN_HISTORY_NORMAL_ALIGNMENT = 0.92;
-#endif
 
 vec3 diffuseSignal(ivec2 p) {
     vec3 radiance = texelFetch(uRawRadiance, p, 0).rgb;

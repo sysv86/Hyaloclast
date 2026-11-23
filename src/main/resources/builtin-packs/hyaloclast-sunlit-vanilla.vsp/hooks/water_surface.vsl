@@ -29,7 +29,7 @@ void sv_water_surface(inout VsSurface s, in vec3 worldPos, in float waveHeight) 
     float rain = clamp(vsWorld.rain, 0.0, 1.0);
     float t = vsWorld.gameTimeSec * (1.42 + rain * 0.52);
     float strength = clamp(VS_PARAM_WATER_WAVE_STRENGTH, 0.0, 1.0);
-    float amp = strength * (0.088 + 0.15 * rain);
+    float amp = strength * (0.072 + 0.14 * rain);
     vec2 p = worldPos.xz;
 
     // Distance-fade high-frequency octaves and rain ripples to eliminate distant ocean shimmer
@@ -80,9 +80,9 @@ void sv_water_surface(inout VsSurface s, in vec3 worldPos, in float waveHeight) 
         s.normal = normalize(s.normal + slope * 0.30);
     }
 
-    // Subtle turquoise clarity that keeps vanilla biome water colors recognizable
-    s.albedo = mix(s.albedo, vec3(0.08, 0.44, 0.52), 0.16);
+    // Crisp turquoise clarity with mirror-clean RT reflections on calm water
+    s.albedo = mix(s.albedo, vec3(0.06, 0.52, 0.64), 0.24);
     float crest = clamp(h * 0.40 + 0.5, 0.0, 1.0);
-    s.roughness = mix(0.016, 0.058, crest * (0.26 + 0.74 * rain));
+    s.roughness = mix(0.008, 0.036, crest * (0.24 + 0.76 * rain));
     s.f0 = 0.02;
 }

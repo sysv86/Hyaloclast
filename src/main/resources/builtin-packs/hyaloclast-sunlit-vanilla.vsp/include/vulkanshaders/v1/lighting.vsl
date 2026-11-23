@@ -365,8 +365,12 @@ void vsApplyLabPbr(
     s.normal = geomN;
     outPorosity = smoothstep(0.35, 0.85, s.roughness);
     if (hasNormalTex) {
-        vec2 nXY = normalSample.xy * 2.0 - 1.0;
-        if (dot(nXY, nXY) < 1.2) {
+        vec2 nXY = (normalSample.xy * 2.0 - 1.0) * 1.35;
+        float nXYLenSq = dot(nXY, nXY);
+        if (nXYLenSq < 1.8) {
+            if (nXYLenSq > 0.96) {
+                nXY *= inversesqrt(nXYLenSq) * 0.98;
+            }
             float nZ = sqrt(max(1.0 - dot(nXY, nXY), 0.0));
             vec3 tN = normalize(vec3(nXY, nZ));
             vec3 fallbackT = abs(geomN.x) < 0.9 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 0.0, 1.0);

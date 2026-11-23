@@ -141,6 +141,7 @@ object NativeCoreBridge {
     private var fnCanEnableFrameGen: MethodHandle? = null
     private var fnTakeFrameGenFailure: MethodHandle? = null
     private var fnCompileActivePack: MethodHandle? = null
+    private var fnPrepareSpecConstants: MethodHandle? = null
     private var fnUpdateSpecConstants: MethodHandle? = null
     private var fnGetLastCompileError: MethodHandle? = null
     private var fnBindGbufferImages: MethodHandle? = null
@@ -618,6 +619,15 @@ object NativeCoreBridge {
             fnCompileActivePack = downcall(
                 lookup,
                 "vs_core_compile_active_pack",
+                FunctionDescriptor.of(
+                    ValueLayout.JAVA_INT,
+                    ValueLayout.JAVA_LONG,
+                    ValueLayout.JAVA_INT,
+                ),
+            )
+            fnPrepareSpecConstants = downcall(
+                lookup,
+                "vs_core_prepare_spec_constants",
                 FunctionDescriptor.of(
                     ValueLayout.JAVA_INT,
                     ValueLayout.JAVA_LONG,
@@ -1689,11 +1699,18 @@ object NativeCoreBridge {
     }
 
     @JvmStatic
-    fun updateSpecConstants(specPairs: List<Pair<Int, Int>>): Int {
+    fun prepareSpecConstants(specPairs: List<Pair<Int, Int>>): Int =
+        invokeSpecConstantsHandle(fnPrepareSpecConstants, specPairs)
+
+    @JvmStatic
+    fun updateSpecConstants(specPairs: List<Pair<Int, Int>>): Int =
+        invokeSpecConstantsHandle(fnUpdateSpecConstants, specPairs)
+
+    private fun invokeSpecConstantsHandle(fn: MethodHandle?, specPairs: List<Pair<Int, Int>>): Int {
         if (!initialized) return 0
-        val fn = fnUpdateSpecConstants ?: return 0
+        val handle = fn ?: return 0
         if (specPairs.isEmpty()) {
-            return runCatching { fn.invokeExact(0L, 0) as Int }.getOrDefault(0)
+            return runCatching { handle.invokeExact(0L, 0) as Int }.getOrDefault(0)
         }
         return runCatching {
             val flat = IntArray(specPairs.size * 2)
@@ -1703,7 +1720,7 @@ object NativeCoreBridge {
             }
             val seg = ioScratch.get().primary.ensureCapacity(flat.size.toLong() * ValueLayout.JAVA_INT.byteSize())
             MemorySegment.copy(flat, 0, seg, ValueLayout.JAVA_INT, 0L, flat.size)
-            fn.invokeExact(seg.address(), specPairs.size) as Int
+            handle.invokeExact(seg.address(), specPairs.size) as Int
         }.getOrDefault(-1)
     }
 

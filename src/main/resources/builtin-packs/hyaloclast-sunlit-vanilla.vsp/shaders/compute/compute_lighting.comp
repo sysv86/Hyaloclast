@@ -604,7 +604,8 @@ void main() {
             procSky = vsWaterTint(vec3(0.0), 1.0, daySky);
         } else {
             vec4 skyVolFog = vsSampleFroxelFog(uVolumetricFog, uv, clamp(vsWorld.depthFar, 64.0, 384.0));
-            procSky = procSky * skyVolFog.a + skyVolFog.rgb;
+            float skyTrans = (skyVolFog.a > 0.0) ? clamp(skyVolFog.a, 0.34, 1.0) : 1.0;
+            procSky = procSky * skyTrans + clamp(skyVolFog.rgb, vec3(0.0), vec3(2.5));
         }
 
         imageStore(outHdrRadiance, pixel, vec4(max(procSky, vec3(0.0)), 1.0));
@@ -652,7 +653,7 @@ void main() {
     } else {
         vec4 volFog = vsSampleFroxelFog(uVolumetricFog, uv, distToCam);
         vec3 fogScatter = clamp(volFog.rgb, vec3(0.0), vec3(2.5));
-        vec3 fogTransmittance = vec3(clamp(volFog.a, 0.14, 1.0));
+        vec3 fogTransmittance = vec3((volFog.a > 0.0) ? clamp(volFog.a, 0.34, 1.0) : 1.0);
         vs_dispatch_hook_fog(distToCam, rayDir, fogScatter, fogTransmittance);
         colorHdr = colorHdr * fogTransmittance + fogScatter;
 

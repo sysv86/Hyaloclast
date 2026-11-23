@@ -2,6 +2,8 @@ package dev.vulkanshaders.pack
 
 import dev.vulkanshaders.VulkanShaders
 import dev.vulkanshaders.backend.NativeCoreBridge
+import dev.vulkanshaders.config.ConfigStore
+import dev.vulkanshaders.config.RuntimePerformanceGuard
 import dev.vulkanshaders.config.VulkanShadersConfig
 import dev.vulkanshaders.diagnostics.HyaloclastErrorLog
 import dev.vulkanshaders.gui.ShaderNotices
@@ -10,6 +12,7 @@ import dev.vulkanshaders.state.WorldStateCollector
 import dev.vulkanshaders.texture.TextureRegistry
 import net.fabricmc.loader.api.FabricLoader
 import net.minecraft.client.Minecraft
+import net.minecraft.network.chat.Component
 import java.io.ByteArrayInputStream
 import java.io.IOException
 import java.io.InputStream
@@ -405,11 +408,32 @@ object ShaderPackManager {
         return normalized
     }
 
+    private const val SWITCH_WATCHDOG_TIMEOUT_MS = 12_000L
+    private const val SWITCH_CONFIRM_TICKS = 2
+
+    @Volatile
+    private var pendingSwitchPackId: String? = null
+
+    @Volatile
+    private var pendingRollbackPackId: String? = null
+
+    @Volatile
+    private var pendingAliveTicks: Int = 0
+
+    @Volatile
+    private var switchGeneration: Long = 0L
+
+    @Volatile
+    private var rollbackInProgress: Boolean = false
+
     fun selectPack(packId: String): Boolean {
+        val previousPackId = activePack?.manifest?.id
         GbufferPipelineRegistry.invalidateShaderSourceCache()
         WorldStateCollector.resetHistory()
+        RuntimePerformanceGuard.resetForStateChange()
 
         if (packId.isBlank() || packId.equals("off", ignoreCase = true)) {
+            disarmSwitchWatchdog()
             activePack = null
             lastPackError = null
             clearTryingMarker()
@@ -418,6 +442,7 @@ object ShaderPackManager {
 
         val target = discoveredPacks.firstOrNull { it.manifest.id == packId }
         if (target == null) {
+            disarmSwitchWatchdog()
             val notFoundMsg = "Shader pack '$packId' not found."
             lastPackError = notFoundMsg
             HyaloclastErrorLog.recordError("ShaderPack", notFoundMsg)
@@ -434,10 +459,13 @@ object ShaderPackManager {
         }
 
         if (compileRoot == null) {
-            activePack = null
             clearTryingMarker()
+            rollbackFailedSwitch(target.manifest.name, previousPackId, "Failed to extract shader pack archive.")
             return false
         }
+
+        // Stage specialization constants before compilation so VkPipelines build once with final values.
+        prepareSpecializationConstantsFor(target)
         val compiledCount = NativeCoreBridge.compileActivePack(compileRoot)
         VulkanShaders.log.info("Compiled {} native shader module(s) for pack '{}'", compiledCount, target.manifest.id)
         if (NativeCoreBridge.lastCompilationError != null) {
@@ -453,8 +481,8 @@ object ShaderPackManager {
                 showToast = true,
             )
             lastPackError = diagnostic.formatShort()
-            activePack = null
             clearTryingMarker()
+            rollbackFailedSwitch(target.manifest.name, previousPackId, diagnostic.formatShort())
             return false
         }
 
@@ -463,9 +491,11 @@ object ShaderPackManager {
 
         activePack = target
         lastPackError = null
-        syncActivePackSpecializationConstants()
+        // Spec constants were already staged via prepareSpecializationConstantsFor(target)
+        // before compileActivePack; avoid rebuilding all VkPipelines a second time.
         GbufferPipelineRegistry.invalidateShaderSourceCache()
         clearTryingMarker()
+        armSwitchWatchdog(target.manifest.id, previousPackId)
         VulkanShaders.log.info(
             "Activated shader pack '{}' v{} (tiers: {}, hooks: {}, customPasses: {})",
             target.manifest.name,
@@ -475,6 +505,114 @@ object ShaderPackManager {
             target.manifest.passes.size,
         )
         return true
+    }
+
+    /**
+     * Confirms the newly activated pack is alive on the Render thread and disarms the switch watchdog.
+     */
+    @JvmStatic
+    fun notifyRenderAlive() {
+        if (pendingSwitchPackId == null) return
+        val ticks = pendingAliveTicks + 1
+        pendingAliveTicks = ticks
+        if (ticks >= SWITCH_CONFIRM_TICKS) {
+            disarmSwitchWatchdog()
+        }
+    }
+
+    private fun prepareSpecializationConstantsFor(pack: LoadedShaderPack) {
+        val cfg = VulkanShaders.config
+        val overrides = cfg.activePackOverrides(pack.manifest.id)
+        val specPairs = pack.manifest.buildSpecializationOverrides(overrides, cfg.renderTier.tierIndex)
+        NativeCoreBridge.prepareSpecConstants(specPairs)
+    }
+
+    private fun armSwitchWatchdog(targetPackId: String, previousPackId: String?) {
+        if (rollbackInProgress) return
+        val mc = runCatching { Minecraft.getInstance() }.getOrNull()
+        if (mc?.level == null) {
+            disarmSwitchWatchdog()
+            return
+        }
+        val gen = ++switchGeneration
+        pendingSwitchPackId = targetPackId
+        pendingRollbackPackId = previousPackId
+        pendingAliveTicks = 0
+
+        val watchdog = Thread({
+            try {
+                Thread.sleep(SWITCH_WATCHDOG_TIMEOUT_MS)
+            } catch (_: InterruptedException) {
+                return@Thread
+            }
+            if (switchGeneration != gen || pendingSwitchPackId != targetPackId) {
+                return@Thread
+            }
+            val fallbackId = previousPackId
+                ?.takeIf { it.isNotBlank() && it != targetPackId }
+                ?: "off"
+            val msg = "Shader pack '$targetPackId' stalled the render thread (>12s); reverting to '$fallbackId'."
+            VulkanShaders.log.error(msg)
+            HyaloclastErrorLog.recordError("ShaderPack", msg)
+
+            // Persist the fallback immediately so even if the user force-closes the frozen game,
+            // the next launch does not re-enter the stalled pack.
+            val currentCfg = VulkanShaders.config
+            val safeCfg = if (fallbackId == "off") {
+                currentCfg.copy(enabled = false, selectedPackId = "off")
+            } else {
+                currentCfg.copy(enabled = true, selectedPackId = fallbackId)
+            }
+            runCatching { ConfigStore.save(safeCfg) }
+
+            mc.execute {
+                if (switchGeneration != gen || pendingSwitchPackId != targetPackId) {
+                    return@execute
+                }
+                disarmSwitchWatchdog()
+                rollbackInProgress = true
+                try {
+                    VulkanShaders.updateConfig(safeCfg)
+                    ShaderNotices.showStatusNotice(
+                        Component.literal("Hyaloclast Watchdog"),
+                        Component.literal("'$targetPackId' froze rendering; reverted to '$fallbackId'."),
+                    )
+                } finally {
+                    rollbackInProgress = false
+                }
+            }
+        }, "Hyaloclast-Switch-Watchdog")
+        watchdog.isDaemon = true
+        watchdog.start()
+    }
+
+    private fun disarmSwitchWatchdog() {
+        switchGeneration++
+        pendingSwitchPackId = null
+        pendingRollbackPackId = null
+        pendingAliveTicks = 0
+    }
+
+    private fun rollbackFailedSwitch(failedPackName: String, previousPackId: String?, reason: String) {
+        if (!rollbackInProgress && !previousPackId.isNullOrBlank() && !previousPackId.equals("off", ignoreCase = true)) {
+            rollbackInProgress = true
+            try {
+                val restored = selectPack(previousPackId)
+                if (restored) {
+                    val safeCfg = VulkanShaders.config.copy(enabled = true, selectedPackId = previousPackId)
+                    VulkanShaders.initializeConfig(safeCfg)
+                    ConfigStore.save(safeCfg)
+                    ShaderNotices.showStatusNotice(
+                        Component.literal("Hyaloclast Pack Rollback"),
+                        Component.literal("Reverted from '$failedPackName' to '$previousPackId': $reason"),
+                    )
+                    return
+                }
+            } finally {
+                rollbackInProgress = false
+            }
+        }
+        activePack = null
     }
 
     /**

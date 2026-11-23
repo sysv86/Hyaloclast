@@ -8,6 +8,7 @@ import dev.vulkanshaders.bridge.StandaloneRenderPearlBridge
 import dev.vulkanshaders.bridge.VulkanShadersTurboExtension
 import dev.vulkanshaders.config.ConfigStore
 import dev.vulkanshaders.config.FrameGenMode
+import dev.vulkanshaders.config.RuntimePerformanceGuard
 import dev.vulkanshaders.config.VulkanShadersConfig
 import dev.vulkanshaders.diagnostics.HyaloclastDebugHud
 import dev.vulkanshaders.diagnostics.HyaloclastErrorLog
@@ -151,6 +152,9 @@ object VulkanShaders : ClientModInitializer {
             WorldStateCollector.resetHistory()
         }
         refreshRuntimeState()
+        if (prev.renderTier != config.renderTier) {
+            RuntimePerformanceGuard.resetForStateChange()
+        }
         if (shaderPackActive) {
             TextureRegistry.ensureCompanionAtlasesBuilt()
         }
@@ -245,6 +249,8 @@ object VulkanShaders : ClientModInitializer {
     @JvmStatic
     fun onClientTick(mc: Minecraft) {
         HyaloclastKeybinds.tick(mc)
+        ShaderPackManager.notifyRenderAlive()
+        RuntimePerformanceGuard.onClientTick(mc)
 
         if (!StandaloneRenderPearlBridge.vulkanTurboLoaded) {
             NativeCoreBridge.drainNativeErrorsToLog()

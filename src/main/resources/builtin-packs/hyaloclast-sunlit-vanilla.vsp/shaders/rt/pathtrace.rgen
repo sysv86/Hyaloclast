@@ -520,7 +520,6 @@ void main() {
 #if VS_ACTIVE_RENDER_TIER >= 3
     VsRestirGiReservoir giReservoir;
     vsRestirGiInit(giReservoir);
-    vsRestirGiStore(pixel, giReservoir, 0.0);
     bool restirGiEnabled = VS_PARAM_RESTIR_GI > 0.5;
 #endif
     uint hIdx = (uint(vsWorld.frameIndex) % 16u) + 1u;
@@ -608,7 +607,7 @@ void main() {
     vec2 prevUv = validPrevUv ? (previous.xy / previous.w * 0.5 + 0.5) : vec2(-1.0);
     vec2 motion = validPrevUv ? (unjitteredUv - prevUv) : vec2(2.0);
     uint rng = vsPcgHash(uint(pixel.x) * 1973u ^ uint(pixel.y) * 9277u ^ uint(vsWorld.frameIndex) * 26699u);
-    bool mirrorLike = primary.roughness < 0.14 || water || isGlass;
+    bool mirrorLike = primary.roughness < 0.20 || water || isGlass;
 #if VS_ACTIVE_RENDER_TIER >= 3
     if (restirGiEnabled && !mirrorLike && vsWorld.frameIndex != 0
         && validPrevUv && all(greaterThanEqual(prevUv, vec2(0.0)))
@@ -646,18 +645,23 @@ void main() {
     }
     vec3 sharp = primary.albedo * primary.emission * 2.0;
     vec3 diffuse = mirrorLike ? vec3(0.0) : direct;
-    if (mirrorLike) sharp += direct * (water ? 0.14 : (isGlass ? 0.18 : 1.0));
+    if (mirrorLike) sharp += direct * (water ? 0.18 : (isGlass ? 0.22 : 1.0));
 
     float diffHitDist = 0.0;
     float specHitDist = 0.0;
 
     uint totalLights = min(uEmissiveLights.header.x, 512u);
     bool hasHeldLight = totalLights > 0u && vsIsHeldLight(uEmissiveLights.lights[0]);
-    uint firstWorldLight = hasHeldLight ? 1u : 0u;
+    bool hasHeldLightOff = totalLights > 1u && vsIsHeldLight(uEmissiveLights.lights[1]);
+    uint firstWorldLight = (hasHeldLight ? 1u : 0u) + (hasHeldLightOff ? 1u : 0u);
     uint worldLightCount = totalLights - firstWorldLight;
     VsEmissiveLight heldLight;
+    VsEmissiveLight heldLightOff;
     if (hasHeldLight) {
         heldLight = uEmissiveLights.lights[0];
+    }
+    if (hasHeldLightOff) {
+        heldLightOff = uEmissiveLights.lights[1];
     }
 
     if (water) {
@@ -678,7 +682,11 @@ void main() {
         VsSurface waterGlint = vsWaterGlintSurface(primary);
         if (hasHeldLight) {
             sharp += min(directLocalLight(heldLight, waterGlint, primaryGeomN, position, -direction)
-                * 0.32, vec3(0.24));
+                * 0.45, vec3(0.55));
+        }
+        if (hasHeldLightOff) {
+            sharp += min(directLocalLight(heldLightOff, waterGlint, primaryGeomN, position, -direction)
+                * 0.45, vec3(0.55));
         }
         sharp += evaluateTop2OpticalGlints(firstWorldLight, worldLightCount, waterGlint, primaryGeomN, position, -direction, 0.45, vec3(0.45));
     } else if (isGlass) {
@@ -707,7 +715,10 @@ void main() {
         vec3 tint = mix(vec3(1.0), primary.albedo, clamp(primaryAlpha, 0.0, 1.0));
         sharp += glassF * reflRad + (1.0 - glassF) * transRad * tint;
         if (hasHeldLight) {
-            sharp += directLocalLight(heldLight, primary, primaryGeomN, position, -direction) * 0.35;
+            sharp += directLocalLight(heldLight, primary, primaryGeomN, position, -direction) * 0.42;
+        }
+        if (hasHeldLightOff) {
+            sharp += directLocalLight(heldLightOff, primary, primaryGeomN, position, -direction) * 0.42;
         }
         sharp += evaluateTop2OpticalGlints(firstWorldLight, worldLightCount, primary, primaryGeomN, position, -direction, 0.35, vec3(0.40));
     } else if (mirrorLike) {
@@ -725,11 +736,16 @@ void main() {
         if (hasHeldLight) {
             sharp += directLocalLight(heldLight, primary, primaryGeomN, position, -direction);
         }
+        if (hasHeldLightOff) {
+            sharp += directLocalLight(heldLightOff, primary, primaryGeomN, position, -direction);
+        }
         vec3 ambient = vec3(0.0);
-        vs_dispatch_hook_sky(ambient, primary.normal, sky);
+        vec3 ambSampleDir = normalize(mix(primary.normal, vec3(0.0, 1.0, 0.0), 0.30));
+        vs_dispatch_hook_sky(ambient, ambSampleDir, sky);
+        float overworldSkyCurve = mix(0.04, 1.0, pow(clamp(primarySkyLight, 0.0, 1.0), 1.35));
         float skyAmbScale = (dimId == 1)
-            ? 0.24
-            : ((dimId == 2) ? max(0.16, 0.22 * primarySkyLight) : (0.26 * primarySkyLight * primarySkyLight));
+            ? 0.26
+            : ((dimId == 2) ? max(0.18, 0.24 * primarySkyLight) : (0.40 * overworldSkyCurve));
         float giStrength = clamp(VS_PARAM_GI_BOUNCE_STRENGTH, 0.2, 2.0);
         // Apply primary.ao to ambient/GI only (not direct sunlight or metallic F0).
         diffuse += ambient * primary.albedo * (1.0 - primary.metallic * 0.85) * skyAmbScale * primary.ao
@@ -851,6 +867,14 @@ void main() {
             vec3 bounced = sunlight(s, bounceGeomN, p, hitT, -rayDir, L, sunEnergy, bounceSkyLight)
                 + s.albedo * s.emission * 2.1
                 + blockLighting(s, bounceBlockLight, p, 0.72) * s.ao;
+            if (bounce == 1u) {
+                if (hasHeldLight) {
+                    bounced += directLocalLight(heldLight, s, bounceGeomN, p, -rayDir) * 0.85;
+                }
+                if (hasHeldLightOff) {
+                    bounced += directLocalLight(heldLightOff, s, bounceGeomN, p, -rayDir) * 0.85;
+                }
+            }
             if (hasSharc) {
                 bounced += s.albedo * (1.0 - s.metallic) * sharcRad * 0.34 * s.ao;
             }
@@ -881,8 +905,11 @@ void main() {
     } else {
         vec2 fogUv = (vec2(pixel) + 0.5) / vec2(gl_LaunchSizeEXT.xy);
         vec4 fogSample = vsSampleFroxelFog(uVolumetricFog, fogUv, primaryDepth);
-        vec3 scatter = fogSample.rgb;
-        vec3 transmission = vec3(fogSample.a);
+        if (any(isnan(fogSample)) || any(isinf(fogSample)) || fogSample.a <= 0.0) {
+            fogSample = vec4(0.0, 0.0, 0.0, 1.0);
+        }
+        vec3 scatter = clamp(fogSample.rgb, vec3(0.0), vec3(2.5));
+        vec3 transmission = vec3(clamp(fogSample.a, 0.36, 1.0));
         vs_dispatch_hook_fog(primaryDepth, direction, scatter, transmission);
         sharp = clamp(sharp * transmission + scatter, vec3(0.0), vec3(16.0));
         diffuse = clamp(diffuse * transmission, vec3(0.0), vec3(8.0));

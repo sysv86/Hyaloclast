@@ -203,6 +203,7 @@ object WorldStateCollector {
     private val COLOR_ENTITY_TNT = LinearRgb(0xFFAA44)
     private val COLOR_ENTITY_END_CRYSTAL = LinearRgb(0xE47CFF)
     private val COLOR_ENTITY_LIGHTNING = LinearRgb(0xC8E4FF)
+    private val COLOR_ENTITY_EXPERIENCE_ORB = LinearRgb(0x9CFF58)
 
     private val prevViewProj = Matrix4f()
     private val rasterInvView = Matrix4f()
@@ -665,7 +666,7 @@ object WorldStateCollector {
 
     internal fun heldLightIntensity(heldLevel: Float, firstPerson: Boolean): Float {
         val level = heldLevel.coerceIn(0.0f, 1.0f)
-        return level * level * if (firstPerson) 10.5f else 7.2f
+        return level * level * if (firstPerson) 7.8f else 6.0f
     }
 
     internal fun isOpenFlameBlockName(descriptionIdLower: String): Boolean =
@@ -1281,7 +1282,7 @@ object WorldStateCollector {
             name.contains("torch") -> 0.75f
             name.contains("jack_o_lantern") -> 0.50f
             name.contains("lantern") -> 0.44f
-            name.contains("campfire") -> 0.46f
+            name.contains("campfire") -> 0.62f
             name.contains("candle") -> 0.45f
             name.contains("sea_pickle") -> 0.30f
             name.contains("eyeblossom") -> 0.38f
@@ -1307,7 +1308,8 @@ object WorldStateCollector {
             name.contains("jack_o_lantern") || name.contains("furnace") ||
                 name.contains("blast_furnace") || name.contains("smoker") -> 0.98f
             name.contains("lava") -> 1.15f
-            name.contains("torch") || name.contains("lantern") || name.contains("campfire") -> 1.05f
+            name.contains("campfire") -> 1.35f
+            name.contains("torch") || name.contains("lantern") -> 1.05f
             else -> 0.92f
         }
 
@@ -1625,7 +1627,8 @@ object WorldStateCollector {
                 EntityTypes.DRAGON_FIREBALL,
                 EntityTypes.TNT,
                 EntityTypes.END_CRYSTAL,
-                EntityTypes.LIGHTNING_BOLT -> true
+                EntityTypes.LIGHTNING_BOLT,
+                EntityTypes.EXPERIENCE_ORB -> true
                 EntityTypes.CREEPER -> (entity as? Creeper)?.isPowered == true
                 else -> false
             }
@@ -1666,6 +1669,7 @@ object WorldStateCollector {
                     EntityTypes.TNT -> packLinearLight(idx++, wx, midY, wz, 10.0f, COLOR_ENTITY_TNT, 6.5f, THIN_EMITTER_FLAG or FLICKER_FLAG)
                     EntityTypes.END_CRYSTAL -> packLinearLight(idx++, wx, (pos.y + 1.0).toFloat(), wz, 14.0f, COLOR_ENTITY_END_CRYSTAL, 9.5f, THIN_EMITTER_FLAG or FLICKER_FLAG)
                     EntityTypes.LIGHTNING_BOLT -> packLinearLight(idx++, wx, (pos.y + 4.0).toFloat(), wz, 28.0f, COLOR_ENTITY_LIGHTNING, 22.0f, THIN_EMITTER_FLAG)
+                    EntityTypes.EXPERIENCE_ORB -> packLinearLight(idx++, wx, midY, wz, 5.5f, COLOR_ENTITY_EXPERIENCE_ORB, 3.2f, THIN_EMITTER_FLAG)
                 }
             }
         }

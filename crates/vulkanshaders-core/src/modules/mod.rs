@@ -2718,6 +2718,42 @@ impl GpuPipelineManager {
             }
         }
 
+        if pass_kind == PassKind::FullPathTracing {
+            if binding == 9
+                && let Some(id) = graph.resolve_resource_by_name("restir_gi_reservoir_history")
+            {
+                return id;
+            }
+            if binding == 10
+                && let Some(id) = graph.resolve_resource_by_name("restir_gi_reservoir")
+            {
+                return id;
+            }
+        }
+        if pass_kind == PassKind::PostGradeAndToneMap {
+            let active_depth = if graph.config.tier == RenderTier::Tier3PathTracing {
+                RenderGraph::RES_LINEAR_DEPTH
+            } else {
+                RenderGraph::RES_MC_MAIN_DEPTH
+            };
+            let active_albedo = if graph.config.tier == RenderTier::Tier3PathTracing {
+                RenderGraph::RES_PT_ALBEDO
+            } else {
+                RenderGraph::RES_GBUFFER_ALBEDO
+            };
+            match binding {
+                3 => return active_albedo,
+                4 => return RenderGraph::RES_GBUFFER_NORMAL,
+                5 => return RenderGraph::RES_GBUFFER_MATERIAL,
+                6 => return RenderGraph::RES_GBUFFER_VELOCITY,
+                7 => return active_depth,
+                8 => return RenderGraph::RES_RAW_RADIANCE,
+                9 => return RenderGraph::RES_SHARP_RADIANCE,
+                10 => return RenderGraph::RES_SVGF_MOMENTS,
+                _ => {}
+            }
+        }
+
         Self::resolve_resource_for_binding(pass_kind, binding, writable, &graph.config)
     }
 

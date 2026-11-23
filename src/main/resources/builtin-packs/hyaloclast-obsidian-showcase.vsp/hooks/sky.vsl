@@ -74,39 +74,48 @@ float os_hgPhase(float cosTheta, float g) {
     return (1.0 - g2) / (12.56637061 * pow(denom, 1.5));
 }
 
-// Full-strength 4-curtain animated emerald -> cyan -> violet-magenta aurora borealis.
+// Volumetric multi-step 3D aurora borealis curtains with organic FBM domain-warped ribbons
+// and natural altitude emission spectrum (emerald lower rim -> cyan mid -> soft violet crown).
 vec3 os_evaluateAurora(vec3 dir, float timeSec) {
-    if (dir.y <= 0.04) {
+    if (dir.y <= 0.03) {
         return vec3(0.0);
     }
     vec3 accum = vec3(0.0);
-    float elevationMask = smoothstep(0.04, 0.22, dir.y) * smoothstep(0.94, 0.34, dir.y);
-    float t = timeSec * 0.16;
+    float elevationMask = smoothstep(0.03, 0.20, dir.y) * smoothstep(0.96, 0.36, dir.y);
+    float t = timeSec * 0.085;
 
-    for (int i = 0; i < 4; ++i) {
-        float fi = float(i);
-        float shellH = 0.92 + fi * 0.27;
-        vec2 uv = dir.xz / max(dir.y + 0.17, 0.21) * shellH;
+    const int STEPS = 8;
+    for (int i = 0; i < STEPS; ++i) {
+        float h = (float(i) + 0.5) / float(STEPS);
+        float shellH = 0.85 + h * 0.95;
+        vec2 uv = dir.xz / max(dir.y + 0.16, 0.20) * shellH;
 
-        float wave = sin(uv.x * 1.48 + t * (1.15 + fi * 0.22) + sin(uv.y * 1.25 - t * 0.72)) * 0.58;
-        float ribbonCoord = uv.y + wave + fi * 0.36 - 0.52;
-        float ribbonCore = exp(-abs(ribbonCoord) * (4.4 - fi * 0.42));
+        // Organic 2-octave FBM domain warp for sweeping, non-periodic aurora arcs
+        float warp1 = os_noise2D(vec2(uv.x * 0.42 + t * 0.55, uv.y * 0.35 - t * 0.25));
+        float warp2 = os_noise2D(vec2(uv.x * 0.95 - t * 0.40 + warp1 * 1.4, uv.y * 0.72 + t * 0.30));
+        vec2 wuv = uv + vec2(warp1 - 0.5, warp2 - 0.5) * 1.65;
 
-        // Vertical magnetic field striations shimmering along each curtain
-        float striation = os_noise2D(vec2(uv.x * 5.4 + t * 0.90, uv.y * 1.85 - t * 0.38 + fi * 3.1));
-        float fineShimmer = 0.54 + 0.46 * sin(uv.x * 14.5 + striation * 6.2 - timeSec * 0.95 + fi * 1.7);
-        float density = ribbonCore * smoothstep(0.24, 0.86, striation) * fineShimmer;
+        // Two sweeping, soft-edged curtains
+        float arcA = exp(-abs(wuv.y * 0.82 - 0.28 + (warp1 - 0.5) * 0.9) * 3.1);
+        float arcB = exp(-abs(wuv.y * 0.76 + 0.52 - (warp2 - 0.5) * 0.8) * 2.8) * 0.75;
+        float ribbon = max(arcA, arcB);
 
-        // Physical altitude emission spectrum: emerald lower edge -> cyan mid -> violet-magenta crown
-        float altFrac = fi / 3.0;
-        vec3 colLow = vec3(0.05, 0.98, 0.50);
-        vec3 colMid = vec3(0.06, 0.78, 0.92);
-        vec3 colTop = vec3(0.68, 0.18, 0.94);
-        vec3 curtainCol = altFrac < 0.5
-            ? mix(colLow, colMid, altFrac * 2.0)
-            : mix(colMid, colTop, (altFrac - 0.5) * 2.0);
+        // Soft vertical magnetic striations from smooth FBM noise (no harsh sine banding)
+        float rays = os_noise2D(vec2(wuv.x * 2.9 + t * 0.65, wuv.y * 0.9 - t * 0.20));
+        float fineRays = os_noise2D(vec2(wuv.x * 6.2 - t * 0.45, wuv.y * 1.4 + 4.3));
+        float rayDensity = smoothstep(0.22, 0.82, rays * 0.68 + fineRays * 0.32);
 
-        accum += curtainCol * density * (0.34 - fi * 0.045);
+        // Natural vertical profile: bright emerald lower edge fading smoothly into upper crown
+        float vertProfile = smoothstep(0.0, 0.22, h) * pow(1.0 - h, 1.25);
+
+        vec3 colLow = vec3(0.08, 0.96, 0.54);
+        vec3 colMid = vec3(0.10, 0.74, 0.90);
+        vec3 colTop = vec3(0.56, 0.22, 0.88);
+        vec3 altCol = h < 0.45
+            ? mix(colLow, colMid, h / 0.45)
+            : mix(colMid, colTop, (h - 0.45) / 0.55);
+
+        accum += altCol * (ribbon * rayDensity * vertProfile) * (1.25 / float(STEPS));
     }
 
     return accum * elevationMask;

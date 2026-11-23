@@ -534,7 +534,8 @@ void main() {
             skyRadiance = vsWaterTint(vec3(0.0), 1.0, daySky);
         } else {
             vec4 skyVolFog = vsSampleFroxelFog(uVolumetricFog, uv, rasterDistance);
-            skyRadiance = skyRadiance * skyVolFog.a + skyVolFog.rgb;
+            float skyTrans = (skyVolFog.a > 0.0) ? clamp(skyVolFog.a, 0.34, 1.0) : 1.0;
+            skyRadiance = skyRadiance * skyTrans + clamp(skyVolFog.rgb, vec3(0.0), vec3(2.5));
         }
         imageStore(outHdrRadiance, pixel, vec4(max(skyRadiance, vec3(0.0)), 1.0));
         imageStore(outSharpRadiance, pixel, vec4(0.0));
@@ -640,12 +641,13 @@ void main() {
     vec3 opticalLightGlint = vec3(0.0);
     uint lightCount = isDhPixel ? 0u : min(uEmissiveLights.header.x, 512u);
     uint firstWorldLight = 0u;
-    if (lightCount > 0u && vsIsHeldLight(uEmissiveLights.lights[0])) {
-        VsEmissiveLight held = uEmissiveLights.lights[0];
-        heldRadiance = isWater
-            ? min(directLocalLight(held, vsWaterGlintSurface(s), geomN, P, V) * 0.32, vec3(0.24))
+    for (uint hi = 0u; hi < min(lightCount, 2u); ++hi) {
+        if (!vsIsHeldLight(uEmissiveLights.lights[hi])) break;
+        VsEmissiveLight held = uEmissiveLights.lights[hi];
+        heldRadiance += isWater
+            ? min(directLocalLight(held, vsWaterGlintSurface(s), geomN, P, V) * 0.45, vec3(0.55))
             : directLocalLight(held, s, geomN, P, V);
-        firstWorldLight = 1u;
+        firstWorldLight = hi + 1u;
     }
     uint worldLights = lightCount - firstWorldLight;
     if (isWater || isGlass) {
@@ -912,7 +914,7 @@ void main() {
     } else {
         vec4 volFog = vsSampleFroxelFog(uVolumetricFog, uv, distToCam);
         vec3 fogScatter = clamp(volFog.rgb, vec3(0.0), vec3(2.5));
-        vec3 fogTransmittance = vec3(clamp(volFog.a, 0.14, 1.0));
+        vec3 fogTransmittance = vec3((volFog.a > 0.0) ? clamp(volFog.a, 0.34, 1.0) : 1.0);
         vs_dispatch_hook_fog(distToCam, rayDir, fogScatter, fogTransmittance);
         sharpRadiance = clamp(sharpRadiance * fogTransmittance + fogScatter, vec3(0.0), vec3(16.0));
         diffuseRadiance = clamp(diffuseRadiance * fogTransmittance, vec3(0.0), vec3(8.0));

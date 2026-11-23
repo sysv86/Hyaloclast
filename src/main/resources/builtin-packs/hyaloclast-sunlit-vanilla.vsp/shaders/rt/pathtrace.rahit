@@ -90,9 +90,9 @@ void main() {
         // Shadow rays (bit 1 = 2u) and skipGlass rays (bit 7 = 128u) pass through glass.
         // Tinted sun shadow rays (bit 1 = 2u | bit 16 = 65536u) accumulate stained-glass transmission color.
         if ((payload.flags & (2u | 65536u)) == (2u | 65536u) && alpha > 0.02) {
-            vec3 glassTint = pow(max(texel.rgb, vec3(0.0)), vec3(2.2));
+            vec3 glassTint = pow(max(texel.rgb, vec3(0.0)), vec3(2.2)) * 1.18;
             vec3 curTrans = vsPayloadGetRadiance(payload);
-            vsPayloadSetRadiance(payload, curTrans * mix(vec3(1.0), glassTint, clamp(alpha * 0.82, 0.12, 0.82)));
+            vsPayloadSetRadiance(payload, curTrans * mix(vec3(1.0), glassTint, clamp(alpha * 1.45, 0.25, 0.92)));
         }
         if ((payload.flags & (2u | 128u)) != 0u || alpha <= 0.02) {
             ignoreIntersectionEXT;

@@ -92,6 +92,8 @@ pub struct FrameGenController {
     pub mode: FrameGenBackendMode,
     pub hdr_enabled: bool,
     pub reflex_enabled: bool,
+    /// Armed only after a recent healthy frame/present; disarmed on swapchain recreate, errors, or >500ms stalls.
+    reflex_sleep_armed: bool,
     pub active_swapchain: u64,
     pub active_swapchain_epoch: u64,
     pub swapchain_images: Vec<u64>,
@@ -122,6 +124,7 @@ impl Default for FrameGenController {
             mode: FrameGenBackendMode::Off,
             hdr_enabled: false,
             reflex_enabled: false,
+            reflex_sleep_armed: false,
             active_swapchain: 0,
             active_swapchain_epoch,
             swapchain_images: Vec::new(),
@@ -204,6 +207,7 @@ impl FrameGenController {
         self.hdr_output_valid_this_frame = false;
         self.interpolated_image = 0;
         self.last_present_timestamp = None;
+        self.reflex_sleep_armed = false;
     }
 
     /// Updates the active swapchain handle together with its actual pixel extent `(width, height)`.
@@ -227,6 +231,8 @@ impl FrameGenController {
     pub fn set_swapchain(&mut self, ctx: Option<&VulkanContext>, swapchain_raw: u64) {
         self.pending_present_job = None;
         self.hdr_output_valid_this_frame = false;
+        self.reflex_sleep_armed = false;
+        self.last_present_timestamp = None;
         // Advance the swapchain epoch BEFORE waiting so any sleeping PresentThread wakes immediately.
         self.active_swapchain_epoch = self.present_thread.advance_swapchain_epoch();
         self.present_thread.wait_idle();
@@ -273,17 +279,28 @@ impl FrameGenController {
         if self.active_swapchain == 0 || !self.reflex_enabled {
             return;
         }
-        if self.latency_sleep_semaphore != vk::Semaphore::null() {
+        let recent_present = self
+            .last_present_timestamp
+            .is_some_and(|t| t.elapsed() < Duration::from_millis(500));
+        if self.reflex_sleep_armed
+            && recent_present
+            && self.latency_sleep_semaphore != vk::Semaphore::null()
+        {
             self.latency_sleep_value = self.latency_sleep_value.wrapping_add(1);
-            self.sleep_before_input(ctx, self.latency_sleep_semaphore, self.latency_sleep_value);
+            if !self.sleep_before_input(ctx, self.latency_sleep_semaphore, self.latency_sleep_value)
+            {
+                self.reflex_sleep_armed = false;
+            }
+        } else {
+            self.reflex_sleep_armed = false;
         }
         self.set_reflex_marker(ctx, VK_LATENCY_MARKER_SIMULATION_START_NV);
         self.set_reflex_marker(ctx, VK_LATENCY_MARKER_INPUT_SAMPLE_NV);
     }
 
-    pub fn sleep_before_input(&self, ctx: &VulkanContext, sem: vk::Semaphore, value: u64) {
+    pub fn sleep_before_input(&self, ctx: &VulkanContext, sem: vk::Semaphore, value: u64) -> bool {
         if self.active_swapchain == 0 || !self.reflex_enabled || sem == vk::Semaphore::null() {
-            return;
+            return false;
         }
         if let Some(sleep_fn) = self.pfn_latency_sleep {
             let info = VkLatencySleepInfoNV {
@@ -293,11 +310,14 @@ impl FrameGenController {
                 value,
             };
             unsafe {
-                let _ = sleep_fn(
+                let res = sleep_fn(
                     ctx.device.handle(),
                     vk::SwapchainKHR::from_raw(self.active_swapchain),
                     &info,
                 );
+                if res != vk::Result::SUCCESS {
+                    return false;
+                }
                 let sems = [sem];
                 let vals = [value];
                 let wait_info = vk::SemaphoreWaitInfo::default()
@@ -306,6 +326,7 @@ impl FrameGenController {
                 let _ = ctx.device.wait_semaphores(&wait_info, 15_000_000);
             }
         }
+        true
     }
 
     pub fn set_reflex_marker(&self, ctx: &VulkanContext, marker_id: i32) {
@@ -357,6 +378,7 @@ impl FrameGenController {
             Ok((idx, _suboptimal)) => idx as i32,
             Err(_) => {
                 self.pending_present_job = None;
+                self.reflex_sleep_armed = false;
                 self.active_swapchain_epoch = self.present_thread.advance_swapchain_epoch();
                 -1
             }
@@ -405,17 +427,22 @@ impl FrameGenController {
             Ok(suboptimal) => {
                 if suboptimal {
                     self.pending_present_job = None;
-                } else if let Some(mut job) = self.pending_present_job.take()
-                    && job.epoch == self.present_thread.current_epoch()
-                {
-                    job.start_time = Instant::now();
-                    self.present_thread.submit_job(job);
+                    self.reflex_sleep_armed = false;
+                } else {
+                    self.reflex_sleep_armed = true;
+                    if let Some(mut job) = self.pending_present_job.take()
+                        && job.epoch == self.present_thread.current_epoch()
+                    {
+                        job.start_time = Instant::now();
+                        self.present_thread.submit_job(job);
+                    }
                 }
                 true
             }
             Err(_) => {
                 // Swapchain is out-of-date; advance epoch and let RenderPearl recreate it.
                 self.pending_present_job = None;
+                self.reflex_sleep_armed = false;
                 self.active_swapchain_epoch = self.present_thread.advance_swapchain_epoch();
                 false
             }
@@ -443,6 +470,7 @@ impl FrameGenController {
             self.smoothed_frame_delta = Duration::from_nanos(blended);
         }
         self.last_present_timestamp = Some(now);
+        self.reflex_sleep_armed = true;
         self.smoothed_frame_delta / 2
     }
 

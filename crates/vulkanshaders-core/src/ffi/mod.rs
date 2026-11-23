@@ -1207,11 +1207,7 @@ pub unsafe extern "C" fn vs_core_compile_active_pack(
 /// # Safety
 /// The caller must pass live Vulkan handles and valid, correctly sized storage for each address argument.
 /// Storage must remain valid until this call returns.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn vs_core_update_spec_constants(pairs_ptr: u64, pair_count: i32) -> i32 {
-    let Some(engine) = engine() else {
-        return -1;
-    };
+fn parse_spec_constant_pairs(pairs_ptr: u64, pair_count: i32) -> Vec<(u32, u32)> {
     let mut overrides = Vec::new();
     if pairs_ptr != 0 && pair_count > 0 {
         let raw_u32 =
@@ -1220,13 +1216,38 @@ pub unsafe extern "C" fn vs_core_update_spec_constants(pairs_ptr: u64, pair_coun
             overrides.push((chunk[0], chunk[1]));
         }
     }
-    {
-        let mut rfs = RUNTIME_FRAME_STATE.lock();
-        rfs.spec_overrides_by_id.clear();
-        for &(id, bits) in &overrides {
-            rfs.spec_overrides_by_id.insert(id, bits);
-        }
+    let mut rfs = RUNTIME_FRAME_STATE.lock();
+    rfs.spec_overrides_by_id.clear();
+    for &(id, bits) in &overrides {
+        rfs.spec_overrides_by_id.insert(id, bits);
     }
+    overrides
+}
+
+/// Stages specialization constants before `vs_core_compile_pack` so the new pack's pipelines are
+/// built once with the final overrides instead of compiling twice.
+///
+/// # Safety
+/// `pairs_ptr` must be null or point to `pair_count * 2` valid `u32` values for this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_core_prepare_spec_constants(pairs_ptr: u64, pair_count: i32) -> i32 {
+    let Some(engine) = engine() else {
+        return -1;
+    };
+    let overrides = parse_spec_constant_pairs(pairs_ptr, pair_count);
+    let mut pnc = engine.pipelines_and_compiler.lock();
+    pnc.pipelines.active_spec_constants = overrides;
+    0
+}
+
+/// # Safety
+/// If `pair_count > 0`, `pairs_ptr` must point to `pair_count` valid `(u32, f32)` specialization constant pairs.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_core_update_spec_constants(pairs_ptr: u64, pair_count: i32) -> i32 {
+    let Some(engine) = engine() else {
+        return -1;
+    };
+    let overrides = parse_spec_constant_pairs(pairs_ptr, pair_count);
     let (bindless_layout, pack_layout) = {
         let bl = engine.bindless.read();
         let pl = engine.pack_textures.read();

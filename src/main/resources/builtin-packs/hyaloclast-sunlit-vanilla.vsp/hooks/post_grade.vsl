@@ -70,21 +70,21 @@ void sv_post_grade(inout vec3 hdrColor, in vec2 uv, in VsPostContext post) {
         hdrColor = pow(hdrColor, vec3(1.015));
     }
 
-    // Gentle warm-highlight / clean-cool-shadow split harmony
+    // Crisp warm-highlight / airy-azure-shadow split harmony without crushing darks
     float luma = dot(hdrColor, vec3(0.2126, 0.7152, 0.0722));
-    float shadowWeight = (1.0 - smoothstep(0.02, 0.34, luma)) * smoothstep(0.0, 0.025, luma);
-    float highlightWeight = smoothstep(0.44, 0.92, luma);
+    float shadowWeight = (1.0 - smoothstep(0.02, 0.38, luma)) * smoothstep(0.0, 0.020, luma);
+    float highlightWeight = smoothstep(0.45, 0.92, luma);
     vec3 splitTint = vec3(1.0)
-        + vec3(-0.014, -0.001, 0.020) * shadowWeight
-        + vec3( 0.026,  0.010, -0.016) * highlightWeight;
-    hdrColor = clamp(hdrColor * splitTint, 0.0, 1.0);
+        + vec3(-0.008,  0.002, 0.020) * shadowWeight
+        + vec3( 0.028,  0.010, -0.018) * highlightWeight;
+    hdrColor = clamp(hdrColor * splitTint + vec3(0.006, 0.008, 0.012) * shadowWeight, 0.0, 1.0);
 
-    // Vibrant-yet-faithful selective vibrance favoring muted foliage and sky tones
+    // Vibrant-yet-faithful selective vibrance favoring foliage, sky, water, and stained glass
     float maxCh = max(hdrColor.r, max(hdrColor.g, hdrColor.b));
     float minCh = min(hdrColor.r, min(hdrColor.g, hdrColor.b));
     float sat = (maxCh > 1e-4) ? ((maxCh - minCh) / maxCh) : 0.0;
-    float foliageSkyMask = smoothstep(0.02, 0.25, max(hdrColor.g, hdrColor.b) - hdrColor.r * 0.75);
-    float vibranceGain = mix(1.11, 1.03, smoothstep(0.22, 0.82, sat)) + foliageSkyMask * 0.03;
+    float foliageSkyMask = smoothstep(0.02, 0.24, max(hdrColor.g, hdrColor.b) - hdrColor.r * 0.72);
+    float vibranceGain = mix(1.16, 1.05, smoothstep(0.24, 0.84, sat)) + foliageSkyMask * 0.04;
     float lumaPost = dot(hdrColor, vec3(0.2126, 0.7152, 0.0722));
     hdrColor = clamp(mix(vec3(lumaPost), hdrColor, vibranceGain), 0.0, 1.0);
 
