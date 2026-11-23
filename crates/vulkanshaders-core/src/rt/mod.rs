@@ -762,8 +762,13 @@ impl ZeroCopyBlasManager {
         let tier_default_builds =
             Self::default_blas_builds_for_tier(ctx.capabilities.gpu_tier_class);
         let base_builds = max_blas_builds.max(tier_default_builds).clamp(1, 256);
-        self.max_builds_per_frame = if self.vram_throttle_compaction {
-            (base_builds / 2).max(4)
+        self.max_builds_per_frame = if self.vram_throttle_compaction
+            || (self.pending_build_queue.len() > 24
+                && matches!(
+                    ctx.capabilities.gpu_tier_class,
+                    crate::gpu::GpuTierClass::Low | crate::gpu::GpuTierClass::Mid
+                )) {
+            (base_builds / 2).clamp(4, 8)
         } else {
             base_builds
         };
