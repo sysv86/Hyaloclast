@@ -87,13 +87,15 @@ const float VS_RQ_GI_DIST = 128.0;
 const float VS_RQ_REFLECTION_DIST = 256.0;
 const float VS_RQ_GLASS_DIST = 192.0;
 const uint VS_RQ_RESTIR_CANDIDATES = 16u;
+const bool VS_RQ_SECONDARY_TRACES = true;
 #else
 const float VS_RQ_SUN_SHADOW_DIST = 196.0;
 const float VS_RQ_SECONDARY_SUN_DIST = 192.0;
 const float VS_RQ_GI_DIST = 64.0;
 const float VS_RQ_REFLECTION_DIST = 128.0;
 const float VS_RQ_GLASS_DIST = 96.0;
-const uint VS_RQ_RESTIR_CANDIDATES = 8u;
+const uint VS_RQ_RESTIR_CANDIDATES = 2u;
+const bool VS_RQ_SECONDARY_TRACES = false;
 #endif
 
 bool evaluateCandidateAlpha(rayQueryEXT rq, uint waterMode, bool skipGlass) {
@@ -798,7 +800,7 @@ void main() {
         vec3 hitWaterNormal;
         VsSurface hitSurf;
         if (!isDhPixel && dot(giDir, geomN) > 0.0) {
-            if (traceClosestHitSurface(rayOrigin, giDir, 0.005, VS_RQ_GI_DIST, SKIP_WATER, true,
+            if (VS_RQ_SECONDARY_TRACES && traceClosestHitSurface(rayOrigin, giDir, 0.005, VS_RQ_GI_DIST, SKIP_WATER, true,
                                        hitT, hitPos, hitSurf, hitLight, hitWaterNormal)) {
                 indirectLight += 0.48 * giStrength * shadeSecondaryHit(pixel, hitPos, giDir, hitSurf, hitLight, L, directColor, skyState, true);
             } else {
@@ -831,7 +833,7 @@ void main() {
             vec3 reflectionOrigin = isWater ? P + waterBias : rayOrigin;
             bool wetReflection = isWater && submerged;
             uint waterMode = isWater ? INCLUDE_WATER : SKIP_WATER;
-            if (!isDhPixel && traceClosestHitSurface(reflectionOrigin, direction, 0.005, VS_RQ_REFLECTION_DIST, waterMode, isGlass,
+            if (!isDhPixel && VS_RQ_SECONDARY_TRACES && traceClosestHitSurface(reflectionOrigin, direction, 0.005, VS_RQ_REFLECTION_DIST, waterMode, isGlass,
                                        hitT, hitPos, hitSurf, hitLight, hitWaterNormal)
                     && dot(hitWaterNormal, hitWaterNormal) < 0.5) {
                 reflected = shadeSecondaryHit(pixel, hitPos, direction, hitSurf, hitLight, L, directColor, skyState, true);
@@ -860,7 +862,7 @@ void main() {
             vec3 hitPos;
             vec3 hitWaterNormal;
             VsSurface hitSurf;
-            if (traceClosestHitSurface(P - waterBias, transmission, 0.005, 64.0, SKIP_WATER, true,
+            if (VS_RQ_SECONDARY_TRACES && traceClosestHitSurface(P - waterBias, transmission, 0.005, 64.0, SKIP_WATER, true,
                                        hitT, hitPos, hitSurf, hitLight, hitWaterNormal)) {
                 transmitted = shadeSecondaryHit(pixel, hitPos, transmission, hitSurf, hitLight, L, directColor, skyState, false);
                 if (!submerged && dayFactor > 0.05 && hitLight.x > 0.15) {
@@ -885,7 +887,7 @@ void main() {
         vec3 hitPos;
         vec3 hitWaterNormal;
         VsSurface hitSurf;
-        if (traceClosestHitSurface(P - geomN * 0.025, transDir, 0.005, VS_RQ_GLASS_DIST, SKIP_WATER, true,
+        if (VS_RQ_SECONDARY_TRACES && traceClosestHitSurface(P - geomN * 0.025, transDir, 0.005, VS_RQ_GLASS_DIST, SKIP_WATER, true,
                                    hitT, hitPos, hitSurf, hitLight, hitWaterNormal)) {
             transmitted = shadeSecondaryHit(pixel, hitPos, transDir, hitSurf, hitLight, L, directColor, skyState, true);
         } else {

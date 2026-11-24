@@ -458,7 +458,7 @@ object ShaderPackManager {
         return normalized
     }
 
-    private const val SWITCH_WATCHDOG_TIMEOUT_MS = 12_000L
+    private const val SWITCH_WATCHDOG_TIMEOUT_MS = 4_000L
     private const val SWITCH_CONFIRM_TICKS = 2
 
     @Volatile
