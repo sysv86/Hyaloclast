@@ -519,8 +519,12 @@ object ShaderPackManager {
         prepareSpecializationConstantsFor(target)
         val compiledCount = NativeCoreBridge.compileActivePack(compileRoot)
         if (compiledCount >= 0) {
-            // Invalidate a watchdog armed by a preceding rapid switch; its fallback must not recompile again.
-            disarmSwitchWatchdog()
+            // A preceding rapid switch may have left a watchdog armed whose fallback would
+            // recompile the old pack. Arming bumps switchGeneration, which cancels that stale
+            // guard, and immediately installs a fresh one for this pack. Do NOT fully disarm
+            // here: the new watchdog must stay live until notifyRenderAlive() has confirmed
+            // SWITCH_CONFIRM_TICKS frames, so a stalled first TIER_2 frame can still roll back.
+            armSwitchWatchdog(target.manifest.id, previousPackId)
         }
         VulkanShaders.log.info("Compiled {} native shader module(s) for pack '{}'", compiledCount, target.manifest.id)
         if (NativeCoreBridge.lastCompilationError != null) {
@@ -551,7 +555,7 @@ object ShaderPackManager {
         // before compileActivePack; avoid rebuilding all VkPipelines a second time.
         GbufferPipelineRegistry.invalidateShaderSourceCache()
         clearTryingMarker()
-        armSwitchWatchdog(target.manifest.id, previousPackId)
+        // The watchdog was already re-armed on compile success above; do not arm twice.
         VulkanShaders.log.info(
             "Activated shader pack '{}' v{} (tiers: {}, hooks: {}, customPasses: {})",
             target.manifest.name,
@@ -564,7 +568,9 @@ object ShaderPackManager {
     }
 
     /**
-     * Confirms the newly activated pack is alive on the Render thread and disarms the switch watchdog.
+     * Render-loop confirmation that the newly activated pack/tier is alive. The watchdog re-armed
+     * on compile success is only disarmed after [SWITCH_CONFIRM_TICKS] such signals, so a first
+     * frame that stalls before confirmation still reaches the one-shot fallback.
      */
     @JvmStatic
     fun notifyRenderAlive() {
