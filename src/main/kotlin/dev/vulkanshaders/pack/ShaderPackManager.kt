@@ -21,6 +21,7 @@ import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.util.Comparator
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.zip.ZipException
 import java.util.zip.ZipFile
 import javax.imageio.ImageIO
@@ -459,6 +460,7 @@ object ShaderPackManager {
         }
 
         if (compileRoot == null) {
+            disarmSwitchWatchdog()
             clearTryingMarker()
             rollbackFailedSwitch(target.manifest.name, previousPackId, "Failed to extract shader pack archive.")
             return false
@@ -467,6 +469,10 @@ object ShaderPackManager {
         // Stage specialization constants before compilation so VkPipelines build once with final values.
         prepareSpecializationConstantsFor(target)
         val compiledCount = NativeCoreBridge.compileActivePack(compileRoot)
+        if (compiledCount >= 0) {
+            // Invalidate a watchdog armed by a preceding rapid switch; its fallback must not recompile again.
+            disarmSwitchWatchdog()
+        }
         VulkanShaders.log.info("Compiled {} native shader module(s) for pack '{}'", compiledCount, target.manifest.id)
         if (NativeCoreBridge.lastCompilationError != null) {
             VulkanShaders.log.warn("Native shader compilation error/diagnostic: {}", NativeCoreBridge.lastCompilationError)
@@ -481,6 +487,7 @@ object ShaderPackManager {
                 showToast = true,
             )
             lastPackError = diagnostic.formatShort()
+            disarmSwitchWatchdog()
             clearTryingMarker()
             rollbackFailedSwitch(target.manifest.name, previousPackId, diagnostic.formatShort())
             return false
@@ -538,6 +545,7 @@ object ShaderPackManager {
         pendingSwitchPackId = targetPackId
         pendingRollbackPackId = previousPackId
         pendingAliveTicks = 0
+        val fallbackFired = AtomicBoolean(false)
 
         val watchdog = Thread({
             try {
@@ -545,7 +553,9 @@ object ShaderPackManager {
             } catch (_: InterruptedException) {
                 return@Thread
             }
-            if (switchGeneration != gen || pendingSwitchPackId != targetPackId) {
+            if (switchGeneration != gen || pendingSwitchPackId != targetPackId ||
+                !fallbackFired.compareAndSet(false, true)
+            ) {
                 return@Thread
             }
             val fallbackId = previousPackId
@@ -555,21 +565,19 @@ object ShaderPackManager {
             VulkanShaders.log.error(msg)
             HyaloclastErrorLog.recordError("ShaderPack", msg)
 
-            // Persist the fallback immediately so even if the user force-closes the frozen game,
-            // the next launch does not re-enter the stalled pack.
-            val currentCfg = VulkanShaders.config
-            val safeCfg = if (fallbackId == "off") {
-                currentCfg.copy(enabled = false, selectedPackId = "off")
-            } else {
-                currentCfg.copy(enabled = true, selectedPackId = fallbackId)
-            }
-            runCatching { ConfigStore.save(safeCfg) }
-
             mc.execute {
                 if (switchGeneration != gen || pendingSwitchPackId != targetPackId) {
                     return@execute
                 }
                 disarmSwitchWatchdog()
+                // The .trying marker protects a force-closed game; only persist when recovery runs.
+                val currentCfg = VulkanShaders.config
+                val safeCfg = if (fallbackId == "off") {
+                    currentCfg.copy(enabled = false, selectedPackId = "off")
+                } else {
+                    currentCfg.copy(enabled = true, selectedPackId = fallbackId)
+                }
+                runCatching { ConfigStore.save(safeCfg) }
                 rollbackInProgress = true
                 try {
                     VulkanShaders.updateConfig(safeCfg)
