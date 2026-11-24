@@ -30,3 +30,6 @@ Thumbs.db
 *.spv
 *.vkpipe
 local/
+
+# Rust build output
+/target/
