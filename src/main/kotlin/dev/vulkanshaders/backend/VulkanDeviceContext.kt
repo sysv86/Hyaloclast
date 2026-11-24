@@ -103,14 +103,18 @@ object VulkanDeviceContext {
             computeQueueFamilyIndex = computeQueueFamilyIndex,
             timelineSemaphore = encoderTimelineSemaphore,
         )
-        dev.vulkanshaders.bridge.VulkanShadersTurboExtension.syncCapabilitiesToBridge()
+        if (StandaloneRenderPearlBridge.vulkanTurboLoaded) {
+            dev.vulkanshaders.bridge.VulkanShadersTurboExtension.syncCapabilitiesToBridge()
+        }
     }
 
     @JvmStatic
     fun shutdown() {
         runCatching { dev.vulkanshaders.pipeline.GbufferTargetManager.closeAll() }
         runCatching { dev.vulkanshaders.texture.TextureRegistry.closeCompanionAtlases() }
-        dev.vulkanshaders.bridge.VulkanShadersTurboExtension.onDeviceShutdown()
+        if (StandaloneRenderPearlBridge.vulkanTurboLoaded) {
+            dev.vulkanshaders.bridge.VulkanShadersTurboExtension.onDeviceShutdown()
+        }
         NativeCoreBridge.shutdown()
         vulkanDevice = null
         vkInstance = 0L
