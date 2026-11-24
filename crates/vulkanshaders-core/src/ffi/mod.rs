@@ -39,8 +39,10 @@ use crate::{
 };
 use ash::vk::{self, Handle};
 use parking_lot::Mutex;
-use std::{path::Path, slice, str};
-use vsp_compiler::{RenderTier, VspCompiler};
+use std::{env, fs, path::{Path, PathBuf}, slice, str};
+use vsp_compiler::{
+    CompiledShaderArtifact, RenderTier, ShaderStageKind, SpirvHookLinker, VspCompiler,
+};
 
 /// `vs_core_upload_pack_texture` result: the RGBA data was accepted and queued, and will be
 /// uploaded into Set 3 as soon as `vs_core_init` creates the engine. This is a real deferred
@@ -1091,6 +1093,99 @@ pub unsafe extern "C" fn vs_core_record_frame_rtx(
     addr as i64
 }
 
+
+/// Loads VSL 2.0 SPIR-V units from a directory and registers them as native pipeline artifacts.
+/// Reflection is re-derived from the binary with the engine's rspirv-based linker, so the
+/// descriptor layouts and capability gates stay identical to the v1 compiler path.
+fn load_vsl_units(engine: &IgnisEngine, dir: &Path) -> usize {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut units = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("spv") {
+            continue;
+        }
+        let Ok(bytes) = fs::read(&path) else {
+            continue;
+        };
+        if bytes.len() < 20 || bytes.len() % 4 != 0 {
+            continue;
+        }
+        let words: Vec<u32> = bytes
+            .chunks_exact(4)
+            .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .collect();
+        if words[0] != 0x0723_0203 {
+            continue;
+        }
+        let stage_name = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("vsl_unit")
+            .to_owned();
+        let stage_ext = fs::read_to_string(path.with_extension("stage"))
+            .unwrap_or_else(|_| "comp".to_owned());
+        let stage_kind = ShaderStageKind::from_extension(stage_ext.trim())
+            .unwrap_or(ShaderStageKind::Compute);
+        let Ok(reflection) = SpirvHookLinker::reflect_spirv(&words) else {
+            continue;
+        };
+        units.push(CompiledShaderArtifact {
+            stage_name,
+            stage_kind,
+            spirv_words: words,
+            content_hash: blake3::hash(&bytes).into(),
+            hooks: Vec::new(),
+            reflection,
+            loaded_from_cache: false,
+        });
+    }
+    if units.is_empty() {
+        return 0;
+    }
+
+    let ctx = engine.ctx.read();
+    let bindless_layout = engine.bindless.read().descriptor_set_layout;
+    let mut pnc = engine.pipelines_and_compiler.lock();
+    for unit in units {
+        pnc.pipelines
+            .compiled_artifacts
+            .insert(unit.stage_name.clone(), unit);
+    }
+    let built = pnc
+        .pipelines
+        .rebuild_all_pipelines_from_artifacts(&ctx, bindless_layout, &engine.retire);
+    if built > 0 {
+        pnc.pipelines.last_compile_error = None;
+    }
+    built
+}
+
+/// Loads VSL units from `VSL_UNIT_DIR` or `shaderpacks/vsl-units`.
+///
+/// # Safety
+/// The caller must pass live UTF-8 storage when using the explicit-directory entrypoint.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vs_core_load_vsl_units(dir_ptr: u64, dir_len: i32) -> i32 {
+    let dir = if dir_ptr == 0 || dir_len <= 0 {
+        env::var_os("VSL_UNIT_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("shaderpacks/vsl-units"))
+    } else {
+        let bytes = unsafe {
+            slice::from_raw_parts(dir_ptr as *const u8, dir_len as usize)
+        };
+        let Ok(text) = str::from_utf8(bytes) else {
+            return -1;
+        };
+        PathBuf::from(text)
+    };
+    let Some(engine) = engine() else {
+        return -1;
+    };
+    load_vsl_units(&engine, &dir) as i32
+}
+
 /// # Safety
 /// The caller must pass live Vulkan handles and valid, correctly sized storage for each address argument.
 /// Storage must remain valid until this call returns.
@@ -1201,6 +1296,11 @@ pub unsafe extern "C" fn vs_core_compile_active_pack(
     if guard.snapshot().reason == crate::crash::RecoveryReason::ShaderCompileFailure {
         guard.reset();
     }
+    drop(pnc);
+    let vsl_dir = env::var_os("VSL_UNIT_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("shaderpacks/vsl-units"));
+    load_vsl_units(&engine, &vsl_dir);
     count as i32
 }
 

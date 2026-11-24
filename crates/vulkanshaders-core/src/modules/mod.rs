@@ -11,7 +11,7 @@ use crate::{
 };
 use ash::vk::{self, Handle};
 use bytemuck::{Pod, Zeroable};
-use std::{collections::HashMap, ffi::CStr, path::Path};
+use std::{collections::HashMap, ffi::{CStr, CString}, path::Path};
 use vsp_compiler::{
     CompiledShaderArtifact, ReflectedDescriptorBinding, ReflectedDescriptorType, RenderTier,
     ShaderStageKind, SpirvReflection, VspCompiler,
@@ -970,11 +970,17 @@ impl GpuPipelineManager {
             compiled_count += 1;
 
             if artifact.stage_kind == ShaderStageKind::Compute {
+                let entry = artifact
+                    .reflection
+                    .entry_points
+                    .first()
+                    .and_then(|name| CString::new(name.as_str()).ok());
+                let compute_entry_name: &CStr = entry.as_deref().unwrap_or(entry_name);
                 match self.build_compute_pipeline_bundle(
                     ctx,
                     artifact,
                     module,
-                    entry_name,
+                    compute_entry_name,
                     &spec_info,
                     bindless_layout,
                 ) {
