@@ -1,92 +1,201 @@
 #include <vulkanshaders/v1/common.vsl>
 
-// Gentle organic multi-harmonic flame breath for torches, lanterns, and campfires
-float sv_flameFlicker(float timeSec, float dist) {
-    float slowBreath = sin(timeSec * 4.4 + dist * 0.35) * 0.022;
-    float fineDance = cos(timeSec * 9.8 + dist * 0.72 + 0.6) * 0.012;
-    return 0.972 + slowBreath + fineDance;
+// Branch-free 3-band Planck blackbody radiation fit to CIE 1931 -> linear Rec.709 (1100K..14000K)
+vec3 sv_blockPlanckLinear(float kelvin) {
+    float k = max(kelvin, 900.0);
+    vec3 c2 = vec3(20405.87, 24195.14, 30773.22);
+    vec3 weights = vec3(1.0, 1.7284, 5.0545);
+    vec3 rad = weights / max(exp(min(c2 / k, vec3(40.0))) - 1.0, vec3(1e-6));
+    float peak = max(rad.r, max(rad.g, rad.b));
+    return rad / max(peak, 1e-6);
+}
+
+// Smooth channel-preserving highlight knee above threshold to avoid wall washout near sources
+vec3 sv_blockSoftKnee(vec3 color, float knee) {
+    float peak = max(color.r, max(color.g, color.b));
+    if (peak <= knee) {
+        return color;
+    }
+    float excess = peak - knee;
+    float compressed = knee + excess / (1.0 + excess * 2.4);
+    return color * (compressed / max(peak, 1e-6));
+}
+
+// Low-frequency incommensurate turbulent flame breath (< 1.35 Hz, temporally stable in TAA/SVGF)
+float sv_blockFlamePulse(float timeSec, float stormDraft) {
+    const float TAU = 6.28318530718;
+    float w1 = sin(mod(timeSec * 3.05, TAU));
+    float w2 = sin(mod(timeSec * 4.94, TAU) + 1.3);
+    float w3 = sin(mod(timeSec * 7.99, TAU) + 2.7);
+    return (0.55 * w1 + 0.30 * w2 + 0.15 * w3) * (0.026 + 0.011 * stormDraft);
 }
 
 // @hook(stage = "block_light", priority = 10)
-// Sunlit Vanilla - Cozy hearth-warm 10-kind block light curves with gentle organic flame flicker
-// and smooth non-clipping near-field falloff.
-// Three-stop warm blackbody torch ramp adapted from Miniature Shader (MIT License) for linear HDR.
+// ReLight Vanilla - Physically grounded 10-kind block light spectral curves using Planckian blackbody
+// radiation, Helmholtz-Kohlrausch luminance balance, smooth finite-radius falloff, and underwater Beer-Lambert shift.
 void sv_block_light(inout vec3 radiance, in uint lightKind, in float dist) {
-    float nearness = clamp(1.0 - (dist - 0.38) / 5.8, 0.0, 1.0);
-    float hotCore = pow(nearness, 3.6);
-    float flicker = 1.0;
+    const float TAU = 6.28318530718;
 
-    vec3 tint;
+    float d = max(dist, 0.0);
+    float d2 = d * d;
+
+    // Smooth C-infinity finite-radius profiles (no near/far slope kinks, no pow(0, x) edge cases)
+    float nearness = 1.0 / (1.0 + d2 * 0.145);
+    float coreDen = 1.0 + d2 * 0.44;
+    float hotCore = 1.0 / (coreDen * coreDen);
+    float nearGainCurve = 1.0 / (1.0 + d2 * 0.105);
+
+    // Stefan-Boltzmann subtle Kelvin shift from VS_PARAM_TORCH_INTENSITY without double-applying linear intensity
+    float intensityParam = max(VS_PARAM_TORCH_INTENSITY, 0.1);
+    float relPower = clamp(intensityParam / 1.15, 0.25, 2.20);
+    float tempScale = sqrt(sqrt(sqrt(relPower)));
+
+    // Anti-clipping headroom when torch intensity is raised above default 1.15
+    float hiExcess = clamp((intensityParam - 1.15) / 1.35, 0.0, 1.0);
+    float loDeficit = clamp((1.15 - intensityParam) / 0.85, 0.0, 1.0);
+
+    float baseCoreBoost = 1.16;
+    float ptTempCoupling = 0.60;
+#ifdef VS_ACTIVE_RENDER_TIER
+#if VS_ACTIVE_RENDER_TIER >= 3
+    baseCoreBoost = 1.13;
+    ptTempCoupling = 1.05;
+#elif VS_ACTIVE_RENDER_TIER >= 2
+    baseCoreBoost = 1.14;
+    ptTempCoupling = 0.85;
+#endif
+#endif
+
+    float timeSec = vsWorld.gameTimeSec;
+    float rain = clamp(vsWorld.rain, 0.0, 1.0);
+    float thunder = clamp(vsWorld.thunder, 0.0, 1.0);
+    float stormDraft = clamp(rain * 0.60 + thunder * 0.45, 0.0, 1.0);
+
+    // Damp modulation amplitude softly with distance while keeping phase uniform (no traveling rings)
+    float flickerDamp = 0.62 + 0.38 * nearness;
+    float flicker = 1.0;
+    float targetBright = 0.88;
+    vec3 tint = vec3(1.0);
+
     if (lightKind == 1u) {
-        // Soul fire / soul lantern: serene spectral cyan-turquoise -> pale ice-cyan core
-        vec3 outerSoul = vec3(0.08, 0.48, 0.78);
-        vec3 midSoul   = vec3(0.26, 0.80, 0.96);
-        vec3 coreSoul  = vec3(0.74, 0.96, 1.00);
-        tint = mix(mix(outerSoul, midSoul, nearness), coreSoul, hotCore);
-        flicker = 0.97 + 0.03 * sin(vsWorld.gameTimeSec * 4.1 + dist * 0.65);
+        // Soul fire / soul lantern: CH* (431nm) + C2 Swan (473-516nm) chemiluminescence -> sapphire-cyan plasma core
+        float w1 = sin(mod(timeSec * 2.55, TAU));
+        float w2 = sin(mod(timeSec * 4.13, TAU) + 1.1);
+        float pulse = (0.65 * w1 + 0.35 * w2) * (0.020 + 0.009 * stormDraft) * flickerDamp;
+        flicker = 1.0 + pulse;
+
+        vec3 outerSoul = vec3(0.07, 0.44, 0.96);
+        vec3 midSoul   = vec3(0.19, 0.72, 1.00);
+        vec3 coreSoul  = sv_blockPlanckLinear(11000.0 * tempScale * (1.0 + pulse * ptTempCoupling))
+                       * vec3(0.90, 1.00, 1.04);
+        tint = mix(mix(outerSoul, midSoul, nearness), coreSoul, hotCore * 0.74);
+        targetBright = 0.84;
     } else if (lightKind == 2u) {
-        // Lava / magma: deep volcanic ember-orange -> molten amber-gold core
-        vec3 outerMagma = vec3(0.96, 0.16, 0.03);
-        vec3 midMagma   = vec3(1.00, 0.44, 0.08);
-        vec3 coreMagma  = vec3(1.00, 0.78, 0.28);
-        tint = mix(mix(outerMagma, midMagma, nearness), coreMagma, hotCore);
-        flicker = 0.975 + 0.025 * sin(vsWorld.gameTimeSec * 2.0 + dist * 0.38);
+        // Lava / magma: silicate melt Planckian blackbody (1240K crust -> 1700K molten -> 2520K core)
+        float w1 = sin(mod(timeSec * 1.32, TAU));
+        float w2 = sin(mod(timeSec * 2.14, TAU) + 0.8);
+        float pulse = (0.70 * w1 + 0.30 * w2) * 0.022 * flickerDamp;
+        flicker = 1.0 + pulse;
+
+        float kelvin = mix(mix(1240.0, 1700.0, nearness), 2520.0, hotCore)
+                     * tempScale * (1.0 + pulse * ptTempCoupling);
+        tint = sv_blockPlanckLinear(kelvin);
+        targetBright = 0.86;
     } else if (lightKind == 3u) {
-        // Sea lantern / beacon / conduit: crisp marine aqua -> pearl-white core
-        vec3 outerSea = vec3(0.26, 0.76, 0.90);
-        vec3 midSea   = vec3(0.60, 0.92, 0.98);
-        vec3 coreSea  = vec3(0.90, 0.99, 1.00);
-        tint = mix(mix(outerSea, midSea, nearness), coreSea, hotCore);
+        // Sea lantern / beacon / conduit: crisp marine aqua (490nm) -> clean pearl-cyan core
+        float w1 = sin(mod(timeSec * 1.55, TAU));
+        flicker = 1.0 + 0.004 * w1 * flickerDamp;
+
+        vec3 outerSea = vec3(0.18, 0.78, 0.92);
+        vec3 midSea   = vec3(0.46, 0.91, 0.98);
+        vec3 coreSea  = vec3(0.76, 0.97, 1.00);
+        tint = mix(mix(outerSea, midSea, nearness), coreSea, hotCore * 0.68);
+        targetBright = 0.90;
     } else if (lightKind == 4u) {
-        // Redstone torch / ore: rich ruby crimson -> warm scarlet core
-        vec3 outerRed = vec3(0.86, 0.05, 0.04);
-        vec3 midRed   = vec3(0.98, 0.16, 0.10);
-        vec3 coreRed  = vec3(1.00, 0.38, 0.24);
-        tint = mix(mix(outerRed, midRed, nearness), coreRed, hotCore);
-        flicker = 0.975 + 0.025 * sin(vsWorld.gameTimeSec * 6.0 + dist * 0.95);
+        // Redstone torch / ore: narrowband 640nm ruby-crimson -> warm incandescent scarlet core
+        float w1 = sin(mod(timeSec * 4.70, TAU));
+        float w2 = sin(mod(timeSec * 7.61, TAU) + 0.5);
+        flicker = 1.0 + (0.65 * w1 + 0.35 * w2) * 0.016 * flickerDamp;
+
+        vec3 outerRed = vec3(0.96, 0.07, 0.05);
+        vec3 midRed   = vec3(1.00, 0.18, 0.09);
+        vec3 coreRed  = vec3(1.00, 0.39, 0.20);
+        tint = mix(mix(outerRed, midRed, nearness), coreRed, hotCore * 0.72);
+        targetBright = 0.74;
     } else if (lightKind == 5u) {
-        // Glowstone / shroomlight / amber lantern: warm honey gold -> creamy soft-ivory core
-        vec3 outerAmber = vec3(0.98, 0.56, 0.16);
-        vec3 midAmber   = vec3(1.00, 0.76, 0.36);
-        vec3 coreAmber  = vec3(1.00, 0.94, 0.72);
-        tint = mix(mix(outerAmber, midAmber, nearness), coreAmber, hotCore);
+        // Glowstone / shroomlight / amber lantern: steady warm honey-mineral blackbody (2550K -> 4450K)
+        float kelvin = mix(mix(2550.0, 3380.0, nearness), 4450.0, hotCore * 0.76) * tempScale;
+        tint = sv_blockPlanckLinear(kelvin) * vec3(1.02, 0.97, 0.85);
+        targetBright = 0.90;
     } else if (lightKind == 6u) {
-        // End rod / amethyst: delicate lavender-violet -> crystalline white core
-        vec3 outerAmethyst = vec3(0.64, 0.52, 0.96);
-        vec3 midAmethyst   = vec3(0.86, 0.78, 1.00);
-        vec3 coreAmethyst  = vec3(0.98, 0.96, 1.00);
-        tint = mix(mix(outerAmethyst, midAmethyst, nearness), coreAmethyst, hotCore);
+        // End rod / amethyst: cool crystalline periwinkle-lavender -> starlight pearl core
+        vec3 outerAmethyst = vec3(0.56, 0.48, 0.98);
+        vec3 midAmethyst   = vec3(0.75, 0.69, 1.00);
+        vec3 coreAmethyst  = vec3(0.90, 0.88, 1.00);
+        tint = mix(mix(outerAmethyst, midAmethyst, nearness), coreAmethyst, hotCore * 0.68);
+        targetBright = 0.88;
     } else if (lightKind == 7u) {
-        // Sculk / deep-dark: deep ocean-teal -> soft bioluminescent sculk-cyan core
-        vec3 outerSculk = vec3(0.05, 0.34, 0.46);
-        vec3 midSculk   = vec3(0.16, 0.70, 0.82);
-        vec3 coreSculk  = vec3(0.48, 0.94, 1.00);
-        tint = mix(mix(outerSculk, midSculk, nearness), coreSculk, hotCore);
-        flicker = 0.93 + 0.07 * sin(vsWorld.gameTimeSec * 2.1);
+        // Sculk / deep dark: abyssal marine-teal bioluminescence with slow asymmetric organic breath
+        float phase = mod(timeSec * 1.88, TAU);
+        float breath01 = 0.5 + 0.5 * sin(phase);
+        float asymBreath = breath01 * sqrt(max(breath01, 1e-4));
+        flicker = 0.94 + 0.10 * asymBreath * flickerDamp;
+
+        vec3 outerSculk = vec3(0.03, 0.42, 0.48);
+        vec3 midSculk   = vec3(0.08, 0.72, 0.76);
+        vec3 coreSculk  = vec3(0.30, 0.92, 0.94);
+        tint = mix(mix(outerSculk, midSculk, nearness), coreSculk, hotCore * 0.72);
+        targetBright = 0.66;
     } else if (lightKind == 8u) {
-        // Copper / emerald / ender flame: verdigris-emerald -> bright mint core
-        vec3 outerVerdigris = vec3(0.09, 0.62, 0.38);
-        vec3 midVerdigris   = vec3(0.32, 0.88, 0.60);
-        vec3 coreVerdigris  = vec3(0.72, 1.00, 0.84);
-        tint = mix(mix(outerVerdigris, midVerdigris, nearness), coreVerdigris, hotCore);
+        // Copper bulb / emerald / ender flame: Cu(II) 525nm verdigris-emerald -> luminous jade-mint core
+        float w1 = sin(mod(timeSec * 2.05, TAU));
+        flicker = 1.0 + 0.007 * w1 * flickerDamp;
+
+        vec3 outerCopper = vec3(0.08, 0.74, 0.40);
+        vec3 midCopper   = vec3(0.24, 0.92, 0.58);
+        vec3 coreCopper  = vec3(0.56, 1.00, 0.76);
+        tint = mix(mix(outerCopper, midCopper, nearness), coreCopper, hotCore * 0.68);
+        targetBright = 0.84;
     } else if (lightKind == 9u) {
-        // Arcane magenta / enchanted violet: royal violet -> luminous lavender core
-        vec3 outerArcane = vec3(0.56, 0.16, 0.88);
-        vec3 midArcane   = vec3(0.80, 0.44, 0.98);
-        vec3 coreArcane  = vec3(0.96, 0.76, 1.00);
-        tint = mix(mix(outerArcane, midArcane, nearness), coreArcane, hotCore);
+        // Arcane magenta / enchanted violet: dual-band violet+crimson -> luminous royal-orchid core
+        float w1 = sin(mod(timeSec * 2.35, TAU));
+        float w2 = sin(mod(timeSec * 3.80, TAU) + 1.4);
+        flicker = 1.0 + (0.70 * w1 + 0.30 * w2) * 0.014 * flickerDamp;
+
+        vec3 outerArcane = vec3(0.62, 0.14, 0.96);
+        vec3 midArcane   = vec3(0.82, 0.34, 1.00);
+        vec3 coreArcane  = vec3(0.93, 0.60, 1.00);
+        tint = mix(mix(outerArcane, midArcane, nearness), coreArcane, hotCore * 0.70);
+        targetBright = 0.80;
     } else {
-        // Default (0u): Torch / lantern / campfire - cozy hearth-warm blackbody firelight
-        vec3 outerHearth = vec3(0.96, 0.32, 0.07);
-        vec3 midAmber    = vec3(1.02, 0.60, 0.20);
-        vec3 innerFlame  = vec3(1.02, 0.91, 0.68);
-        tint = mix(mix(outerHearth, midAmber, nearness), innerFlame, hotCore);
-        flicker = sv_flameFlicker(vsWorld.gameTimeSec, dist);
+        // Default (0u): Torch / lantern / campfire - Planckian hearth firelight (2080K -> 2720K -> 3820K)
+        float pulse = sv_blockFlamePulse(timeSec, stormDraft) * flickerDamp;
+        flicker = 1.0 + pulse;
+
+        float kelvin = mix(mix(2080.0, 2720.0, nearness), 3820.0, hotCore * 0.78)
+                     * tempScale * (1.0 + pulse * ptTempCoupling);
+        tint = sv_blockPlanckLinear(kelvin);
+        targetBright = 0.90;
     }
 
-    // Smooth non-clipping near-field falloff so walls beside torches retain crisp texture detail
-    float falloff = 1.0 / (1.0 + dist * dist * 0.095);
-    vec3 shaped = tint * (mix(0.94, 1.26, falloff) * flicker);
+    // Helmholtz-Kohlrausch perceptual brightness balance across all 10 spectral light kinds
+    float lum = vsLuminance(tint);
+    float peak = max(tint.r, max(tint.g, tint.b));
+    float hkBright = mix(lum, peak, 0.58);
+    tint *= targetBright / max(hkBright, 0.08);
+
+    // Underwater Beer-Lambert spectral attenuation (eyeInFluid == 1 only; excludes air=0 and lava=2)
+    float eif = float(vsWorld.eyeInFluid);
+    float eyeInWater = clamp(eif, 0.0, 1.0) * step(eif, 1.5);
+    if (eyeInWater > 0.5) {
+        float waterPath = min(d, 6.0);
+        vec3 beer = exp(-vec3(0.16, 0.032, 0.012) * waterPath);
+        tint = mix(tint, tint * beer, 0.62);
+    }
+
+    float coreBoost = baseCoreBoost - 0.10 * hiExcess + 0.05 * loDeficit;
+    float gain = mix(0.94, coreBoost, nearGainCurve) * flicker;
+    vec3 shaped = sv_blockSoftKnee(tint * gain, 1.04);
 
     if (dot(radiance, radiance) <= 1e-6) {
         radiance = shaped;
