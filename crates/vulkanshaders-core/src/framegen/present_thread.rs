@@ -264,8 +264,16 @@ impl PresentThread {
     pub fn wait_idle(&self) {
         let (lock, _wake_cv, idle_cv) = &*self.state;
         let mut guard = lock.lock();
+        let timeout = Duration::from_secs(2);
         while guard.pending_job.is_some() || guard.busy {
-            idle_cv.wait(&mut guard);
+            if idle_cv.wait_for(&mut guard, timeout).timed_out() {
+                tracing::warn!(
+                    busy = guard.busy,
+                    has_pending_job = guard.pending_job.is_some(),
+                    "present_thread wait_idle timed out after {:?}; present may be stalled",
+                    timeout,
+                );
+            }
         }
     }
 
