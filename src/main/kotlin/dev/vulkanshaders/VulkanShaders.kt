@@ -114,9 +114,12 @@ object VulkanShaders : ClientModInitializer {
         val prev = config
         val packId = newConfig.selectedPackId
         val frameGenChanged = prev.frameGenMode != newConfig.frameGenMode
-        val packOrTierChanged = prev.selectedPackId != packId ||
-            prev.renderTier != newConfig.renderTier || prev.enabled != newConfig.enabled ||
-            prev.enableSer != newConfig.enableSer
+        // Only a tier or pack change requires unzipping and recompiling shader modules.
+        val shaderPathChanged = prev.selectedPackId != packId || prev.renderTier != newConfig.renderTier
+        val pipelineChanged = shaderPathChanged || frameGenChanged ||
+            prev.enableSer != newConfig.enableSer ||
+            prev.denoiserMode != newConfig.denoiserMode || prev.upscalerMode != newConfig.upscalerMode ||
+            prev.hdrEnabled != newConfig.hdrEnabled || prev.enableOverlayPass != newConfig.enableOverlayPass
         val oldOverrides = prev.activePackOverrides(packId)
         val newOverrides = newConfig.activePackOverrides(packId)
         val specChanged = ShaderPackManager.activePack?.manifest?.settings?.any { setting ->
@@ -124,10 +127,16 @@ object VulkanShaders : ClientModInitializer {
                 (oldOverrides[setting.key] ?: setting.defaultValue) !=
                 (newOverrides[setting.key] ?: setting.defaultValue)
         } == true
-        if (frameGenChanged || packOrTierChanged) NativeCoreBridge.waitPresentIdle()
-        val pipelineStatus = NativeCoreBridge.configurePipeline(newConfig)
-        if (frameGenChanged && newConfig.frameGenMode != FrameGenMode.NONE && pipelineStatus < 0) {
-            return false
+        if (shaderPathChanged || frameGenChanged) NativeCoreBridge.waitPresentIdle()
+        if (pipelineChanged) {
+            val pipelineStatus = NativeCoreBridge.configurePipeline(newConfig)
+            if (frameGenChanged && newConfig.frameGenMode != FrameGenMode.NONE && pipelineStatus < 0) {
+                return false
+            }
+        } else if (prev.shadowResolution != newConfig.shadowResolution ||
+            prev.shadowDistanceChunks != newConfig.shadowDistanceChunks
+        ) {
+            NativeCoreBridge.setShadowConfig(newConfig.shadowResolution, newConfig.shadowDistanceChunks)
         }
         config = newConfig
         ConfigStore.save(newConfig)
@@ -136,7 +145,7 @@ object VulkanShaders : ClientModInitializer {
         if (prev.enableGpuProfiler != newConfig.enableGpuProfiler) {
             syncGpuProfilerState(newConfig.enableGpuProfiler, force = true)
         }
-        if (packOrTierChanged) {
+        if (shaderPathChanged) {
             GbufferTargetManager.invalidateForResize()
             GbufferPipelineRegistry.invalidateShaderSourceCache()
             ShaderPackManager.selectPack(newConfig.selectedPackId)
@@ -144,7 +153,7 @@ object VulkanShaders : ClientModInitializer {
             ShaderPackManager.syncActivePackSpecializationConstants()
             GbufferPipelineRegistry.invalidateShaderSourceCache()
         }
-        if (packOrTierChanged || oldOverrides != newOverrides || frameGenChanged ||
+        if (shaderPathChanged || oldOverrides != newOverrides || frameGenChanged ||
             prev.denoiserMode != newConfig.denoiserMode || prev.upscalerMode != newConfig.upscalerMode ||
             prev.upscalerQuality != newConfig.upscalerQuality || prev.shadowResolution != newConfig.shadowResolution ||
             prev.shadowDistanceChunks != newConfig.shadowDistanceChunks
