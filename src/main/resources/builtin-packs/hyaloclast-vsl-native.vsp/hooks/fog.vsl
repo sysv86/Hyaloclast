@@ -1,0 +1,14 @@
+#include <vulkanshaders/v1/common.vsl>
+
+// @hook(stage = "fog", priority = 100)
+// Keeps the built-in fog tint consistent after the shared froxel volume has been composited.
+void sv_fog(in float dist, in vec3 dir, inout vec3 scatter, inout vec3 transmittance) {
+    vec3 sunDir = dot(vsWorld.sunDir, vsWorld.sunDir) > 1e-6
+        ? normalize(vsWorld.sunDir)
+        : vec3(0.0, 1.0, 0.0);
+    float daylight = smoothstep(-0.10, 0.22, sunDir.y);
+    float sunWarmth = pow(clamp(dot(dir, sunDir) * 0.5 + 0.5, 0.0, 1.0), 2.8)
+        * daylight * (1.0 - vsWorld.rain * 0.75);
+    scatter *= mix(vec3(0.84, 0.87, 0.90), vec3(0.98, 0.90, 0.80), sunWarmth * 0.45);
+    transmittance = mix(vec3(1.0), transmittance, 0.98);
+}

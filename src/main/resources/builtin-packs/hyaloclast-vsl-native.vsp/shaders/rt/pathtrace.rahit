@@ -1,0 +1,112 @@
+#version 460
+#extension GL_EXT_ray_tracing : require
+
+#include <vulkanshaders/v1/common.vsl>
+
+#if VS_ACTIVE_RENDER_TIER >= 2
+
+layout(set = 1, binding = 1, std430) readonly buffer InstanceMetaSSBO {
+    VsInstanceMeta instances[];
+} uInstanceMeta;
+
+layout(set = 2, binding = 0) uniform sampler2D uBindlessTextures[];
+
+layout(location = 0) rayPayloadInEXT VsPathPayload payload;
+hitAttributeEXT vec2 barycentrics;
+
+// Matches `INSTANCE_FLAG_HAS_OMM` in `rt/omm.rs` and `ENTITY_FLAG_NO_SHADOW` in `rt/entities.rs`.
+const uint INSTANCE_FLAG_HAS_OMM = (1u << 9u);
+const uint ENTITY_FLAG_NO_SHADOW = (1u << 5u);
+
+void main() {
+    uint instIdx = gl_InstanceCustomIndexEXT;
+    if (instIdx >= uInstanceMeta.instances.length()) {
+        return;
+    }
+
+    VsInstanceMeta meta = uInstanceMeta.instances[instIdx];
+    if (meta.layerOrdinal == 0u || meta.layerOrdinal == 4u || vsPackU64(meta.vertexBda) == 0ul) {
+        return;
+    }
+
+    // Particles and weather curtains carry ENTITY_FLAG_NO_SHADOW so they do not cast opaque shadows.
+    if (meta.layerOrdinal == 3u
+        && (payload.flags & 2u) != 0u
+        && (meta.materialFlags & ENTITY_FLAG_NO_SHADOW) != 0u) {
+        ignoreIntersectionEXT;
+    }
+
+#ifdef VS_HAS_OPACITY_MICROMAP
+    // When hardware OMM is active on cutout terrain (`layerOrdinal == 1`), opaque and transparent
+    // microtriangles are resolved directly by the RT core without invoking any-hit. Only 4-state
+    // unknown boundary microtriangles reach this path, so perform a minimal alpha test and skip
+    // redundant water/glass classification.
+    if (meta.layerOrdinal == 1u && (meta.materialFlags & INSTANCE_FLAG_HAS_OMM) != 0u) {
+        uvec3 ommIdx = vsLoadTriangleIndices(meta, gl_PrimitiveID);
+        vec2 ommUv0, ommUv1, ommUv2;
+        vec4 ommC0, ommC1, ommC2;
+        uint ommMf0, ommMf1, ommMf2;
+        vsLoadVertexAlphaOnly(meta, ommIdx.x, ommUv0, ommC0, ommMf0);
+        vsLoadVertexAlphaOnly(meta, ommIdx.y, ommUv1, ommC1, ommMf1);
+        vsLoadVertexAlphaOnly(meta, ommIdx.z, ommUv2, ommC2, ommMf2);
+
+        float ommW0 = 1.0 - barycentrics.x - barycentrics.y;
+        vec2 ommHitUv = ommUv0 * ommW0 + ommUv1 * barycentrics.x + ommUv2 * barycentrics.y;
+        float ommVertAlpha = ommC0.a * ommW0 + ommC1.a * barycentrics.x + ommC2.a * barycentrics.y;
+        float ommAlpha = textureLod(
+            uBindlessTextures[nonuniformEXT(meta.bindlessAlbedoSlot)],
+            ommHitUv,
+            0.0
+        ).a * ommVertAlpha;
+        if (ommAlpha < 0.5) {
+            ignoreIntersectionEXT;
+        }
+        return;
+    }
+#endif
+
+    uvec3 idx = vsLoadTriangleIndices(meta, gl_PrimitiveID);
+    vec2 uv0, uv1, uv2;
+    vec4 c0, c1, c2;
+    uint mf0, mf1, mf2;
+    vsLoadVertexAlphaOnly(meta, idx.x, uv0, c0, mf0);
+    bool isWater = vsIsWater(mf0);
+    if (isWater) {
+        if ((payload.flags & (2u | 16u)) != 0u) ignoreIntersectionEXT;
+        return;
+    }
+    vsLoadVertexAlphaOnly(meta, idx.y, uv1, c1, mf1);
+    vsLoadVertexAlphaOnly(meta, idx.z, uv2, c2, mf2);
+
+    float w0 = 1.0 - barycentrics.x - barycentrics.y;
+    vec2 hitUv = uv0 * w0 + uv1 * barycentrics.x + uv2 * barycentrics.y;
+    vec4 hitColor = c0 * w0 + c1 * barycentrics.x + c2 * barycentrics.y;
+
+    vec4 texel = textureLod(uBindlessTextures[nonuniformEXT(meta.bindlessAlbedoSlot)], hitUv, 0.0) * hitColor;
+    float alpha = texel.a;
+    uint materialId = (mf0 >> 3u) & 15u;
+    bool isGlass = (materialId == 7u) || (meta.layerOrdinal == 2u && !isWater && alpha > 0.02 && alpha < 0.98);
+    if (isGlass) {
+        // Shadow rays (bit 1 = 2u) and skipGlass rays (bit 7 = 128u) pass through glass.
+        // Tinted sun shadow rays (bit 1 = 2u | bit 16 = 65536u) accumulate stained-glass transmission color.
+        if ((payload.flags & (2u | 65536u)) == (2u | 65536u) && alpha > 0.02) {
+            vec3 glassTint = pow(max(texel.rgb, vec3(0.0)), vec3(2.2)) * 1.18;
+            vec3 curTrans = vsPayloadGetRadiance(payload);
+            vsPayloadSetRadiance(payload, curTrans * mix(vec3(1.0), glassTint, clamp(alpha * 1.45, 0.25, 0.92)));
+        }
+        if ((payload.flags & (2u | 128u)) != 0u || alpha <= 0.02) {
+            ignoreIntersectionEXT;
+        }
+        return;
+    }
+
+    if (alpha < (meta.layerOrdinal == 5u ? 0.01 : 0.5)) {
+        ignoreIntersectionEXT;
+    }
+}
+
+#else
+
+void main() {}
+
+#endif

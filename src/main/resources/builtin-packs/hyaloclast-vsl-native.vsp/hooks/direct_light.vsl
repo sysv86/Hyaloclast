@@ -1,0 +1,48 @@
+#include <vulkanshaders/v1/common.vsl>
+
+// @hook(stage = "direct_light", priority = 100)
+// Sunlit Vanilla - Hue-faithful daylight with gentle warm sun highlights, clean cool sky fill,
+// and dual frost/foliage subsurface scattering.
+void sv_direct_light(in VsSurface s, in vec3 viewDir, in vec3 lightDir, inout vec3 brdf) {
+    float ndotlRaw = dot(s.normal, lightDir);
+    float ndotl = max(ndotlRaw, 0.0);
+
+    if (dot(brdf, brdf) <= 1e-8) {
+        vec3 Hsum = viewDir + lightDir;
+        vec3 H = dot(Hsum, Hsum) > 1e-8 ? normalize(Hsum) : s.normal;
+        float ndoth = max(dot(s.normal, H), 0.0);
+        float specPower = mix(88.0, 4.5, clamp(s.roughness * s.roughness, 0.02, 1.0));
+        float spec = pow(ndoth, specPower) * mix(s.f0 * 0.92, 1.0, s.metallic);
+        brdf = s.albedo * (ndotl * (1.0 - s.metallic) * (1.0 / 3.14159265)) + vec3(spec * ndotl);
+    }
+
+    // Crisp warm sunlight highlights vs cool azure sky-shadow fill
+    float sunWarmth = smoothstep(0.06, 0.72, ndotl);
+    vec3 daylightTint = mix(vec3(0.90, 0.96, 1.07), vec3(1.07, 1.01, 0.93), sunWarmth);
+    brdf *= daylightTint;
+
+    // Gentle cool sky-fill micro-bounce along the terminator for readable block contours
+    float terminatorBand = smoothstep(-0.36, 0.18, ndotlRaw) * (1.0 - smoothstep(0.18, 0.62, ndotlRaw));
+    vec3 skyFillBounce = vec3(0.82, 0.92, 1.08);
+    brdf += s.albedo * skyFillBounce * (terminatorBand * 0.030 * (1.0 - s.metallic));
+
+    if (s.subsurface > 0.01) {
+        // Dual frost/snow and foliage subsurface scattering
+        vec3 Hback = normalize(lightDir + s.normal * 0.34);
+        float backlit = pow(clamp(dot(viewDir, -Hback), 0.0, 1.0), 2.4) * 0.85;
+        float wrap = max(0.0, (ndotlRaw + 0.48) / 1.48) * 0.26;
+
+        float maxCh = max(max(s.albedo.r, s.albedo.g), s.albedo.b);
+        float minCh = min(min(s.albedo.r, s.albedo.g), s.albedo.b);
+        float chroma = (maxCh > 1e-4) ? ((maxCh - minCh) / maxCh) : 0.0;
+        float greenDominance = smoothstep(0.04, 0.28, s.albedo.g - max(s.albedo.r, s.albedo.b));
+        float frostMask = smoothstep(0.55, 0.85, maxCh) * (1.0 - smoothstep(0.06, 0.28, chroma));
+
+        vec3 frostScatter = vec3(0.88, 0.98, 1.14);
+        vec3 neutralScatter = mix(vec3(0.98, 1.00, 1.03), frostScatter, frostMask);
+        vec3 foliageScatter = vec3(1.14, 1.22, 0.72);
+        vec3 sssTint = mix(neutralScatter, foliageScatter, greenDominance);
+
+        brdf += s.albedo * sssTint * (backlit + wrap) * s.subsurface;
+    }
+}

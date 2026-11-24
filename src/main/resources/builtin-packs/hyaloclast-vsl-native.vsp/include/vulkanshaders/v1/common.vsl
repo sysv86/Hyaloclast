@@ -1,0 +1,481 @@
+#ifndef VULKANSHADERS_V1_COMMON_VSL
+#define VULKANSHADERS_V1_COMMON_VSL
+
+#if !defined(VS_ACTIVE_RENDER_TIER) || (VS_ACTIVE_RENDER_TIER >= 2)
+#extension GL_EXT_buffer_reference2 : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : enable
+#extension GL_EXT_shader_atomic_int64 : enable
+#endif
+#extension GL_EXT_scalar_block_layout : enable
+#extension GL_KHR_memory_scope_semantics : enable
+#extension GL_EXT_nonuniform_qualifier : enable
+
+struct VsVertexInput {
+    vec3 localPos;
+    vec4 color;
+    vec2 uv0;
+    ivec2 uv2;
+    vec3 normal;
+    vec4 tangent;
+    vec2 midUv;
+    uint materialFlags;
+};
+
+struct VsSurface {
+    vec3 albedo;
+    vec3 normal;
+    float roughness;
+    float metallic;
+    float emission;
+    float ao;
+    float subsurface;
+    float f0;
+};
+
+struct VsSkyState {
+    vec3 sunDir;
+    float rain;
+    float thunder;
+    float gameTimeSec;
+};
+
+struct VsPostContext {
+    float exposure;
+    float bloomIntensity;
+    uint toneMapMode;
+};
+
+// Exact 64-byte std430 layout matching InstanceMetaGpu in vulkanshaders-core:
+//   0..7   : vertexBda (uvec2)
+//   8..15  : indexBda (uvec2)
+//  16..19  : vertexStride (uint)
+//  20..23  : layerOrdinal (uint)
+//  24..27  : bindlessAlbedoSlot (uint)
+//  28..31  : bindlessNormalSlot (uint)
+//  32..35  : bindlessSpecularSlot (uint)
+//  36..39  : materialFlags (uint)
+//  40..47  : std430 vec4 alignment padding
+//  48..63  : regionOriginRel (vec4)
+struct VsInstanceMeta {
+    uvec2 vertexBda;
+    uvec2 indexBda;
+    uint vertexStride;
+    uint layerOrdinal;
+    uint bindlessAlbedoSlot;
+    uint bindlessNormalSlot;
+    uint bindlessSpecularSlot;
+    uint materialFlags;
+    vec4 regionOriginRel;
+};
+
+// Exact 112-byte std140 layout matching SharcConfigUniform in vulkanshaders-core::rt::sharc:
+struct SharcConfig {
+    uvec2 hashEntriesAddress;
+    uvec2 lockAddress;
+    uvec2 accumulationAddress;
+    uvec2 resolvedAddress;
+    vec4 cameraPosition;
+    vec4 cameraPositionPrev;
+    float sceneScale;
+    float radianceScale;
+    uint accumulationFrameNum;
+    uint staleFrameNumMax;
+    uint capacity;
+    uint frameIndex;
+    uint enableAntiFireflyFilter;
+    uint useLockBuffer;
+    uint debugMode;
+    uint updateDownsampleFactor;
+    uint hasCrumbling;
+    uint _padding;
+};
+
+// Compact 32-byte (8 VGPR) RT ray payload packed with fp16 radiance/roughness, octahedral normals, and unorm4x8 PBR.
+struct VsPathPayload {
+    uvec2 radianceRough;    // x: packHalf2x16(radiance.rg), y: packHalf2x16(vec2(radiance.b, hitRoughness))
+    float hitT;
+    uint hitNormalOct;      // Octahedral shading normal via packSnorm2x16
+    uint hitWaterNormalOct; // Octahedral geometric/water normal via packSnorm2x16
+    uint pbrPack0;          // packUnorm4x8(vec4(metallic, skyLight, blockLight, ao))
+    uint pbrPack1;          // packUnorm4x8(vec4(subsurface, f0, alpha, clamp(emission * 0.25, 0.0, 1.0)))
+    // bit 0 (1u): hit, bit 1 (2u): isShadowRay, bit 2 (4u): hitWater, bit 3 (8u): shadowMissed (lit),
+    // bit 4 (16u): skipWater, bit 5 (32u): crumbling, bit 6 (64u): hitGlass, bit 7 (128u): skipGlass,
+    // bits 8..15: bounce, bit 16 (65536u): tintedSunShadow, bit 17 (131072u): evalCloudsOnMiss
+    uint flags;
+};
+
+struct VsDecodedVertex {
+    vec3 pos;
+    vec4 color;
+    vec2 uv0;
+    ivec2 uv2;
+    vec3 normal;
+    vec4 tangent;
+    vec2 midUv;
+    uint materialFlags;
+};
+
+float vsLuminance(vec3 c) {
+    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+vec3 vsSafeNormalize(vec3 v, vec3 fallback) {
+    float len2 = dot(v, v);
+    return len2 > 1e-8 ? v * inversesqrt(len2) : fallback;
+}
+
+// --- Compact VsPathPayload Pack / Unpack Helpers ---
+
+uint vsPackOctNormal(vec3 n) {
+    vec3 nn = vsSafeNormalize(n, vec3(0.0, 1.0, 0.0));
+    float invL1 = 1.0 / max(abs(nn.x) + abs(nn.y) + abs(nn.z), 1e-6);
+    vec2 oct = nn.xy * invL1;
+    if (nn.z < 0.0) {
+        vec2 signNotZero = vec2(oct.x >= 0.0 ? 1.0 : -1.0, oct.y >= 0.0 ? 1.0 : -1.0);
+        oct = (1.0 - abs(oct.yx)) * signNotZero;
+    }
+    return packSnorm2x16(clamp(oct, vec2(-1.0), vec2(1.0)));
+}
+
+vec3 vsUnpackOctNormal(uint packed) {
+    vec2 oct = unpackSnorm2x16(packed);
+    vec3 n = vec3(oct.x, oct.y, 1.0 - abs(oct.x) - abs(oct.y));
+    if (n.z < 0.0) {
+        vec2 signNotZero = vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+        n.xy = (1.0 - abs(n.yx)) * signNotZero;
+    }
+    return vsSafeNormalize(n, vec3(0.0, 1.0, 0.0));
+}
+
+void vsPayloadSetRadianceRough(inout VsPathPayload p, vec3 rad, float rough) {
+    vec3 clamped = clamp(rad, vec3(0.0), vec3(65000.0));
+    p.radianceRough.x = packHalf2x16(clamped.rg);
+    p.radianceRough.y = packHalf2x16(vec2(clamped.b, clamp(rough, 0.0, 1.0)));
+}
+
+void vsPayloadSetRadiance(inout VsPathPayload p, vec3 rad) {
+    vec2 bRough = unpackHalf2x16(p.radianceRough.y);
+    vsPayloadSetRadianceRough(p, rad, bRough.y);
+}
+
+vec3 vsPayloadGetRadiance(VsPathPayload p) {
+    vec2 rg = unpackHalf2x16(p.radianceRough.x);
+    vec2 bRough = unpackHalf2x16(p.radianceRough.y);
+    return vec3(rg, bRough.x);
+}
+
+float vsPayloadGetRoughness(VsPathPayload p) {
+    return unpackHalf2x16(p.radianceRough.y).y;
+}
+
+void vsPayloadSetNormal(inout VsPathPayload p, vec3 n) {
+    p.hitNormalOct = vsPackOctNormal(n);
+}
+
+vec3 vsPayloadGetNormal(VsPathPayload p) {
+    return vsUnpackOctNormal(p.hitNormalOct);
+}
+
+void vsPayloadSetWaterNormal(inout VsPathPayload p, vec3 n) {
+    p.hitWaterNormalOct = vsPackOctNormal(n);
+}
+
+vec3 vsPayloadGetWaterNormal(VsPathPayload p) {
+    return vsUnpackOctNormal(p.hitWaterNormalOct);
+}
+
+void vsPayloadSetPbr0(inout VsPathPayload p, float metallic, float skyLight, float blockLight, float ao) {
+    p.pbrPack0 = packUnorm4x8(clamp(vec4(metallic, skyLight, blockLight, ao), vec4(0.0), vec4(1.0)));
+}
+
+void vsPayloadSetPbr1(inout VsPathPayload p, float subsurface, float f0, float alpha, float emission) {
+    p.pbrPack1 = packUnorm4x8(clamp(vec4(subsurface, f0, alpha, emission * 0.25), vec4(0.0), vec4(1.0)));
+}
+
+float vsPayloadGetMetallic(VsPathPayload p) {
+    return unpackUnorm4x8(p.pbrPack0).x;
+}
+
+float vsPayloadGetSkyLight(VsPathPayload p) {
+    return unpackUnorm4x8(p.pbrPack0).y;
+}
+
+float vsPayloadGetBlockLight(VsPathPayload p) {
+    return unpackUnorm4x8(p.pbrPack0).z;
+}
+
+float vsPayloadGetAo(VsPathPayload p) {
+    return unpackUnorm4x8(p.pbrPack0).w;
+}
+
+float vsPayloadGetSubsurface(VsPathPayload p) {
+    return unpackUnorm4x8(p.pbrPack1).x;
+}
+
+float vsPayloadGetF0(VsPathPayload p) {
+    return unpackUnorm4x8(p.pbrPack1).y;
+}
+
+float vsPayloadGetAlpha(VsPathPayload p) {
+    return unpackUnorm4x8(p.pbrPack1).z;
+}
+
+float vsPayloadGetEmission(VsPathPayload p) {
+    return unpackUnorm4x8(p.pbrPack1).w * 4.0;
+}
+
+VsSurface vsPayloadToSurface(VsPathPayload p) {
+    vec2 rg = unpackHalf2x16(p.radianceRough.x);
+    vec2 bRough = unpackHalf2x16(p.radianceRough.y);
+    vec4 p0 = unpackUnorm4x8(p.pbrPack0);
+    vec4 p1 = unpackUnorm4x8(p.pbrPack1);
+    return VsSurface(
+        vec3(rg, bRough.x),
+        vsUnpackOctNormal(p.hitNormalOct),
+        clamp(bRough.y, 0.025, 1.0),
+        p0.x,
+        p1.w * 4.0,
+        p0.w,
+        p1.x,
+        p1.y
+    );
+}
+
+// 4+4-bit nibble packing helpers for R8G8B8A8_UNORM G-Buffer RT2 (RES_GBUFFER_MATERIAL)
+float vsPackNibble2(float hi, float lo) {
+    float h = floor(clamp(hi, 0.0, 1.0) * 15.0 + 0.5);
+    float l = floor(clamp(lo, 0.0, 1.0) * 15.0 + 0.5);
+    return (h * 16.0 + l) / 255.0;
+}
+
+float vsUnpackNibbleHi(float v) {
+    float b = floor(clamp(v, 0.0, 1.0) * 255.0 + 0.5);
+    return b >= 0.0 ? floor(b / 16.0) / 15.0 : 0.0;
+}
+
+float vsUnpackNibbleLo(float v) {
+    float b = floor(clamp(v, 0.0, 1.0) * 255.0 + 0.5);
+    return mod(b, 16.0) / 15.0;
+}
+
+#if !defined(VS_ACTIVE_RENDER_TIER) || (VS_ACTIVE_RENDER_TIER >= 2)
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer VsRawUintBuf {
+    uint data[];
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer VsIndexBuf {
+    uint indices[];
+};
+
+uint64_t vsPackU64(uvec2 pair) {
+    return uint64_t(pair.x) | (uint64_t(pair.y) << 32ul);
+}
+
+#endif
+
+bool vsIsWater(uint materialFlags) {
+    uint materialId = (materialFlags >> 3u) & 15u;
+    return materialId == 8u && (materialFlags & 2u) != 0u;
+}
+
+#if !defined(VS_ACTIVE_RENDER_TIER) || (VS_ACTIVE_RENDER_TIER >= 2)
+
+uvec3 vsLoadTriangleIndices(VsInstanceMeta meta, uint primId) {
+    uint64_t idxAddr = vsPackU64(meta.indexBda);
+    if (idxAddr != 0ul) {
+        VsIndexBuf ib = VsIndexBuf(idxAddr);
+        uint base = primId * 3u;
+        return uvec3(ib.indices[base], ib.indices[base + 1u], ib.indices[base + 2u]);
+    }
+    uint quadIdx = primId >> 1u;
+    uint b = quadIdx * 4u;
+    if ((primId & 1u) == 0u) {
+        return uvec3(b, b + 1u, b + 2u);
+    }
+    return uvec3(b + 2u, b + 3u, b);
+}
+
+// Minimal BDA vertex read for alpha-test / any-hit shaders (uv0, color, materialFlags only).
+void vsLoadVertexAlphaOnly(
+    VsInstanceMeta meta,
+    uint vertIdx,
+    out vec2 uv0,
+    out vec4 color,
+    out uint materialFlags
+) {
+    uv0 = vec2(0.0);
+    color = vec4(1.0);
+    // Entity (3) and crumbling (5) instances store EntityFlags in meta.materialFlags, not terrain MaterialFlags.
+    materialFlags = (meta.layerOrdinal == 3u || meta.layerOrdinal == 5u) ? 0u : meta.materialFlags;
+    uint64_t baseAddr = vsPackU64(meta.vertexBda);
+    if (baseAddr == 0ul) {
+        return;
+    }
+    uint stride = max(meta.vertexStride, 28u);
+    VsRawUintBuf vb = VsRawUintBuf(baseAddr + uint64_t(vertIdx) * uint64_t(stride));
+    color = unpackUnorm4x8(vb.data[3]);
+    uv0 = vec2(uintBitsToFloat(vb.data[4]), uintBitsToFloat(vb.data[5]));
+    if (meta.layerOrdinal == 4u) {
+        uint mf = (vb.data[6] >> 16u) & 0x7Fu;
+        if (mf != 0u) materialFlags = mf;
+    } else if (meta.layerOrdinal != 3u && meta.layerOrdinal != 5u && stride >= 40u) {
+        uint vf = (vb.data[7] >> 24u) & 0x7Fu;
+        if (vf != 0u) materialFlags = vf;
+    }
+}
+
+VsDecodedVertex vsLoadVertex(VsInstanceMeta meta, uint vertIdx) {
+    VsDecodedVertex v;
+    v.pos = vec3(0.0);
+    v.color = vec4(1.0);
+    v.uv0 = vec2(0.0);
+    v.uv2 = ivec2(0, 240);
+    v.normal = vec3(0.0, 1.0, 0.0);
+    v.tangent = vec4(1.0, 0.0, 0.0, 1.0);
+    v.midUv = vec2(0.0);
+    // Entity (3) and crumbling (5) instances store EntityFlags in meta.materialFlags, not terrain MaterialFlags.
+    v.materialFlags = (meta.layerOrdinal == 3u || meta.layerOrdinal == 5u) ? 0u : meta.materialFlags;
+
+    uint64_t baseAddr = vsPackU64(meta.vertexBda);
+    if (baseAddr == 0ul) {
+        return v;
+    }
+    uint stride = max(meta.vertexStride, 28u);
+    VsRawUintBuf vb = VsRawUintBuf(baseAddr + uint64_t(vertIdx) * uint64_t(stride));
+
+    v.pos = vec3(
+        uintBitsToFloat(vb.data[0]),
+        uintBitsToFloat(vb.data[1]),
+        uintBitsToFloat(vb.data[2])
+    );
+    v.color = unpackUnorm4x8(vb.data[3]);
+    v.uv0 = vec2(uintBitsToFloat(vb.data[4]), uintBitsToFloat(vb.data[5]));
+
+    if (meta.layerOrdinal == 3u || meta.layerOrdinal == 5u) {
+        bool hasNormal = stride >= 36u;
+        uint uv2Packed = vb.data[hasNormal ? 7u : 6u];
+        v.uv2 = ivec2(
+            bitfieldExtract(int(uv2Packed), 0, 16),
+            bitfieldExtract(int(uv2Packed), 16, 16)
+        );
+        if (hasNormal) {
+            vec3 n = unpackSnorm4x8(vb.data[(stride >> 2u) - 1u]).xyz;
+            if (dot(n, n) > 1e-6) v.normal = normalize(n);
+        }
+    } else if (meta.layerOrdinal == 4u) {
+        // Distant Horizons LOD vertex: vb.data[6] packs
+        // blockLightByte | (skyLightByte << 8) | (materialFlags << 16) | (dhNormalIdx << 24).
+        uint dhPacked = vb.data[6];
+        uint blockLightByte = dhPacked & 0xFFu;
+        uint skyLightByte = (dhPacked >> 8u) & 0xFFu;
+        uint matFlags = (dhPacked >> 16u) & 0x7Fu;
+        uint dhNormalIdx = (dhPacked >> 24u) & 0x07u;
+        v.uv2 = ivec2(int(blockLightByte), int(skyLightByte));
+        if (matFlags != 0u) {
+            v.materialFlags = matFlags;
+        }
+        const vec3 DH_NORMALS[6] = vec3[6](
+            vec3( 0.0,  1.0,  0.0),
+            vec3( 0.0, -1.0,  0.0),
+            vec3( 0.0,  0.0, -1.0),
+            vec3( 0.0,  0.0,  1.0),
+            vec3(-1.0,  0.0,  0.0),
+            vec3( 1.0,  0.0,  0.0)
+        );
+        v.normal = DH_NORMALS[min(dhNormalIdx, 5u)];
+    } else if (stride >= 40u) {
+        uint uv2Packed = vb.data[6];
+        v.uv2 = ivec2(
+            bitfieldExtract(int(uv2Packed), 0, 16),
+            bitfieldExtract(int(uv2Packed), 16, 16)
+        );
+        uint normPacked = vb.data[7];
+        vec4 n4 = unpackSnorm4x8(normPacked);
+        v.normal = dot(n4.xyz, n4.xyz) > 1e-6 ? normalize(n4.xyz) : vec3(0.0, 1.0, 0.0);
+        uint vertexFlags = (normPacked >> 24u) & 0x7Fu;
+        if (vertexFlags != 0u) v.materialFlags = vertexFlags;
+        v.tangent = unpackSnorm4x8(vb.data[8]);
+        v.midUv = unpackHalf2x16(vb.data[9]);
+    } else if (stride >= 36u) {
+        uint uv2Packed = vb.data[7];
+        v.uv2 = ivec2(
+            bitfieldExtract(int(uv2Packed), 0, 16),
+            bitfieldExtract(int(uv2Packed), 16, 16)
+        );
+        vec4 n4 = unpackSnorm4x8(vb.data[8]);
+        v.normal = dot(n4.xyz, n4.xyz) > 1e-6 ? normalize(n4.xyz) : vec3(0.0, 1.0, 0.0);
+    }
+    return v;
+}
+#endif
+
+// Exact 544-byte std140 layout matching WorldStateCollector.kt and vulkanshaders-core WorldUboData:
+//   0..63   : curViewProj (mat4)
+//  64..127  : prevViewProj (mat4)
+// 128..191  : invProj (mat4)
+// 192..255  : invView (mat4)
+// 256..271  : cameraPosFrac (vec3) + frameIndex (int)
+// 272..287  : cameraDelta (vec3) + gameTimeSec (float)
+// 288..303  : sunDir (vec3) + rain (float)
+// 304..319  : thunder (float) + eyeInFluid (int) + depthFar (float) + heldLight (float)
+// 320..511  : packParams[12] (vec4[12] = 48 floats)
+//             packParams[10]: (biomeTemp, biomeHumidity, dimensionId, biomeCloudCover)
+//             packParams[11]: (biomeFogR, biomeFogG, biomeFogB, biomeAtmosphereDensity)
+// 512..527  : camera-relative heldLightPosition (vec4)
+// 528..535  : packParamsBda (uvec2 little-endian view of the 64-bit VSL parameter BDA)
+// 536..543  : std140 padding (the block is rounded to a 16-byte multiple)
+layout(std140, set = 0, binding = 0) uniform WorldUBO {
+    mat4 curViewProj;
+    mat4 prevViewProj;
+    mat4 invProj;
+    mat4 invView;
+    vec3 cameraPosFrac;
+    int frameIndex;
+    vec3 cameraDelta;
+    float gameTimeSec;
+    vec3 sunDir;
+    float rain;
+    float thunder;
+    int eyeInFluid;
+    float depthFar;
+    float heldLight;
+    vec4 packParams[12];
+    vec4 heldLightPosition;
+    uvec2 packParamsBda;
+    uvec2 packParamsBdaPad;
+} vsWorld;
+
+// Smoothly-blended biome & dimension telemetry packed by WorldStateCollector.kt
+// into reserved tail slots packParams[10..11] (zero UBO ABI change).
+bool vsHasBiomeTelemetry() {
+    return vsWorld.packParams[11].w > 0.001;
+}
+
+float vsBiomeTemperature() {
+    return vsHasBiomeTelemetry() ? clamp(vsWorld.packParams[10].x, 0.0, 1.0) : 0.5;
+}
+
+float vsBiomeHumidity() {
+    return vsHasBiomeTelemetry() ? clamp(vsWorld.packParams[10].y, 0.0, 1.0) : 0.5;
+}
+
+// 0 = Overworld, 1 = Nether, 2 = The End
+int vsDimensionId() {
+    return vsHasBiomeTelemetry() ? int(vsWorld.packParams[10].z + 0.5) : 0;
+}
+
+float vsBiomeCloudScale() {
+    return vsHasBiomeTelemetry() ? clamp(vsWorld.packParams[10].w, 0.0, 1.5) : 1.0;
+}
+
+vec3 vsBiomeFogTint() {
+    return vsHasBiomeTelemetry()
+        ? clamp(vsWorld.packParams[11].rgb, vec3(0.01), vec3(2.0))
+        : vec3(0.46, 0.64, 0.90);
+}
+
+float vsBiomeFogDensityScale() {
+    return vsHasBiomeTelemetry() ? clamp(vsWorld.packParams[11].w, 0.25, 3.0) : 1.0;
+}
+
+#endif

@@ -1,0 +1,115 @@
+#include <vulkanshaders/v1/common.vsl>
+
+// @hook(stage = "surface", priority = 100)
+// Sunlit Vanilla - Grounded natural vanilla-faithful PBR calibration across all 15 material IDs.
+// Preserves authentic Minecraft block identity without plastic glare while giving metals, crystals,
+// foliage, snow/ice, ceramics, sculk, and emissives clean physical response.
+void sv_surface(inout VsSurface s, in uint flags, in uint bounce) {
+    uint materialId = (flags >> 3u) & 15u;
+
+    if (materialId == 1u) {
+        // STONE / DEEPSLATE / BRICKS: matte mineral with subtle micro-sheen, never wet plastic
+        s.roughness = clamp(s.roughness, 0.72, 0.88);
+        s.f0 = min(s.f0, 0.038);
+    } else if (materialId == 2u) {
+        // DIRT / GRASS BLOCK / CLAY: dry porous earth
+        s.roughness = clamp(s.roughness, 0.86, 0.95);
+        s.f0 = min(s.f0, 0.028);
+    } else if (materialId == 3u) {
+        // WOOD / PLANKS / LOGS: natural warm satin timber
+        s.roughness = clamp(s.roughness, 0.68, 0.84);
+        s.f0 = min(s.f0, 0.034);
+    } else if (materialId == 4u) {
+        // FOLIAGE / LEAVES / CROPS / FLOWERS: luminous botanical translucency without waxy glare
+        s.subsurface = max(s.subsurface, 0.72);
+        s.roughness = clamp(s.roughness, 0.62, 0.78);
+        s.f0 = min(s.f0, 0.030);
+    } else if (materialId == 5u) {
+        // SAND / GRAVEL: temper bright vanilla sand albedo while keeping warm sunlit grain
+        s.albedo *= 0.84;
+        s.roughness = clamp(s.roughness, 0.80, 0.92);
+        s.f0 = min(s.f0, 0.036);
+    } else if (materialId == 6u) {
+        // METAL (iron, gold, copper, netherite, anvil, chain): crisp brushed conductor for RT reflections
+        if (s.metallic < 0.1) {
+            s.metallic = 0.88;
+            s.roughness = clamp(s.roughness * 0.30, 0.09, 0.22);
+            s.f0 = max(s.f0, 0.88);
+        }
+    } else if (materialId == 7u) {
+        // GLASS / ICE: clear dielectric crystal with luminous glacial translucency on ice
+        float iceLuma = dot(s.albedo, vec3(0.2126, 0.7152, 0.0722));
+        float blueBias = smoothstep(0.02, 0.16, s.albedo.b - s.albedo.r);
+        s.roughness = min(s.roughness, mix(0.04, 0.12, blueBias * iceLuma));
+        s.f0 = max(s.f0, 0.048);
+        s.subsurface = max(s.subsurface, blueBias * 0.42);
+    } else if (materialId == 8u) {
+        // WATER / FLUID FALLBACK: mirror-clean dielectric surface
+        s.roughness = min(s.roughness, 0.045);
+        s.f0 = 0.02;
+    } else if (materialId == 9u) {
+        // LAVA: incandescent molten magma with crisp dark basaltic crust contrast
+        float luma = dot(s.albedo, vec3(0.2126, 0.7152, 0.0722));
+        s.roughness = mix(0.78, 0.30, smoothstep(0.15, 0.75, luma));
+        s.emission = max(s.emission, mix(0.50, 2.45, smoothstep(0.12, 0.72, luma)));
+    } else if (materialId == 10u) {
+        // MISCELLANEOUS OPAQUE / REDSTONE COMPONENTS: grounded matte finish
+        s.roughness = clamp(s.roughness, 0.70, 0.88);
+        s.f0 = min(s.f0, 0.038);
+    } else if (materialId == 11u) {
+        // WOOL / CARPET: soft matte woven textile
+        s.roughness = clamp(s.roughness, 0.90, 0.98);
+        s.f0 = min(s.f0, 0.022);
+    } else if (materialId == 12u) {
+        // GEM / CRYSTAL (diamond, emerald, amethyst, quartz, prismarine): luminous dielectric crystal
+        if (s.metallic < 0.1) {
+            s.f0 = clamp(s.f0, 0.085, 0.16);
+            s.roughness = clamp(s.roughness, 0.06, 0.18);
+            s.subsurface = max(s.subsurface, 0.22);
+        }
+    } else if (materialId == 13u) {
+        // SNOW / HONEY / WAX / ORGANIC: soft subsurface scattering with crisp powdery sheen
+        if (s.metallic < 0.1) {
+            s.subsurface = max(s.subsurface, 0.42);
+            s.roughness = clamp(s.roughness, 0.48, 0.74);
+            s.f0 = clamp(s.f0, 0.032, 0.044);
+        }
+    } else if (materialId == 14u) {
+        // POLISHED STONE / GLAZED TERRACOTTA / CERAMIC: refined satin-gloss mineral glaze
+        if (s.metallic < 0.1) {
+            s.roughness = clamp(s.roughness, 0.12, 0.28);
+            s.f0 = clamp(s.f0, 0.055, 0.075);
+        }
+    } else if (materialId == 15u) {
+        // SCULK / MAGICAL / ARCANE: dark satin arcane base ready for subtle pulsing veins
+        if (s.metallic < 0.1) {
+            s.roughness = clamp(s.roughness, 0.20, 0.38);
+            s.f0 = max(s.f0, 0.062);
+        }
+    }
+
+    // Flag-level overrides
+    if ((flags & 1u) != 0u) {
+        s.subsurface = max(s.subsurface, 0.56);
+        s.roughness = clamp(s.roughness, 0.62, 0.78);
+    }
+    if ((flags & 2u) != 0u && materialId != 9u) {
+        // Water fluid surface
+        s.roughness = min(s.roughness, 0.045);
+        s.f0 = 0.02;
+    }
+    if ((flags & 4u) != 0u && materialId != 9u) {
+        // Luminous emissive blocks for vibrant RT bounce GI while keeping dark lantern frames crisp
+        float texLuma = dot(s.albedo, vec3(0.2126, 0.7152, 0.0722));
+        float emitterMask = smoothstep(0.08, 0.54, texLuma);
+        s.emission = max(s.emission, mix(0.22, 2.15, emitterMask));
+        if (materialId == 15u) {
+            float sculkPulse = 0.88 + 0.12 * sin(vsWorld.gameTimeSec * 2.1);
+            s.emission *= sculkPulse;
+        } else {
+            s.roughness = max(s.roughness, 0.44);
+        }
+    }
+
+    s.roughness = max(s.roughness, 0.02);
+}

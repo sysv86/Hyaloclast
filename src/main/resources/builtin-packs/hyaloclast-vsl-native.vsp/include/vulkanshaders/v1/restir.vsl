@@ -1,0 +1,212 @@
+#ifndef VULKANSHADERS_V1_RESTIR_VSL
+#define VULKANSHADERS_V1_RESTIR_VSL
+
+#include <vulkanshaders/v1/common.vsl>
+
+// Exact 48-byte std430 layout matching GpuEmissiveLight in crates/vulkanshaders-core/src/rt/lights.rs
+struct VsEmissiveLight {
+    vec4 posRadius;      // xyz = camera-relative position, w = attenuation radius
+    vec4 colorIntensity; // rgb = linear color, a = luminous intensity
+    vec4 normalFlags;    // xyz = emitter normal (0 for omnidirectional point light), w = uintBitsToFloat(flags)
+};
+
+// Exact 32-byte std430 layout matching GpuRestirReservoir in crates/vulkanshaders-core/src/rt/lights.rs
+struct VsRestirReservoir {
+    uint selectedLight;
+    float weightSum;
+    float targetPdf;
+    float M;
+    vec3 hitPos;
+    uint ageFlags;
+};
+
+// Bit flags in VsEmissiveLight.normalFlags.w:
+//   bit 0 (1u): held light (position is already in camera-relative world space)
+//   bit 1 (2u): thin non-cube emitter (torch, wall torch, candle, lantern, end rod, fire)
+//   bit 2 (4u): organic flame flicker enabled (torches, campfires, fire, candles, lava)
+//   bit 3 (8u): offhand held light
+//   bit 4 (16u): standing torch, with the flame directly above its narrow stem
+uint vsLightFlags(VsEmissiveLight light) {
+    return floatBitsToUint(light.normalFlags.w);
+}
+
+bool vsIsHeldLight(VsEmissiveLight light) {
+    return (vsLightFlags(light) & 1u) != 0u;
+}
+
+bool vsIsThinEmitter(VsEmissiveLight light) {
+    return (vsLightFlags(light) & 2u) != 0u;
+}
+
+bool vsHasFlameFlicker(VsEmissiveLight light) {
+    return (vsLightFlags(light) & 4u) != 0u;
+}
+
+// Smooth continuous phase so moving dynamic lights never snap at block boundaries.
+float vsFlameFlicker(vec3 seedPos, float timeSec) {
+    float phase = dot(seedPos, vec3(1.73, 2.91, 4.17));
+    float w1 = sin(timeSec * 5.2 + phase);
+    float w2 = sin(timeSec * 11.7 + phase * 1.9) * 0.45;
+    float w3 = cos(timeSec * 17.3 - phase * 0.7) * 0.20;
+    return clamp(1.0 + (w1 + w2 + w3) * 0.042, 0.90, 1.09);
+}
+
+float vsEmissiveShadowRange(VsEmissiveLight light, vec3 shadowOrigin, out vec3 shadowDir) {
+    vec3 delta = light.posRadius.xyz - shadowOrigin;
+    float dist = max(length(delta), 0.001);
+    shadowDir = delta / dist;
+    if (vsIsHeldLight(light)) {
+        // Leave clearance around the player's hand/torch so close walls never self-shadow.
+        return max(dist - 0.18, 0.0);
+    }
+    if ((vsLightFlags(light) & 16u) != 0u) {
+        // Stop the ray where it enters the torch stem's narrow footprint.
+        vec3 direction = abs(shadowDir);
+        float throughStem = min(
+            0.085 / max(max(direction.x, direction.z), 0.001),
+            0.76 / max(direction.y, 0.001)
+        );
+        return dist - max(throughStem, 0.14);
+    }
+    if (vsIsThinEmitter(light)) {
+        // Torches, candles, lanterns, and end rods occupy a narrow core, not a full 1x1x1 cube.
+        // Tight clearance prevents light leaks through adjacent walls/slabs while avoiding self-hit.
+        return dist - 0.14;
+    }
+    vec3 absDir = abs(shadowDir);
+    // Full-block opaque emitters (glowstone, sea lantern, shroomlight, redstone lamp):
+    // stop at the emitter cube face so the lamp does not shadow itself.
+    return dist - 0.5 / max(max(absDir.x, max(absDir.y, absDir.z)), 0.001) - 0.012;
+}
+
+float vsEmissiveAttenuation(float distSq, float radius) {
+    float r = clamp(radius, 0.5, 48.0);
+    float ratioSq = distSq / (r * r);
+    float window = clamp(1.0 - ratioSq * ratioSq, 0.0, 1.0);
+    // Physical sphere-light softening prevents near-wall blowout while preserving far tunnel falloff.
+    return (window * window) / (distSq + 0.72);
+}
+
+void vsRestirInit(out VsRestirReservoir r) {
+    r.selectedLight = 0xFFFFFFFFu;
+    r.weightSum = 0.0;
+    r.targetPdf = 0.0;
+    r.M = 0.0;
+    r.hitPos = vec3(0.0);
+    r.ageFlags = 0u;
+}
+
+bool vsRestirUpdate(
+    inout VsRestirReservoir r,
+    uint lightIdx,
+    float targetPdf,
+    float sourcePdf,
+    float rnd
+) {
+    float risWeight = max(targetPdf, 0.0) / max(sourcePdf, 1.0e-6);
+    r.weightSum += risWeight;
+    r.M += 1.0;
+    if (r.weightSum > 1.0e-7 && rnd * r.weightSum < risWeight) {
+        r.selectedLight = lightIdx;
+        r.targetPdf = targetPdf;
+        return true;
+    }
+    return false;
+}
+
+void vsRestirCombine(
+    inout VsRestirReservoir dst,
+    VsRestirReservoir temporal,
+    float temporalTargetPdf,
+    float maxHistoryM,
+    float rnd
+) {
+    if (temporal.selectedLight == 0xFFFFFFFFu || temporal.M <= 0.0 || temporalTargetPdf <= 0.0) {
+        return;
+    }
+    float clampedM = min(temporal.M, maxHistoryM);
+    float avgW = temporal.weightSum / max(temporal.targetPdf * temporal.M, 1.0e-6);
+    float w = temporalTargetPdf * clamp(avgW, 0.0, 8.0) * clampedM;
+    dst.weightSum += w;
+    dst.M += clampedM;
+    if (dst.weightSum > 1.0e-7 && rnd * dst.weightSum < w) {
+        dst.selectedLight = temporal.selectedLight;
+        dst.targetPdf = temporalTargetPdf;
+    }
+}
+
+float vsRestirFinalizeWeight(VsRestirReservoir r) {
+    if (r.selectedLight == 0xFFFFFFFFu || r.targetPdf <= 1.0e-6 || r.M <= 0.0) {
+        return 0.0;
+    }
+    return clamp(r.weightSum / max(r.targetPdf * r.M, 1.0e-6), 0.0, 4.0);
+}
+
+// Surface-aware target PDF including diffuse, roughness-weighted GGX specular, and foliage SSS.
+float vsEvaluateEmissiveTargetPdf(
+    VsEmissiveLight light,
+    vec3 surfPosRel,
+    VsSurface s,
+    vec3 viewDir,
+    out vec3 outToLight,
+    out float outDist,
+    out vec3 outUnshadowedContrib
+) {
+    vec3 delta = light.posRadius.xyz - surfPosRel;
+    float distSq = dot(delta, delta);
+    float radius = clamp(light.posRadius.w, 0.5, 48.0);
+    if (distSq >= radius * radius) {
+        outDist = 0.0;
+        outToLight = vec3(0.0, 1.0, 0.0);
+        outUnshadowedContrib = vec3(0.0);
+        return 0.0;
+    }
+    outDist = sqrt(max(distSq, 1.0e-4));
+    outToLight = delta / outDist;
+    float ndotlRaw = dot(s.normal, outToLight);
+    float ndotl = max(ndotlRaw, 0.0);
+    float sssWrap = (s.subsurface > 0.01) ? max(0.0, (ndotlRaw + 0.45) / 1.45) * s.subsurface * 0.20 : 0.0;
+    if (ndotl <= 0.0 && sssWrap <= 0.0) {
+        outUnshadowedContrib = vec3(0.0);
+        return 0.0;
+    }
+    float atten = vsEmissiveAttenuation(distSq, radius);
+    vec3 li = clamp(light.colorIntensity.rgb, vec3(0.0), vec3(4.0))
+        * clamp(light.colorIntensity.a, 0.0, 16.0) * atten;
+
+    vec3 diffTerm = s.albedo * ((1.0 - s.metallic) * (1.0 / 3.14159265) * ndotl + sssWrap);
+
+    vec3 specTerm = vec3(0.0);
+    if (ndotl > 0.0) {
+        vec3 Hsum = viewDir + outToLight;
+        vec3 H = dot(Hsum, Hsum) > 1e-8 ? normalize(Hsum) : s.normal;
+        float NoH = max(dot(s.normal, H), 0.0);
+        float VoH = max(dot(viewDir, H), 0.0);
+        float a = max(s.roughness * s.roughness, 0.02);
+        float a2 = a * a;
+        float denom = NoH * NoH * (a2 - 1.0) + 1.0;
+        float D = a2 / max(3.14159265 * denom * denom, 1e-5);
+        vec3 F0 = mix(vec3(s.f0), s.albedo, s.metallic);
+        vec3 F = F0 + (vec3(1.0) - F0) * pow(clamp(1.0 - VoH, 0.0, 1.0), 5.0);
+        float roughWeight = mix(0.65, 0.12, smoothstep(0.15, 0.85, s.roughness));
+        specTerm = F * min(D * 0.25, 6.0) * roughWeight * ndotl;
+    }
+
+    outUnshadowedContrib = (diffTerm + specTerm) * li;
+    return dot(outUnshadowedContrib, vec3(0.2126, 0.7152, 0.0722));
+}
+
+float vsEvaluateEmissiveTargetPdf(
+    VsEmissiveLight light,
+    vec3 surfPosRel,
+    vec3 surfNormal,
+    vec3 albedo,
+    out vec3 outToLight,
+    out float outDist,
+    out vec3 outUnshadowedContrib
+) {
+    VsSurface s = VsSurface(albedo, surfNormal, 0.75, 0.0, 0.0, 1.0, 0.0, 0.04);
+    return vsEvaluateEmissiveTargetPdf(light, surfPosRel, s, surfNormal, outToLight, outDist, outUnshadowedContrib);
+}
+
+#endif

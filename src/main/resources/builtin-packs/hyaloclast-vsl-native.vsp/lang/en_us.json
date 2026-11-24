@@ -1,0 +1,27 @@
+{
+  "settings": {
+    "debug_view": {
+      "label": "Shader Debug View",
+      "category": "Diagnostics",
+      "description": "Display an internal render target instead of the final image.",
+      "options": {
+        "off": "Off",
+        "radiance": "Final Radiance",
+        "albedo": "Albedo",
+        "encoded_normal": "Encoded Normal",
+        "normal": "World Normal",
+        "roughness": "Roughness",
+        "metallic": "Metallic",
+        "emission": "Emission",
+        "material": "Packed Material",
+        "depth": "Depth",
+        "motion": "Motion Vectors",
+        "raw_radiance": "Raw Radiance",
+        "sharp_radiance": "Sharp Radiance",
+        "sharc": "SHaRC Cache Occupancy",
+        "restir_di": "ReSTIR DI Selection",
+        "svgf_variance": "SVGF Variance"
+      }
+    }
+  }
+}

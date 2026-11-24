@@ -1,0 +1,101 @@
+#version 460
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+struct TerrainVertex40B {
+    float px, py, pz;
+    uint color;
+    float u0, v0;
+    uint uv2;
+    uint normalAndFlags;
+    uint tangent;
+    uint midUv;
+};
+
+layout(buffer_reference, scalar) buffer VertexBufferRef {
+    TerrainVertex40B vertices[];
+};
+
+struct WindJobGpu {
+    uint64_t positionsAddress;
+    uint64_t restAddress;
+    uint vertexCount;
+    float scale;
+    float wrappedX;
+    float wrappedY;
+    float wrappedZ;
+    float relativeX;
+    float relativeY;
+    float relativeZ;
+};
+
+layout(buffer_reference, scalar) readonly buffer WindJobBufferRef {
+    WindJobGpu jobs[];
+};
+
+layout(push_constant, scalar) uniform WindPushConstants {
+    uint64_t jobsAddress;
+    uint jobCount;
+    float time;
+    float strength;
+    float weather;
+} pc;
+
+void main() {
+    uint jobIdx = gl_WorkGroupID.y;
+    if (jobIdx >= pc.jobCount || pc.jobsAddress == 0ul) {
+        return;
+    }
+
+    WindJobBufferRef jobBuf = WindJobBufferRef(pc.jobsAddress);
+    WindJobGpu job = jobBuf.jobs[jobIdx];
+
+    uint vIdx = gl_GlobalInvocationID.x;
+    if (vIdx >= job.vertexCount || job.positionsAddress == 0ul || job.restAddress == 0ul) {
+        return;
+    }
+
+    VertexBufferRef srcRef = VertexBufferRef(job.restAddress);
+    uint flags = (srcRef.vertices[vIdx].normalAndFlags >> 24u) & 0x7Fu;
+
+    // Bit 0 (0x01) = MATERIAL_FLAG_FOLIAGE_WIND; skip writes for static vertices.
+    if ((flags & 1u) != 0u) {
+        VertexBufferRef dstRef = VertexBufferRef(job.positionsAddress);
+        TerrainVertex40B v = srcRef.vertices[vIdx];
+        vec3 worldPhasePos = vec3(
+            v.px + job.wrappedX,
+            v.py + job.wrappedY,
+            v.pz + job.wrappedZ
+        );
+        vec3 n = unpackSnorm4x8(v.normalAndFlags).xyz;
+        bool isAxisAlignedLeaf = max(abs(n.x), max(abs(n.y), abs(n.z))) > 0.92;
+        float baseWeight = 0.42;
+        if (!isAxisAlignedLeaf) {
+            uint quadBase = vIdx & ~3u;
+            if (quadBase + 3u < job.vertexCount) {
+                float y0 = srcRef.vertices[quadBase].py;
+                float y1 = srcRef.vertices[quadBase + 1u].py;
+                float y2 = srcRef.vertices[quadBase + 2u].py;
+                float y3 = srcRef.vertices[quadBase + 3u].py;
+                float minY = min(min(y0, y1), min(y2, y3));
+                float maxY = max(max(y0, y1), max(y2, y3));
+                float quadH = max(maxY - minY, 0.001);
+                float heightFrac = clamp((v.py - minY) / quadH, 0.0, 1.0);
+                baseWeight = smoothstep(0.0, 0.15, heightFrac);
+            } else {
+                baseWeight = smoothstep(0.0, 0.15, fract(v.py));
+            }
+        }
+        float gustMod = 0.80 + 0.25 * sin(pc.time * 0.45 + worldPhasePos.x * 0.11 + worldPhasePos.z * 0.08);
+        float amp = (0.038 + 0.045 * pc.weather) * pc.strength * job.scale * baseWeight * gustMod;
+        float phase = pc.time * 1.85 + dot(worldPhasePos, vec3(0.68, 0.28, 0.52));
+        float dx = clamp((sin(phase) + 0.35 * sin(phase * 1.73)) * amp, -0.14, 0.14);
+        float dz = clamp((cos(phase * 0.87) + 0.30 * cos(phase * 1.41)) * amp * 0.72, -0.14, 0.14);
+        v.px += dx;
+        v.pz += dz;
+        dstRef.vertices[vIdx] = v;
+    }
+}

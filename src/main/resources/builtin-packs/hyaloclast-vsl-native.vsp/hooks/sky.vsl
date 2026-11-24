@@ -1,0 +1,242 @@
+#include <vulkanshaders/v1/common.vsl>
+
+// Kasten-Young optical air-mass transmittance for smooth, natural sunrise and sunset warmth
+// (air-mass formulation adapted from NVIDIA RTX Remix for Minecraft, Apache License 2.0).
+vec3 sv_atmosphereTransmittance(float elevation, float mieCoeff) {
+    float h = clamp(elevation, 0.0, 1.0);
+    if (h <= 0.001) {
+        return vec3(0.0);
+    }
+    float zenithDeg = degrees(acos(h));
+    float airMass = 1.0 / max(h + 0.15 * pow(max(93.885 - zenithDeg, 0.5), -1.253), 0.05);
+    vec3 rayleighExt = vec3(0.125, 0.312, 0.585);
+    vec3 ozoneExt = vec3(0.018, 0.042, 0.006);
+    return exp(-(rayleighExt + ozoneExt + vec3(mieCoeff)) * airMass);
+}
+
+float sv_hash21(vec2 p) {
+    p = fract(p * vec2(127.1, 311.7));
+    p += dot(p, p + 34.53);
+    return fract(p.x * p.y);
+}
+
+float sv_noise2D(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    return mix(
+        mix(sv_hash21(i), sv_hash21(i + vec2(1.0, 0.0)), u.x),
+        mix(sv_hash21(i + vec2(0.0, 1.0)), sv_hash21(i + vec2(1.0, 1.0)), u.x),
+        u.y
+    );
+}
+
+float sv_starHash(vec3 p) {
+    p = fract(p * vec3(443.8975, 397.2973, 491.1871));
+    p += dot(p.zxy, p.yxz + 19.19);
+    return fract(p.x * p.y * p.z);
+}
+
+// Henyey-Greenstein phase function for gentle solar aureole
+float sv_hgPhase(float cosTheta, float g) {
+    float g2 = g * g;
+    float denom = max(1.0 + g2 - 2.0 * g * cosTheta, 1e-4);
+    return (1.0 - g2) / (12.56637061 * pow(denom, 1.5));
+}
+
+// Evaluates a crisp square Minecraft celestial disc using a tangent-plane Chebyshev box metric.
+float sv_squareCelestialDisc(vec3 dir, vec3 bodyDir, float halfSize, float edgeSoftness) {
+    float alignment = dot(dir, bodyDir);
+    if (alignment <= 0.0) {
+        return 0.0;
+    }
+    vec3 refUp = abs(bodyDir.y) > 0.95 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
+    vec3 tangentX = normalize(cross(refUp, bodyDir));
+    vec3 tangentY = cross(bodyDir, tangentX);
+    vec2 proj = vec2(dot(dir, tangentX), dot(dir, tangentY)) / max(alignment, 0.15);
+    float boxDist = max(abs(proj.x), abs(proj.y));
+    return 1.0 - smoothstep(halfSize - edgeSoftness, halfSize + edgeSoftness, boxDist);
+}
+
+// Gentle multi-curtain night aurora gated to cold biomes
+vec3 sv_evaluateAurora(vec3 dir, float timeSec) {
+    if (dir.y <= 0.05) {
+        return vec3(0.0);
+    }
+    vec3 accum = vec3(0.0);
+    float elevationMask = smoothstep(0.05, 0.24, dir.y) * smoothstep(0.90, 0.38, dir.y);
+    float t = timeSec * 0.12;
+
+    for (int i = 0; i < 3; ++i) {
+        float fi = float(i);
+        float shellH = 0.98 + fi * 0.28;
+        vec2 uv = dir.xz / max(dir.y + 0.20, 0.24) * shellH;
+
+        float wave = sin(uv.x * 1.38 + t * (1.05 + fi * 0.18) + sin(uv.y * 1.15 - t * 0.65)) * 0.52;
+        float ribbonCoord = uv.y + wave + fi * 0.42 - 0.50;
+        float ribbonCore = exp(-abs(ribbonCoord) * (4.8 - fi * 0.50));
+
+        float striation = sv_noise2D(vec2(uv.x * 4.8 + t * 0.75, uv.y * 1.6 - t * 0.30 + fi * 2.9));
+        float shimmer = 0.60 + 0.40 * sin(uv.x * 12.5 + striation * 5.2 - timeSec * 0.8 + fi * 1.6);
+        float density = ribbonCore * smoothstep(0.30, 0.88, striation) * shimmer;
+
+        float altFrac = fi * 0.5;
+        vec3 colLow = vec3(0.08, 0.88, 0.52);
+        vec3 colMid = vec3(0.10, 0.70, 0.86);
+        vec3 colTop = vec3(0.50, 0.24, 0.82);
+        vec3 curtainCol = altFrac < 0.5
+            ? mix(colLow, colMid, altFrac * 2.0)
+            : mix(colMid, colTop, (altFrac - 0.5) * 2.0);
+
+        accum += curtainCol * density * (0.28 - fi * 0.05);
+    }
+
+    return accum * elevationMask;
+}
+
+// @hook(stage = "sky", priority = 100)
+// Sunlit Vanilla - Enriched azure daylight, warm peach/amber golden hour, natural moon arc,
+// twinkling starfield, Kasten-Young twilight warmth, and subtle cold-biome night aurora.
+void sv_sky(inout vec3 radiance, in vec3 dir, in VsSkyState sky) {
+    int dimId = vsDimensionId();
+
+    // The Nether: warm volcanic haze
+    if (dimId == 1) {
+        vec3 bTint = vsHasBiomeTelemetry() ? vsBiomeFogTint() : vec3(0.28, 0.07, 0.04);
+        float horizonBand = exp(-abs(dir.y) * 5.0);
+        vec3 ceilingCol = bTint * 0.40;
+        vec3 horizonCol = bTint * 1.15 + vec3(0.09, 0.028, 0.012);
+        radiance = max(mix(ceilingCol, horizonCol, horizonBand), vec3(0.012, 0.005, 0.004));
+        return;
+    }
+
+    // The End: deep starry violet void
+    if (dimId == 2) {
+        float up = abs(dir.y);
+        vec3 baseVoid = mix(vec3(0.026, 0.017, 0.054), vec3(0.007, 0.005, 0.018), pow(up, 0.68));
+        vec3 gridCell = floor(dir * 210.0);
+        float h = sv_starHash(gridCell);
+        float endSpecks = smoothstep(0.9945, 0.9992, h) * (0.65 + 0.35 * sin(sky.gameTimeSec * 1.5 + h * 80.0));
+        radiance = baseVoid + vec3(0.74, 0.64, 0.98) * endSpecks * 0.48;
+        return;
+    }
+
+    // Overworld
+    vec3 sunDir = normalize(sky.sunDir + vec3(0.0, 1e-5, 0.0));
+    vec3 moonDir = normalize(-sunDir);
+    float up = clamp(dir.y, 0.0, 1.0);
+    float horizonBlend = pow(1.0 - up, 2.65);
+    float lowHorizon = pow(1.0 - up, 5.6);
+
+    float sunEl = sunDir.y;
+    float dayFactor = smoothstep(-0.10, 0.20, sunEl);
+    float noonFactor = smoothstep(0.20, 0.60, sunEl);
+    float goldenFactor = smoothstep(-0.06, 0.10, sunEl) * (1.0 - smoothstep(0.14, 0.36, sunEl));
+    float twilight = smoothstep(-0.20, -0.01, sunEl) * (1.0 - smoothstep(0.04, 0.20, sunEl));
+
+    float bTemp = vsBiomeTemperature();
+    float bHum = vsBiomeHumidity();
+    float aridFactor = smoothstep(0.66, 0.95, bTemp) * (1.0 - smoothstep(0.16, 0.54, bHum));
+    float coldFactor = 1.0 - smoothstep(0.08, 0.36, bTemp);
+    float humidFactor = smoothstep(0.64, 0.95, bHum);
+
+    // Deep sapphire-azure zenith, crisp luminous horizon, and painter-warm golden hour
+    vec3 noonZenith = vec3(0.072, 0.295, 0.900);
+    vec3 noonHorizon = vec3(0.48, 0.76, 1.03);
+    vec3 goldenZenith = vec3(0.055, 0.175, 0.560);
+    vec3 goldenHorizon = vec3(0.90, 0.64, 0.44);
+
+    noonHorizon = mix(noonHorizon, vec3(0.76, 0.74, 0.68), aridFactor * 0.36);
+    noonZenith = mix(noonZenith, vec3(0.052, 0.225, 0.800), coldFactor * 0.28);
+    noonHorizon = mix(noonHorizon, vec3(0.44, 0.70, 0.88), humidFactor * 0.24);
+
+    vec3 dayZenith = mix(goldenZenith, noonZenith, noonFactor);
+    vec3 dayHorizon = mix(goldenHorizon, noonHorizon, noonFactor);
+
+    vec3 nightZenith = vec3(0.0025, 0.0055, 0.020);
+    vec3 nightHorizon = vec3(0.012, 0.024, 0.058);
+
+    vec3 zenith = mix(nightZenith, dayZenith, dayFactor);
+    vec3 horizon = mix(nightHorizon, dayHorizon, dayFactor);
+
+    // Kasten-Young sunrise and sunset amber-coral warmth along the solar azimuth
+    vec2 dirXz = normalize(vec2(dir.x, dir.z) + vec2(1e-5, 0.0));
+    vec2 sunXz = normalize(vec2(sunDir.x, sunDir.z) + vec2(1e-5, 0.0));
+    float sunAzimuth = clamp(dot(dirXz, sunXz) * 0.5 + 0.5, 0.0, 1.0);
+
+    float mieCoeff = mix(0.065, 0.120, aridFactor * 0.6 + humidFactor * 0.4);
+    vec3 sunTrans = sv_atmosphereTransmittance(max(sunEl, 0.014), mieCoeff);
+
+    vec3 antiSolarBelt = vec3(0.34, 0.20, 0.46);
+    vec3 solarHorizon = mix(vec3(1.26, 0.48, 0.18), vec3(1.16, 0.72, 0.34), goldenFactor * 0.55);
+    vec3 sunsetHorizon = mix(antiSolarBelt, solarHorizon, pow(sunAzimuth, 1.45));
+    float warmSkyMix = clamp(twilight * 0.88 + goldenFactor * 0.42, 0.0, 0.92);
+    horizon = mix(horizon, sunsetHorizon, warmSkyMix);
+    zenith = mix(zenith, vec3(0.048, 0.095, 0.320), twilight * 0.52);
+
+    // Clean overcast rain darkening
+    float overcast = clamp(sky.rain * 0.80 + sky.thunder * 0.26, 0.0, 1.0);
+    vec3 rainGray = vec3(0.22, 0.26, 0.33) * mix(0.18, 1.0, dayFactor);
+    horizon = mix(horizon, rainGray * 1.12, overcast * 0.74);
+    zenith = mix(zenith, rainGray * 0.82, overcast * 0.74);
+
+    vec3 skyCol = mix(zenith, horizon, horizonBlend);
+    float sunRimGlow = pow(sunAzimuth, 2.5) * lowHorizon * (twilight * 0.54 + goldenFactor * 0.34) * (1.0 - overcast * 0.85);
+    skyCol += vec3(1.16, 0.56, 0.22) * sunRimGlow;
+    float dayHorizonScatter = pow(sunAzimuth, 3.2) * lowHorizon * noonFactor * (1.0 - overcast * 0.85);
+    skyCol += vec3(0.24, 0.30, 0.36) * dayHorizonScatter;
+
+    // Ground-bounce lower hemisphere
+    skyCol = mix(horizon * 0.56, skyCol, smoothstep(-0.22, 0.015, dir.y));
+
+    // Chebyshev-box square Minecraft sun with Kasten-Young transmittance and Mie aureole
+    float sunCos = max(dot(dir, sunDir), 0.0);
+    float sunVis = smoothstep(-0.08, 0.04, sunEl) * (1.0 - overcast * 0.88);
+    vec3 sunTint = mix(
+        vec3(1.12, 0.54, 0.22),
+        max(sunTrans * vec3(1.48, 1.44, 1.36), vec3(0.48, 0.38, 0.26)),
+        smoothstep(0.0, 0.24, max(sunEl, 0.0))
+    );
+    float sunAureole = sv_hgPhase(sunCos, 0.44) * 0.14
+        + sv_hgPhase(sunCos, 0.78) * 0.28
+        + pow(sunCos, 48.0) * 0.40;
+    float squareSun = sv_squareCelestialDisc(dir, sunDir, 0.054, 0.0028);
+    float innerSunCore = sv_squareCelestialDisc(dir, sunDir, 0.040, 0.0024);
+    skyCol += sunTint * (sunAureole + squareSun * 3.8 + innerSunCore * 3.4) * sunVis;
+
+    // Natural moon arc below and above the horizon with gentle silver-blue halo
+    float moonCos = max(dot(dir, moonDir), 0.0);
+    float moonArcVis = smoothstep(-0.08, 0.08, moonDir.y);
+    float nightVis = (1.0 - smoothstep(-0.10, 0.14, sunEl)) * (1.0 - overcast * 0.84);
+    float moonVis = nightVis * moonArcVis;
+    float squareMoon = sv_squareCelestialDisc(dir, moonDir, 0.042, 0.0024);
+    float moonInner = sv_squareCelestialDisc(dir, moonDir, 0.030, 0.0020);
+    vec3 moonCol = vec3(0.80, 0.88, 1.00);
+    skyCol += moonCol * (pow(moonCos, 32.0) * 0.14 + pow(moonCos, 8.0) * 0.03 + squareMoon * 1.55 + moonInner * 0.72) * moonVis;
+
+    // Night sky details: subtle cold-biome aurora and crisp twinkling starfield
+    if (nightVis > 0.04 && dir.y > 0.04) {
+        float horizonVis = smoothstep(0.04, 0.22, dir.y);
+
+        if (coldFactor > 0.02) {
+            vec3 aurora = sv_evaluateAurora(dir, sky.gameTimeSec);
+            skyCol += aurora * (0.48 * coldFactor * nightVis);
+        }
+
+        // Subtle inclined galactic band behind the starfield
+        float galacticPlane = abs(dot(dir, normalize(vec3(0.42, 0.76, -0.49))));
+        float bandMask = exp(-galacticPlane * 6.5) * horizonVis * nightVis;
+        float bandDust = sv_noise2D(dir.xz / max(dir.y + 0.35, 0.35) * 3.2);
+        skyCol += vec3(0.016, 0.022, 0.044) * bandMask * (0.55 + 0.45 * bandDust);
+
+        vec3 starCell = floor(dir * 235.0);
+        float hStar = sv_starHash(starCell);
+        float starMask = smoothstep(0.9946, 0.9990, hStar);
+        float twinkle = 0.68 + 0.32 * sin(sky.gameTimeSec * (1.8 + fract(hStar * 19.3) * 1.6) + hStar * 110.0);
+        vec3 starColor = mix(vec3(0.80, 0.90, 1.00), vec3(1.00, 0.92, 0.78), fract(hStar * 31.7));
+        float moonClear = 1.0 - smoothstep(0.995, 0.999, moonCos) * moonArcVis;
+        skyCol += starColor * (starMask * twinkle * 0.96 * nightVis * horizonVis * moonClear);
+    }
+
+    radiance = max(skyCol, vec3(0.0));
+}

@@ -1,0 +1,189 @@
+#include <vulkanshaders/v1/common.vsl>
+
+// Sunlit Vanilla - Sculpted 16-block voxel-blocky volumetric clouds with softly beveled edges,
+// 2-tap Beer-Powder multi-scattering, warm golden-hour silver lining, moonlit night shading,
+// and an independently horizon-faded high-altitude cirrus veil at y = 540.
+
+float sv_cloudHash21(vec2 p) {
+    p = fract(p * vec2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+}
+
+float sv_cloudNoise2D(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    float a = sv_cloudHash21(i);
+    float b = sv_cloudHash21(i + vec2(1.0, 0.0));
+    float c = sv_cloudHash21(i + vec2(0.0, 1.0));
+    float d = sv_cloudHash21(i + vec2(1.0, 1.0));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+float sv_cloudHgPhase(float cosTheta, float g) {
+    float g2 = g * g;
+    float denom = max(1.0 + g2 - 2.0 * g * cosTheta, 1e-4);
+    return (1.0 - g2) / (12.56637061 * pow(denom, 1.5));
+}
+
+float sv_sampleVoxelCloudDensity(
+    vec3 worldPos,
+    VsSkyState sky,
+    float cloudBottom,
+    float cloudTop,
+    float biomeCloudScale,
+    float stormFactor
+) {
+    float h = clamp((worldPos.y - cloudBottom) / max(cloudTop - cloudBottom, 1.0), 0.0, 1.0);
+    if (h <= 0.0 || h >= 1.0) {
+        return 0.0;
+    }
+
+    // Smooth wind drift quantized to 16-block vanilla voxel cells
+    vec2 drift = vec2(sky.gameTimeSec * 3.1, sky.gameTimeSec * 0.55);
+    vec2 xz = (worldPos.xz + drift) / 16.0;
+    vec2 cell = floor(xz);
+    vec2 local = fract(xz);
+
+    float macro = sv_cloudNoise2D(cell * 0.14) * 0.68 + sv_cloudNoise2D(cell * 0.31 + vec2(17.3, 9.1)) * 0.32;
+    float baseCoverage = mix(0.45 * biomeCloudScale, 0.80, stormFactor);
+    float threshold = 1.0 - clamp(baseCoverage, 0.22, 0.84);
+
+    float occupied = smoothstep(threshold - 0.04, threshold + 0.06, macro);
+    if (occupied <= 0.001) {
+        return 0.0;
+    }
+
+    // Soft bevel inside each 16-block voxel cell for sculpted edges without harsh aliasing
+    vec2 edgeDist = min(local, 1.0 - local);
+    float bevel = smoothstep(0.0, 0.13, min(edgeDist.x, edgeDist.y));
+    float cellBlend = mix(0.74, 1.0, bevel);
+
+    float tierHeight = mix(0.56, 1.0, smoothstep(threshold + 0.04, threshold + 0.22, macro));
+    float verticalProfile = smoothstep(0.0, 0.10, h) * smoothstep(tierHeight, max(tierHeight - 0.18, 0.12), h);
+    return clamp(occupied * cellBlend * verticalProfile * 1.45, 0.0, 1.0);
+}
+
+// @hook(stage = "clouds", priority = 100)
+vec4 sv_clouds(in vec3 dir, in vec3 cameraPos, in VsSkyState sky) {
+    if (vsDimensionId() != 0) {
+        return vec4(0.0, 0.0, 0.0, 1.0);
+    }
+
+    float stormFactor = clamp(sky.rain * 0.82 + sky.thunder * 0.35, 0.0, 1.0);
+    const float cloudBottom = 252.0;
+    const float cloudTop = 288.0;
+
+    vec3 sunDir = normalize(sky.sunDir + vec3(0.0, 1e-5, 0.0));
+    vec3 moonDir = normalize(-sunDir);
+    float sunWeight = smoothstep(-0.08, 0.08, sunDir.y);
+    float moonWeight = smoothstep(-0.08, 0.08, moonDir.y);
+    vec3 lightDir = (sunWeight >= moonWeight) ? sunDir : moonDir;
+
+    float dayFactor = smoothstep(-0.10, 0.20, sunDir.y);
+    float sunsetFactor = smoothstep(-0.16, 0.02, sunDir.y) * (1.0 - smoothstep(0.06, 0.30, sunDir.y));
+
+    vec3 dayDirect = mix(vec3(1.18, 1.13, 1.04), vec3(1.42, 0.60, 0.24), sunsetFactor * 0.94);
+    vec3 moonDirect = vec3(0.15, 0.23, 0.42);
+    vec3 directColor = (dayDirect * sunWeight + moonDirect * moonWeight) * (1.0 - stormFactor * 0.56);
+
+    vec3 skyAmbient = mix(vec3(0.022, 0.036, 0.074), vec3(0.38, 0.54, 0.78), dayFactor);
+    vec3 sunsetBase = vec3(0.86, 0.40, 0.24);
+    skyAmbient = mix(skyAmbient, sunsetBase, sunsetFactor * 0.50 * (1.0 - stormFactor * 0.65));
+    skyAmbient = mix(skyAmbient, vec3(0.24, 0.28, 0.34) * mix(0.18, 1.0, dayFactor), stormFactor * 0.74);
+
+    float cosTheta = dot(dir, lightDir);
+    float silverLining = sv_cloudHgPhase(cosTheta, 0.76) * 0.80 + sv_cloudHgPhase(cosTheta, -0.18) * 0.20;
+    float forwardScatter = 0.50 + (0.72 + 0.64 * sunsetFactor) * clamp(silverLining, 0.0, 2.3);
+
+    float voxelTrans = 1.0;
+    vec3 voxelScattered = vec3(0.0);
+    float tEnter = 0.0;
+    float tExit = 0.0;
+    bool hitVoxelBand = false;
+
+    if (cameraPos.y < cloudBottom) {
+        if (dir.y > 0.015) {
+            tEnter = (cloudBottom - cameraPos.y) / max(dir.y, 0.02);
+            tExit = (cloudTop - cameraPos.y) / max(dir.y, 0.02);
+            hitVoxelBand = true;
+        }
+    } else if (cameraPos.y > cloudTop) {
+        if (dir.y < -0.015) {
+            tEnter = (cloudTop - cameraPos.y) / min(dir.y, -0.02);
+            tExit = (cloudBottom - cameraPos.y) / min(dir.y, -0.02);
+            hitVoxelBand = true;
+        }
+    } else {
+        tEnter = 0.0;
+        tExit = (dir.y >= 0.0)
+            ? (cloudTop - cameraPos.y) / max(dir.y, 0.02)
+            : (cloudBottom - cameraPos.y) / min(dir.y, -0.02);
+        hitVoxelBand = true;
+    }
+
+    if (hitVoxelBand) {
+        tEnter = max(tEnter, 0.0);
+        tExit = min(tExit, 2100.0);
+        if (tExit > tEnter) {
+            const int STEPS = 8;
+            float stepSize = (tExit - tEnter) / float(STEPS);
+            float biomeCloudScale = vsBiomeCloudScale();
+            float extinction = mix(0.060, 0.074, stormFactor);
+            float jitter = fract(52.9829189 * fract(dot(dir.xz * 256.0 + float(vsWorld.frameIndex & 63) * vec2(13.0, 29.0), vec2(0.06711056, 0.00583715))));
+
+            for (int i = 0; i < STEPS; ++i) {
+                if (voxelTrans < 0.03) break;
+                float t = tEnter + (float(i) + jitter) * stepSize;
+                vec3 pos = cameraPos + dir * t;
+                float density = sv_sampleVoxelCloudDensity(pos, sky, cloudBottom, cloudTop, biomeCloudScale, stormFactor);
+                if (density > 0.003) {
+                    // 2-tap Beer-Powder soft multi-scattering along active sun/moon light direction
+                    float d1 = sv_sampleVoxelCloudDensity(pos + lightDir * 16.0, sky, cloudBottom, cloudTop, biomeCloudScale, stormFactor);
+                    float d2 = sv_sampleVoxelCloudDensity(pos + lightDir * 38.0, sky, cloudBottom, cloudTop, biomeCloudScale, stormFactor);
+                    float opticalDepth = (d1 * 16.0 + d2 * 22.0) * extinction;
+                    float multiScatter = max(exp(-opticalDepth), exp(-opticalDepth * 0.28) * 0.48 + exp(-opticalDepth * 0.09) * 0.16);
+                    float powder = 1.0 - exp(-opticalDepth * 2.1);
+                    float lightEnergy = multiScatter * mix(1.0, 0.68 + 1.28 * powder, clamp(0.55 - 0.45 * cosTheta, 0.0, 1.0));
+
+                    float hNorm = clamp((pos.y - cloudBottom) / max(cloudTop - cloudBottom, 1.0), 0.0, 1.0);
+                    vec3 litCol = skyAmbient * mix(0.68, 1.12, hNorm)
+                                + directColor * lightEnergy * mix(0.56, 1.14, hNorm) * forwardScatter;
+
+                    float stepTrans = exp(-density * extinction * stepSize);
+                    voxelScattered += voxelTrans * litCol * (1.0 - stepTrans);
+                    voxelTrans *= stepTrans;
+                }
+            }
+        }
+    }
+
+    // Apply horizon fade specifically to the voxel cloud band so cirrus fades independently.
+    float voxelHorizonFade = hitVoxelBand
+        ? smoothstep(0.015, 0.14, abs(dir.y)) * (1.0 - smoothstep(950.0, 2100.0, tEnter))
+        : 0.0;
+    vec3 scattered = voxelScattered * voxelHorizonFade;
+    float transmittance = mix(1.0, voxelTrans, voxelHorizonFade);
+
+    // Lightweight high-altitude cirrus veil at y = 540 (decoupled from voxel tEnter)
+    if (dir.y > 0.04 && cameraPos.y < 535.0 && transmittance > 0.06) {
+        float tCirrus = (540.0 - cameraPos.y) / max(dir.y, 0.04);
+        float cirrusHorizonFade = smoothstep(0.04, 0.18, dir.y) * (1.0 - smoothstep(2600.0, 4400.0, tCirrus));
+        if (cirrusHorizonFade > 0.005) {
+            vec2 cWorld = cameraPos.xz + dir.xz * min(tCirrus, 4400.0);
+            vec2 cUv = cWorld * vec2(0.00062, 0.00155) + vec2(sky.gameTimeSec * 0.0055, sky.gameTimeSec * 0.0018);
+            float warp = sv_cloudNoise2D(cUv * 1.40);
+            vec2 cWarped = cUv + vec2(warp * 0.48, -warp * 0.30);
+            float cFilament = sv_cloudNoise2D(cWarped) * 0.62 + sv_cloudNoise2D(cWarped * 2.4 + vec2(4.1, 2.3)) * 0.38;
+            float cirrusMask = smoothstep(0.54, 0.88, cFilament);
+            float cirrusAlpha = cirrusMask * 0.22 * cirrusHorizonFade * (1.0 - stormFactor * 0.65);
+
+            vec3 cirrusTint = mix(skyAmbient * 1.22, directColor * (0.85 + 0.42 * clamp(silverLining, 0.0, 2.0)), 0.70);
+            scattered += transmittance * cirrusTint * cirrusAlpha;
+            transmittance *= (1.0 - cirrusAlpha * 0.45);
+        }
+    }
+
+    return vec4(max(scattered, vec3(0.0)), clamp(transmittance, 0.0, 1.0));
+}
