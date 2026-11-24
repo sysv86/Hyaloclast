@@ -781,7 +781,7 @@ object GbufferPipelineRegistry {
     /** VSP structs, helper code, and hook functions (injected after `} vsMotion;` so `vsMotion` is in scope). */
     private fun buildHookDeclarations(applied: List<AppliedHook>): String = buildString {
         appendLine("// --- Hyaloclast .vsl hook bodies (generated from the active shader pack) ---")
-        appendLine("struct VsHookWorld { float gameTimeSec; float rain; float heldLight; vec3 sunDir; };")
+        appendLine("struct VsHookWorld { float gameTimeSec; float rain; float heldLight; float thunder; float eyeInFluid; vec3 sunDir; };")
         appendLine("VsHookWorld vsHookWorld;")
         appendLine("#define vsWorld vsHookWorld")
         appendLine("struct VsVertexInput { uint materialFlags; };")
@@ -807,12 +807,14 @@ object GbufferPipelineRegistry {
     private fun hookCall(stage: String): String = when (stage) {
         "vertex_displace" -> """
             vsHookWorld = VsHookWorld(vsMotion.cameraDeltaTime.w, vsMotion.sunDirRain.w,
-                                      vsMotion.heldLightData.x, vsMotion.sunDirRain.xyz);
+                                      vsMotion.heldLightData.x, vsMotion.heldLightData.y,
+                                      vsMotion.heldLightData.z, vsMotion.sunDirRain.xyz);
             vsHookVertexDisplace(localPos, VsVertexInput(vertexHookFlags));
         """.trimIndent()
         "water_waves" -> """
             vsHookWorld = VsHookWorld(vsMotion.cameraDeltaTime.w, vsMotion.sunDirRain.w,
-                                      vsMotion.heldLightData.x, vsMotion.sunDirRain.xyz);
+                                      vsMotion.heldLightData.x, vsMotion.heldLightData.y,
+                                      vsMotion.heldLightData.z, vsMotion.sunDirRain.xyz);
             float vsWaveStrength = 0.35;
             float vsWaveSpeed = 1.8;
             float vsWaveScale = 2.2;
@@ -820,7 +822,8 @@ object GbufferPipelineRegistry {
         """.trimIndent()
         "surface" -> """
             vsHookWorld = VsHookWorld(vsMotion.cameraDeltaTime.w, vsMotion.sunDirRain.w,
-                                      vsMotion.heldLightData.x, vsMotion.sunDirRain.xyz);
+                                      vsMotion.heldLightData.x, vsMotion.heldLightData.y,
+                                      vsMotion.heldLightData.z, vsMotion.sunDirRain.xyz);
             VsSurface vsHookSurf = VsSurface(pow(max(color.rgb, vec3(0.0)), vec3(2.2)), N, roughness, metallic, emission, 1.0, subsurface, f0);
             vsHookSurface(vsHookSurf, materialFlags, 0u);
             N = vsHookSurf.normal;
@@ -834,7 +837,8 @@ object GbufferPipelineRegistry {
         """.trimIndent()
         "gbuffer_pack" -> """
             vsHookWorld = VsHookWorld(vsMotion.cameraDeltaTime.w, vsMotion.sunDirRain.w,
-                                      vsMotion.heldLightData.x, vsMotion.sunDirRain.xyz);
+                                      vsMotion.heldLightData.x, vsMotion.heldLightData.y,
+                                      vsMotion.heldLightData.z, vsMotion.sunDirRain.xyz);
             VsSurface vsPackSurf = VsSurface(pow(max(color.rgb, vec3(0.0)), vec3(2.2)), N, roughness, metallic, emission, 1.0, subsurface, f0);
             vsHookGbufferPack(vsPackSurf, fragColor, outNormalRoughness, outMaterialPbr, outVelocity);
         """.trimIndent()

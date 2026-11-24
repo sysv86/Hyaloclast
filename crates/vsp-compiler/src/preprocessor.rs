@@ -655,7 +655,7 @@ impl VslPreprocessor {
                     "// --- Hyaloclast .vsl raster hook bodies (generated from active pack) ---\n",
                 );
                 hook_prelude.push_str(
-                    "struct VsHookWorld { float gameTimeSec; float rain; float heldLight; vec3 sunDir; };\n",
+                    "struct VsHookWorld { float gameTimeSec; float rain; float heldLight; float thunder; float eyeInFluid; vec3 sunDir; };\n",
                 );
                 hook_prelude.push_str("VsHookWorld vsHookWorld;\n");
                 hook_prelude.push_str("#define vsWorld vsHookWorld\n");
@@ -747,16 +747,16 @@ impl VslPreprocessor {
     fn raster_hook_call(stage: HookStage) -> String {
         match stage {
             HookStage::VertexDisplace => {
-                "vsHookWorld = VsHookWorld(vsMotion.cameraDeltaTime.w, vsMotion.sunDirRain.w, vsMotion.heldLightData.x, vsMotion.sunDirRain.xyz);\n    vsHookVertexDisplace(localPos, VsVertexInput(vertexHookFlags));".to_owned()
+                "vsHookWorld = VsHookWorld(vsMotion.cameraDeltaTime.w, vsMotion.sunDirRain.w, vsMotion.heldLightData.x, vsMotion.heldLightData.y, vsMotion.heldLightData.z, vsMotion.sunDirRain.xyz);\n    vsHookVertexDisplace(localPos, VsVertexInput(vertexHookFlags));".to_owned()
             }
             HookStage::WaterWaves => {
-                "vsHookWorld = VsHookWorld(vsMotion.cameraDeltaTime.w, vsMotion.sunDirRain.w, vsMotion.heldLightData.x, vsMotion.sunDirRain.xyz);\n    float vsWaveStrength = 0.35;\n    float vsWaveSpeed = 1.8;\n    float vsWaveScale = 2.2;\n    vsHookWaterWaves(vsWaveStrength, vsWaveSpeed, vsWaveScale);".to_owned()
+                "vsHookWorld = VsHookWorld(vsMotion.cameraDeltaTime.w, vsMotion.sunDirRain.w, vsMotion.heldLightData.x, vsMotion.heldLightData.y, vsMotion.heldLightData.z, vsMotion.sunDirRain.xyz);\n    float vsWaveStrength = 0.35;\n    float vsWaveSpeed = 1.8;\n    float vsWaveScale = 2.2;\n    vsHookWaterWaves(vsWaveStrength, vsWaveSpeed, vsWaveScale);".to_owned()
             }
             HookStage::Surface => {
-                "vsHookWorld = VsHookWorld(vsMotion.cameraDeltaTime.w, vsMotion.sunDirRain.w, vsMotion.heldLightData.x, vsMotion.sunDirRain.xyz);\n    VsSurface vsHookSurf = VsSurface(pow(max(color.rgb, vec3(0.0)), vec3(2.2)), N, roughness, metallic, emission, 1.0, subsurface, f0);\n    vsHookSurface(vsHookSurf, materialFlags, 0u);\n    N = vsHookSurf.normal;\n    color.rgb = pow(max(vsHookSurf.albedo, vec3(0.0)), vec3(1.0 / 2.2));\n    fragColor.rgb = color.rgb;\n    metallic = vsHookSurf.metallic;\n    roughness = vsHookSurf.roughness;\n    f0 = vsHookSurf.f0;\n    emission = vsHookSurf.emission;\n    subsurface = vsHookSurf.subsurface;".to_owned()
+                "vsHookWorld = VsHookWorld(vsMotion.cameraDeltaTime.w, vsMotion.sunDirRain.w, vsMotion.heldLightData.x, vsMotion.heldLightData.y, vsMotion.heldLightData.z, vsMotion.sunDirRain.xyz);\n    VsSurface vsHookSurf = VsSurface(pow(max(color.rgb, vec3(0.0)), vec3(2.2)), N, roughness, metallic, emission, 1.0, subsurface, f0);\n    vsHookSurface(vsHookSurf, materialFlags, 0u);\n    N = vsHookSurf.normal;\n    color.rgb = pow(max(vsHookSurf.albedo, vec3(0.0)), vec3(1.0 / 2.2));\n    fragColor.rgb = color.rgb;\n    metallic = vsHookSurf.metallic;\n    roughness = vsHookSurf.roughness;\n    f0 = vsHookSurf.f0;\n    emission = vsHookSurf.emission;\n    subsurface = vsHookSurf.subsurface;".to_owned()
             }
             HookStage::GbufferPack => {
-                "vsHookWorld = VsHookWorld(vsMotion.cameraDeltaTime.w, vsMotion.sunDirRain.w, vsMotion.heldLightData.x, vsMotion.sunDirRain.xyz);\n    VsSurface vsPackSurf = VsSurface(pow(max(color.rgb, vec3(0.0)), vec3(2.2)), N, roughness, metallic, emission, 1.0, subsurface, f0);\n    vsHookGbufferPack(vsPackSurf, fragColor, outNormalRoughness, outMaterialPbr);".to_owned()
+                "vsHookWorld = VsHookWorld(vsMotion.cameraDeltaTime.w, vsMotion.sunDirRain.w, vsMotion.heldLightData.x, vsMotion.heldLightData.y, vsMotion.heldLightData.z, vsMotion.sunDirRain.xyz);\n    VsSurface vsPackSurf = VsSurface(pow(max(color.rgb, vec3(0.0)), vec3(2.2)), N, roughness, metallic, emission, 1.0, subsurface, f0);\n    vsHookGbufferPack(vsPackSurf, fragColor, outNormalRoughness, outMaterialPbr);".to_owned()
             }
             other => format!("vsHookRaster_{}();", other.as_str()),
         }
