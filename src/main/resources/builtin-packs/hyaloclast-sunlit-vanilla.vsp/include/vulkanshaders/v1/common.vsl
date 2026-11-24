@@ -409,7 +409,7 @@ VsDecodedVertex vsLoadVertex(VsInstanceMeta meta, uint vertIdx) {
 }
 #endif
 
-// Exact 528-byte std140 layout matching WorldStateCollector.kt and vulkanshaders-core WorldUboData:
+// Exact 544-byte std140 layout matching WorldStateCollector.kt and vulkanshaders-core WorldUboData:
 //   0..63   : curViewProj (mat4)
 //  64..127  : prevViewProj (mat4)
 // 128..191  : invProj (mat4)
@@ -422,6 +422,8 @@ VsDecodedVertex vsLoadVertex(VsInstanceMeta meta, uint vertIdx) {
 //             packParams[10]: (biomeTemp, biomeHumidity, dimensionId, biomeCloudCover)
 //             packParams[11]: (biomeFogR, biomeFogG, biomeFogB, biomeAtmosphereDensity)
 // 512..527  : camera-relative heldLightPosition (vec4)
+// 528..535  : packParamsBda (uvec2 little-endian view of the 64-bit VSL parameter BDA)
+// 536..543  : std140 padding (the block is rounded to a 16-byte multiple)
 layout(std140, set = 0, binding = 0) uniform WorldUBO {
     mat4 curViewProj;
     mat4 prevViewProj;
@@ -439,6 +441,8 @@ layout(std140, set = 0, binding = 0) uniform WorldUBO {
     float heldLight;
     vec4 packParams[12];
     vec4 heldLightPosition;
+    uvec2 packParamsBda;
+    uvec2 packParamsBdaPad;
 } vsWorld;
 
 // Smoothly-blended biome & dimension telemetry packed by WorldStateCollector.kt

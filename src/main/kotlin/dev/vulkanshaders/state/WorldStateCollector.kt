@@ -52,7 +52,8 @@ import kotlin.math.sin
  * (`HeldLightPolicy.java`, Apache License 2.0).
  */
 object WorldStateCollector {
-    const val WORLD_UBO_BYTES: Int = 528
+    // 528-byte v1 WorldUBO payload + 8-byte VSL packParams BDA + 8-byte std140 padding.
+    const val WORLD_UBO_BYTES: Int = 544
     const val MAX_PACK_PARAM_FLOATS: Int = 48
     const val MAX_RGB24: Int = 0xFFFFFF
     const val JITTER_PHASE_COUNT: Int = 16
@@ -1018,6 +1019,10 @@ object WorldStateCollector {
         uboBuffer.putFloat(516, heldPosition.y.toFloat())
         uboBuffer.putFloat(520, heldPosition.z.toFloat())
         uboBuffer.putFloat(524, heldLightKind.coerceIn(0, 9).toFloat())
+
+        // 528..535: VSL pack-parameter BDA. Native core overwrites this with the live
+        // device address each frame; the placeholder keeps the 544-byte upload deterministic.
+        uboBuffer.putLong(528, 0L)
     }
 
     internal fun updateMatrices(

@@ -1,3 +1,5 @@
+mod vsl_params;
+
 use crate::{
     gpu::{
         VulkanContext, bindless::BindlessTextureTable, buffer::GpuBufferAllocation,
@@ -11,7 +13,12 @@ use crate::{
 };
 use ash::vk::{self, Handle};
 use bytemuck::{Pod, Zeroable};
-use std::{collections::HashMap, ffi::{CStr, CString}, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    env,
+    ffi::{CStr, CString},
+    path::{Path, PathBuf},
+};
 use vsp_compiler::{
     CompiledShaderArtifact, ReflectedDescriptorBinding, ReflectedDescriptorType, RenderTier,
     ShaderStageKind, SpirvReflection, VspCompiler,
@@ -25,7 +32,7 @@ type PendingDescriptorWrite<'a> = (
 );
 type ShadowLayerGroup = (bool, u32, u64, u64, [i32; 3], u32, u32);
 
-/// Exact 528-byte `std140` uniform buffer matching `WorldStateCollector.kt` and `common.vsl`:
+/// Exact 544-byte `std140` uniform buffer matching `WorldStateCollector.kt` and `common.vsl`:
 /// - `0..63`:   `cur_view_proj` (`mat4`)
 /// - `64..127`: `prev_view_proj` (`mat4`)
 /// - `128..191`: `inv_proj` (`mat4`)
@@ -36,6 +43,11 @@ type ShadowLayerGroup = (bool, u32, u64, u64, [i32; 3], u32, u32);
 /// - `304..319`: `thunder` (`f32`), `eye_in_fluid` (`i32`), `depth_far` (`f32`), `held_light` (`f32`)
 /// - `320..511`: `pack_params` (`[[f32; 4]; 12]` = 48 scalar floats)
 /// - `512..527`: camera-relative held-light position (`vec4`)
+/// - `528..535`: `pack_params_bda` (`u64` address of the VSL live pack-parameter buffer)
+/// - `536..543`: alignment padding (the `std140` block is rounded to a 16-byte multiple)
+///
+/// The first 528 bytes are byte-for-byte the v1 WorldUBO ABI; v1 shaders may keep declaring the
+/// original 528-byte block. Only the producer (`WorldStateCollector.kt`) must supply 544 bytes.
 #[repr(C, align(16))]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct WorldUboData {
@@ -55,9 +67,20 @@ pub struct WorldUboData {
     pub held_light: f32,
     pub pack_params: [[f32; 4]; 12],
     pub held_light_position: [f32; 4],
+    pub pack_params_bda: u64,
+    pub pack_params_bda_pad: [u8; 8],
 }
 
-const _: () = assert!(std::mem::size_of::<WorldUboData>() == 528);
+const _: () = assert!(std::mem::size_of::<WorldUboData>() == 544);
+const _: () = assert!(std::mem::offset_of!(WorldUboData, pack_params) == 320);
+const _: () = assert!(std::mem::offset_of!(WorldUboData, held_light_position) == 512);
+const _: () = assert!(std::mem::offset_of!(WorldUboData, pack_params_bda) == 528);
+
+/// Fixed capacity of the VSL pack-parameter BDA buffer. Reflected offsets are pack-schema
+/// relative and comfortably fit this size; allocating once avoids mid-frame buffer churn.
+pub const VSL_PACK_PARAM_BUFFER_BYTES: usize = 4096;
+/// VSL's minimal `WorldUBO` block reads the BDA from word 0 of set 0 / binding 0.
+pub const VSL_WORLD_BDA_CARRIER_BYTES: usize = 16;
 
 impl Default for WorldUboData {
     fn default() -> Self {
@@ -459,6 +482,14 @@ pub struct GpuPipelineManager {
     pub compiled_artifacts: HashMap<String, CompiledShaderArtifact>,
     /// VSL 2.0 units merged into the next pack compile, before the single pipeline rebuild.
     pub pending_vsl_artifacts: Vec<CompiledShaderArtifact>,
+    /// `used_params` merged from VSL reflection sidecars for the active pack.
+    pub vsl_param_bindings: Vec<vsl_params::VslUsedParam>,
+    /// Host-visible, device-addressable buffer holding live VSL pack-parameter values.
+    pub vsl_param_buffer: Option<GpuBufferAllocation>,
+    /// Minimal BDA carrier bound at set 0 / binding 0 for VSL units; VSL reads the address at word 0.
+    pub vsl_world_bda_buffer: Option<GpuBufferAllocation>,
+    /// Stage names of VSL units in the active pack, whose binding 0 uses the BDA carrier.
+    pub vsl_param_stages: HashSet<String>,
     pub shader_modules: HashMap<String, vk::ShaderModule>,
     pub compute_pipelines: HashMap<String, ComputePipelineBundle>,
     pub graphics_pipelines: HashMap<String, GraphicsPipelineBundle>,
@@ -749,8 +780,38 @@ impl GpuPipelineManager {
         if let Some(buf) = &mut self.sharc_fallback_ubo_ring[slot] {
             buf.write_bytes(0, bytemuck::bytes_of(&fallback));
         }
+        // VSL pack parameters live behind a device address, not inline in the WorldUBO. Publish
+        // the address both in the (appended) WorldUBO field and in a minimal carrier buffer that
+        // VSL units bind at set 0 / binding 0, because VSL reads that address from word 0.
+        let mut ubo = *ubo;
+        let mut params_addr = 0u64;
+        if !self.vsl_param_bindings.is_empty() && self.vsl_param_buffer.is_none() {
+            self.vsl_param_buffer = Some(GpuBufferAllocation::allocate_host_visible_bda(
+                ctx,
+                VSL_PACK_PARAM_BUFFER_BYTES as vk::DeviceSize,
+                vk::BufferUsageFlags::STORAGE_BUFFER,
+            )?);
+        }
+        if let Some(buf) = self.vsl_param_buffer.as_mut() {
+            let bytes = vsl_params::pack_param_bytes(&self.vsl_param_bindings, &ubo.pack_params);
+            buf.write_bytes(0, &bytes);
+            params_addr = buf.device_address;
+        }
+        ubo.pack_params_bda = params_addr;
+
+        if !self.vsl_param_stages.is_empty() && self.vsl_world_bda_buffer.is_none() {
+            self.vsl_world_bda_buffer = Some(GpuBufferAllocation::allocate_host_visible_bda(
+                ctx,
+                VSL_WORLD_BDA_CARRIER_BYTES as vk::DeviceSize,
+                vk::BufferUsageFlags::UNIFORM_BUFFER,
+            )?);
+        }
+        if let Some(buf) = self.vsl_world_bda_buffer.as_mut() {
+            buf.write_bytes(0, &params_addr.to_le_bytes());
+        }
+
         let buf = self.world_ubo_ring[slot].as_mut().unwrap();
-        buf.write_bytes(0, bytemuck::bytes_of(ubo));
+        buf.write_bytes(0, bytemuck::bytes_of(&ubo));
         Ok(buf.device_address)
     }
 
@@ -888,6 +949,24 @@ impl GpuPipelineManager {
         for artifact in artifacts {
             self.compiled_artifacts
                 .insert(artifact.stage_name.clone(), artifact);
+        }
+        let vsl_dir = env::var_os("VSL_UNIT_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("shaderpacks/vsl-units"));
+        let mut vsl_bindings = Vec::new();
+        let mut vsl_stages = HashSet::new();
+        for artifact in &self.pending_vsl_artifacts {
+            vsl_stages.insert(artifact.stage_name.clone());
+            vsl_bindings.extend(vsl_params::load_used_params(&vsl_dir, &artifact.stage_name));
+        }
+        self.vsl_param_bindings = vsl_params::merge_used_params(vsl_bindings);
+        self.vsl_param_stages = vsl_stages;
+        if !self.vsl_param_bindings.is_empty() {
+            eprintln!(
+                "[vulkanshaders-core] VSL live pack params: {} from {}",
+                self.vsl_param_bindings.len(),
+                vsl_dir.display()
+            );
         }
         for artifact in self.pending_vsl_artifacts.drain(..) {
             self.compiled_artifacts
@@ -1927,6 +2006,7 @@ impl GpuPipelineManager {
                 slot,
                 blas,
                 ubo_buf,
+                vk::Buffer::null(),
                 sharc_fb_buf,
                 csm_ubo_buf,
                 self.default_sampler,
@@ -2011,6 +2091,14 @@ impl GpuPipelineManager {
             .as_ref()
             .map(|b| b.buffer)
             .unwrap_or(vk::Buffer::null());
+        let vsl_world_buf = if self.vsl_param_stages.contains(key) {
+            self.vsl_world_bda_buffer
+                .as_ref()
+                .map(|b| b.buffer)
+                .unwrap_or(vk::Buffer::null())
+        } else {
+            vk::Buffer::null()
+        };
         Self::write_pass_descriptors(
             ctx,
             key,
@@ -2023,6 +2111,7 @@ impl GpuPipelineManager {
             slot,
             blas,
             ubo_buf,
+            vsl_world_buf,
             sharc_fb_buf,
             csm_ubo_buf,
             self.default_sampler,
@@ -2170,6 +2259,7 @@ impl GpuPipelineManager {
             slot,
             blas,
             ubo_buf,
+            vk::Buffer::null(),
             sharc_fb_buf,
             csm_ubo_buf,
             self.default_sampler,
@@ -2252,13 +2342,17 @@ impl GpuPipelineManager {
         frame_slot: usize,
         blas: Option<&ZeroCopyBlasManager>,
         ubo_buf: vk::Buffer,
+        vsl_world_buf: vk::Buffer,
         sharc_fallback_buf: vk::Buffer,
         csm_ubo_buf: vk::Buffer,
         default_sampler: vk::Sampler,
         sig_cache: &mut HashMap<(String, usize), u64>,
     ) {
         let resolve_buf = |b: &ReflectedDescriptorBinding| -> vk::Buffer {
-            if b.set == 1 {
+            if b.set == 0 && b.binding == 0 && vsl_world_buf != vk::Buffer::null() {
+                // VSL's minimal WorldUBO block reads the pack-parameter address from word 0.
+                vsl_world_buf
+            } else if b.set == 1 {
                 match b.binding {
                     1 => blas
                         .map(|manager| manager.instance_meta_buffer_for_slot(frame_slot).0)
@@ -5218,5 +5312,27 @@ impl Drop for AsyncPipelinePrewarmer {
     fn drop(&mut self) {
         self.cancel();
         self.wait();
+    }
+}
+
+#[cfg(test)]
+mod world_ubo_layout_tests {
+    use super::*;
+
+    #[test]
+    fn world_ubo_keeps_v1_offsets_and_appends_pack_params_bda() {
+        assert_eq!(std::mem::size_of::<WorldUboData>(), 544);
+        assert_eq!(std::mem::offset_of!(WorldUboData, cur_view_proj), 0);
+        assert_eq!(std::mem::offset_of!(WorldUboData, pack_params), 320);
+        assert_eq!(std::mem::offset_of!(WorldUboData, held_light_position), 512);
+        assert_eq!(std::mem::offset_of!(WorldUboData, pack_params_bda), 528);
+        let ubo = WorldUboData::default();
+        assert_eq!(ubo.pack_params_bda, 0);
+    }
+
+    #[test]
+    fn vsl_buffer_capacities_cover_embedded_pack_params() {
+        assert_eq!(VSL_PACK_PARAM_BUFFER_BYTES, 4096);
+        assert_eq!(VSL_WORLD_BDA_CARRIER_BYTES, 16);
     }
 }
