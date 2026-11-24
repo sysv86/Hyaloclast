@@ -23,3 +23,5 @@ tracing.workspace = true
 bitflags.workspace = true
 blake3.workspace = true
 libloading.workspace = true
+serde.workspace = true
+serde_json.workspace = true

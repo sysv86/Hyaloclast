@@ -942,6 +942,8 @@ dependencies = [
  "gpu-allocator",
  "libloading",
  "parking_lot",
+ "serde",
+ "serde_json",
  "thiserror",
  "tracing",
  "vsp-compiler",
