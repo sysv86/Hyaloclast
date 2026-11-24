@@ -1,9 +1,9 @@
 [pack]
-id = "hyaloclast-vsl-native"
-name = "VSL Native"
+id = "relight-vanilla"
+name = "ReLight Vanilla"
 version = "1.0.0"
 author = "VulkanShaders (Hyaloclast)"
-description = "Hyaloclast core shaders with an additional native VSL 2.0 SPIR-V unit."
+description = "ReLight Vanilla core shaders with an additional native VSL 2.0 SPIR-V lighting unit."
 
 [capabilities]
 tiers = [0, 1, 2, 3]

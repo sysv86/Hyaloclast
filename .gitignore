@@ -34,5 +34,5 @@ local/
 # Rust build output
 /target/
 
-# VSL native built-in pack units are part of the engine distribution.
-!src/main/resources/builtin-packs/hyaloclast-vsl-native.vsp/vsl-units/*.spv
+# ReLight Vanilla built-in pack units are part of the engine distribution.
+!src/main/resources/builtin-packs/relight-vanilla.vsp/vsl-units/*.spv

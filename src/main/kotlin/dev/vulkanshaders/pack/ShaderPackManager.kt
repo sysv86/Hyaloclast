@@ -50,7 +50,7 @@ object ShaderPackManager {
 
     internal const val BUILTIN_PACK_ID = "hyaloclast-sunlit-vanilla"
     internal const val SHOWCASE_PACK_ID = "hyaloclast-obsidian-showcase"
-    internal const val VSL_NATIVE_PACK_ID = "hyaloclast-vsl-native"
+    internal const val RELIGHT_VANILLA_PACK_ID = "relight-vanilla"
 
     internal const val MAX_ARCHIVE_ENTRIES: Int = 4096
     internal const val MAX_ARCHIVE_UNCOMPRESSED_BYTES: Long = 256L * 1024L * 1024L // 256 MB
@@ -117,7 +117,7 @@ object ShaderPackManager {
             ),
         ),
         BuiltinPackSpec(
-            id = VSL_NATIVE_PACK_ID,
+            id = RELIGHT_VANILLA_PACK_ID,
             files = listOf(
                 "pack.toml",
                 "CREDITS.md",
