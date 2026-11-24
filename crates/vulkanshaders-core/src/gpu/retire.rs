@@ -1,4 +1,7 @@
 use crate::gpu::buffer::{GpuBufferAllocation, GpuMemoryAllocator, PooledImageAllocation};
+/// Bounds deferred Vulkan destruction per poll so a tier switch cannot stall one render frame.
+const MAX_DESTRUCTORS_PER_POLL: usize = 64;
+
 use ash::vk::{self, Handle};
 use gpu_allocator::vulkan::Allocation;
 use parking_lot::Mutex;
@@ -165,7 +168,7 @@ impl RetireQueue {
             let completed = guard.completed_timeline_value;
             let mut drained = Vec::new();
             let mut i = 0;
-            while i < guard.timed_queue.len() {
+            while i < guard.timed_queue.len() && drained.len() < MAX_DESTRUCTORS_PER_POLL {
                 if guard.timed_queue[i].timeline_value <= completed {
                     drained.push(guard.timed_queue.swap_remove(i).task);
                 } else {
@@ -209,7 +212,12 @@ impl RetireQueue {
                 }
             }
 
-            std::mem::take(&mut guard.slots[idx])
+            let mut tasks = std::mem::take(&mut guard.slots[idx]);
+            if tasks.len() > MAX_DESTRUCTORS_PER_POLL {
+                let overflow = tasks.split_off(MAX_DESTRUCTORS_PER_POLL);
+                guard.slots[idx].extend(overflow);
+            }
+            tasks
         };
 
         for task in ready {

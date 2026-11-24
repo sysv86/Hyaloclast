@@ -1097,9 +1097,9 @@ pub unsafe extern "C" fn vs_core_record_frame_rtx(
 /// Loads VSL 2.0 SPIR-V units from a directory and registers them as native pipeline artifacts.
 /// Reflection is re-derived from the binary with the engine's rspirv-based linker, so the
 /// descriptor layouts and capability gates stay identical to the v1 compiler path.
-fn load_vsl_units(engine: &IgnisEngine, dir: &Path) -> usize {
+fn collect_vsl_units(dir: &Path) -> Vec<CompiledShaderArtifact> {
     let Ok(entries) = fs::read_dir(dir) else {
-        return 0;
+        return Vec::new();
     };
     let mut units = Vec::new();
     for entry in entries.flatten() {
@@ -1142,48 +1142,7 @@ fn load_vsl_units(engine: &IgnisEngine, dir: &Path) -> usize {
             loaded_from_cache: false,
         });
     }
-    if units.is_empty() {
-        return 0;
-    }
-
-    let ctx = engine.ctx.read();
-    let bindless_layout = engine.bindless.read().descriptor_set_layout;
-    let mut pnc = engine.pipelines_and_compiler.lock();
-    for unit in units {
-        pnc.pipelines
-            .compiled_artifacts
-            .insert(unit.stage_name.clone(), unit);
-    }
-    let built = pnc
-        .pipelines
-        .rebuild_all_pipelines_from_artifacts(&ctx, bindless_layout, &engine.retire);
-    if built > 0 {
-        pnc.pipelines.last_compile_error = None;
-    }
-    built
-}
-
-/// Loads VSL units from `VSL_UNIT_DIR` or `shaderpacks/vsl-units`.
-///
-/// # Safety
-/// The caller must pass live UTF-8 storage when using the explicit-directory entrypoint.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn vs_core_load_vsl_units(dir_ptr: u64, dir_len: i32) -> i32 {
-    let dir = if dir_ptr == 0 || dir_len <= 0 {
-        env::var_os("VSL_UNIT_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("shaderpacks/vsl-units"))
-    } else {
-        let bytes = unsafe {
-            slice::from_raw_parts(dir_ptr as *const u8, dir_len as usize)
-        };
-        let Ok(text) = str::from_utf8(bytes) else {
-            return -1;
-        };
-        PathBuf::from(text)
-    };
-    let Some(engine) = engine() else {
-        return -1;
-    };
-    load_vsl_units(&engine, &dir) as i32
+    units
 }
 
 /// # Safety
@@ -1232,6 +1191,10 @@ pub unsafe extern "C" fn vs_core_compile_active_pack(
     .compute_key();
     pipelines.ensure_pipeline_cache_for_key(&ctx, cache_key);
 
+    let vsl_dir = env::var_os("VSL_UNIT_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("shaderpacks/vsl-units"));
+    pipelines.pending_vsl_artifacts = collect_vsl_units(&vsl_dir);
     let count = pipelines.compile_pack_directory_with_layouts(
         &ctx,
         compiler,
@@ -1296,11 +1259,6 @@ pub unsafe extern "C" fn vs_core_compile_active_pack(
     if guard.snapshot().reason == crate::crash::RecoveryReason::ShaderCompileFailure {
         guard.reset();
     }
-    drop(pnc);
-    let vsl_dir = env::var_os("VSL_UNIT_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("shaderpacks/vsl-units"));
-    load_vsl_units(&engine, &vsl_dir);
     count as i32
 }
 

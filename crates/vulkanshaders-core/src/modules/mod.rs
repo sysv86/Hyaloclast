@@ -457,6 +457,8 @@ pub struct GpuPipelineManager {
     pub default_sampler: vk::Sampler,
     pub nearest_sampler: vk::Sampler,
     pub compiled_artifacts: HashMap<String, CompiledShaderArtifact>,
+    /// VSL 2.0 units merged into the next pack compile, before the single pipeline rebuild.
+    pub pending_vsl_artifacts: Vec<CompiledShaderArtifact>,
     pub shader_modules: HashMap<String, vk::ShaderModule>,
     pub compute_pipelines: HashMap<String, ComputePipelineBundle>,
     pub graphics_pipelines: HashMap<String, GraphicsPipelineBundle>,
@@ -884,6 +886,10 @@ impl GpuPipelineManager {
 
         self.compiled_artifacts.clear();
         for artifact in artifacts {
+            self.compiled_artifacts
+                .insert(artifact.stage_name.clone(), artifact);
+        }
+        for artifact in self.pending_vsl_artifacts.drain(..) {
             self.compiled_artifacts
                 .insert(artifact.stage_name.clone(), artifact);
         }
