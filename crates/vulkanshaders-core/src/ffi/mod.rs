@@ -1142,6 +1142,10 @@ fn collect_vsl_units(dir: &Path) -> Vec<CompiledShaderArtifact> {
             loaded_from_cache: false,
         });
     }
+    if !units.is_empty() {
+        let names: Vec<&str> = units.iter().map(|unit| unit.stage_name.as_str()).collect();
+        tracing::info!(?names, "VSL 2.0 SPIR-V units queued for native pipeline build");
+    }
     units
 }
 
