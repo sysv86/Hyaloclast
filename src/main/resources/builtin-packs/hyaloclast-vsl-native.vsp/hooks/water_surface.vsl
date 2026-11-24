@@ -1,88 +1,387 @@
 #include <vulkanshaders/v1/common.vsl>
 
 float sv_waterHash21(vec2 p) {
+    p = mod(p, 256.0);
     p = fract(p * vec2(123.34, 456.21));
     p += dot(p, p + 45.32);
     return fract(p.x * p.y);
 }
 
-// Procedural concentric raindrop impact rings on wet water surfaces during rainfall
-vec2 sv_rainRippleSlope(vec2 p, float timeSec) {
+vec2 sv_waterRot2(vec2 v, float c, float s) {
+    return vec2(c * v.x - s * v.y, s * v.x + c * v.y);
+}
+
+// Large-scale wind-gust / wave-group envelope traveling at group speed
+// so calm oceans show organic glassy slicks and rippled wind patches
+float sv_waterGroupEnvelope(vec2 p, float t, float rain) {
+    const float TAU = 6.28318530718;
+    float a1 = mod(p.x * 0.19 + p.y * 0.11, TAU) - mod(t * 0.24, TAU);
+    float a2 = mod(-p.x * 0.09 + p.y * 0.16, TAU) - mod(t * 0.17, TAU);
+    float env = 0.96 + 0.17 * sin(a1) + 0.11 * sin(a2);
+    return clamp(env, 0.72 + 0.12 * rain, 1.24);
+}
+
+// Accumulates a single 2nd-order Stokes wave octave with exact analytical derivative,
+// Gaussian Nyquist anti-aliasing, and Bruneton-Neyret unresolved slope-variance tracking.
+void sv_waterAccumWave(
+    vec2 p,
+    vec2 dir,
+    float k,
+    float omega,
+    float baseAmp,
+    float steepness,
+    float timeSec,
+    float phaseOffset,
+    float sigmaFilter,
+    float macroCalm,
+    float groupMod,
+    float rainBoost,
+    float ampScale,
+    inout float height,
+    inout vec2 grad,
+    inout float unresolvedVar
+) {
+    const float TAU = 6.28318530718;
+    float x = k * sigmaFilter;
+    float w = exp(-0.5 * x * x) * macroCalm;
+
+    // Conservation of microfacet slope variance when high frequencies filter out
+    float fullSlope = baseAmp * rainBoost * k * ampScale;
+    unresolvedVar += 0.5 * fullSlope * fullSlope * max(1.0 - w * w, 0.0);
+
+    if (w < 0.004) {
+        return;
+    }
+
+    float phasePos = mod(dot(p, dir) * k, TAU);
+    float phaseTime = mod(timeSec * omega, TAU);
+    float phi = phasePos - phaseTime + phaseOffset;
+    float s = sin(phi);
+    float c = cos(phi);
+
+    float a = baseAmp * rainBoost * groupMod * w;
+    // 2nd-order Stokes elevation: sin(phi) - 0.5 * eps * cos(2*phi) = sin(phi) + 0.5 * eps * (1 - 2*cos^2(phi))
+    height += a * (s + 0.5 * steepness * (1.0 - 2.0 * c * c));
+    // Exact derivative w.r.t. phi: cos(phi) * (1 + 2 * eps * sin(phi))
+    float dh = a * k * c * (1.0 + 2.0 * steepness * s);
+    grad += dir * dh;
+}
+
+// Physically bounded capillary raindrop wave packet with per-cycle randomized impact
+// positions, rain-density activation threshold, and zero cell-border clipping
+vec2 sv_waterRainPacket(vec2 p, float timeSec, float rate, float rainDensity) {
     vec2 cell = floor(p);
     vec2 local = fract(p) - 0.5;
-    float seed = sv_waterHash21(cell);
-    float age = fract(timeSec * 1.12 + seed);
-    vec2 center = (vec2(fract(seed * 17.3), fract(seed * 31.7)) - 0.5) * 0.54;
+
+    float cellSeed = sv_waterHash21(cell);
+    float cycleTime = timeSec * rate + cellSeed;
+    float cycle = mod(floor(cycleTime), 256.0);
+    float age = fract(cycleTime);
+
+    float dropSeed = sv_waterHash21(cell + vec2(cycle * 13.37, cycle * 7.19));
+    float threshold = 1.0 - rainDensity * 0.90;
+    float dropActive = smoothstep(threshold, threshold + 0.12, dropSeed);
+    if (dropActive <= 0.001) {
+        return vec2(0.0);
+    }
+
+    vec2 center = (vec2(fract(dropSeed * 19.31), fract(dropSeed * 37.73)) - 0.5) * 0.36;
     vec2 d = local - center;
     float dist = length(d);
-    float radius = age * 0.45;
+
+    // Sublinear expansion r(t) ~ t^0.75 via fast nested sqrt (no pow(0) UB)
+    float radius = 0.015 + 0.245 * sqrt(age * sqrt(age));
     float ring = dist - radius;
-    float env = exp(-ring * ring * 92.0) * (1.0 - age) * smoothstep(0.0, 0.08, age);
-    float waveDeriv = cos(ring * 40.0) * env;
-    return (dist > 1e-4) ? (d / dist) * waveDeriv : vec2(0.0);
+
+    float edgeMask = 1.0 - smoothstep(0.38, 0.495, max(abs(local.x), abs(local.y)));
+    float centerMask = smoothstep(0.0, 0.025, dist);
+    float attack = smoothstep(0.0, 0.06, age);
+    // Cylindrical 2D wave energy decay (1 / sqrt(r + r0)) + viscous exponential damping
+    float env = exp(-ring * ring * 210.0)
+              * exp(-age * 2.2)
+              * (1.0 - age)
+              * attack
+              * inversesqrt(radius + 0.14)
+              * edgeMask
+              * centerMask
+              * dropActive;
+
+    float deriv = sin(ring * 52.0) * env;
+    return (dist > 1e-4) ? (d / dist) * deriv : vec2(0.0);
+}
+
+// Smooth lacy micro-aeration pattern for storm whitecaps and waterfall streaks
+float sv_waterFoamLace(vec2 p, float timeSec) {
+    const float TAU = 6.28318530718;
+    float t1 = mod(timeSec * 0.45, TAU);
+    float t2 = mod(timeSec * 0.68, TAU);
+    float a1 = mod(p.x * 2.7 + p.y * 1.9, TAU) - t1;
+    float a2 = mod(p.x * 1.6 - p.y * 3.1, TAU) + t2;
+    float a3 = mod(p.x * 5.3 - p.y * 4.1, TAU) + t2;
+    float a4 = mod(p.x * 4.4 + p.y * 5.7, TAU) - t1;
+    float n1 = sin(a1) * cos(a2);
+    float n2 = sin(a3) * cos(a4);
+    return clamp(0.55 + 0.35 * n1 + 0.22 * n2, 0.0, 1.0);
+}
+
+// Exact unpolarized water-to-air Fresnel (n = 1.333 -> 1.0, critical angle 48.61 deg)
+// mapped to effective Schlick F0 so Snell's window and Total Internal Reflection work cleanly
+float sv_waterInternalF0(float cosThetaI) {
+    const float N_WATER = 1.333;
+    float mu = clamp(cosThetaI, 0.0, 1.0);
+    float sin2T = (N_WATER * N_WATER) * (1.0 - mu * mu);
+
+    float R = 1.0;
+    if (sin2T < 1.0) {
+        float cosT = sqrt(max(1.0 - sin2T, 0.0));
+        float rs = (N_WATER * mu - cosT) / max(N_WATER * mu + cosT, 1e-5);
+        float rp = (mu - N_WATER * cosT) / max(mu + N_WATER * cosT, 1e-5);
+        R = 0.5 * (rs * rs + rp * rp);
+    }
+
+    float om = 1.0 - mu;
+    float s5 = om * om * om * om * om;
+    float f0 = (R - s5) / max(1.0 - s5, 1e-4);
+    return clamp(f0, 0.0204, 0.96);
 }
 
 // @hook(stage = "water_surface", priority = 100)
-// Sunlit Vanilla - Calm 4-octave crossing Gerstner ripples with distance-faded high-frequency
-// octaves and raindrop rings to keep distant oceans calm and shimmer-free.
+// ReLight Vanilla - Physically grounded dispersive Stokes waves, Bruneton-Neyret normal-to-roughness
+// anti-aliasing, biome-preserving Beer-Lambert tinting, capillary rain packets, and Snell's window TIR.
 void sv_water_surface(inout VsSurface s, in vec3 worldPos, in float waveHeight) {
+    const float WATER_F0 = 0.0204;
+    const float TAU = 6.28318530718;
+
     float rain = clamp(vsWorld.rain, 0.0, 1.0);
-    float t = vsWorld.gameTimeSec * (1.42 + rain * 0.52);
-    float strength = clamp(VS_PARAM_WATER_WAVE_STRENGTH, 0.0, 1.0);
-    float amp = strength * (0.072 + 0.14 * rain);
-    vec2 p = worldPos.xz;
+    float thunder = clamp(vsWorld.thunder, 0.0, 1.0);
+    float sea = clamp(rain * 0.72 + thunder * 0.48, 0.0, 1.2);
 
-    // Distance-fade high-frequency octaves and rain ripples to eliminate distant ocean shimmer
-    float camDist = length(worldPos - uSharc.cfg.cameraPosition.xyz);
-    float oct2Fade = 1.0 - smoothstep(28.0, 96.0, camDist);
-    float oct3Fade = 1.0 - smoothstep(14.0, 52.0, camDist);
-    float rainFade = 1.0 - smoothstep(12.0, 42.0, camDist);
-    float macroFade = 1.0 - smoothstep(140.0, 420.0, camDist) * 0.65;
+    float userStrength = clamp(VS_PARAM_WATER_WAVE_STRENGTH, 0.0, 1.0);
+    // Gentle high-end compression keeps max slider physical while preserving full preset sensitivity
+    float effStrength = userStrength / (1.0 + 0.35 * userStrength);
+    float amp = effStrength * (0.195 + 0.145 * sea);
 
-    // 4 crossing Gerstner-inspired wave octaves with non-harmonic frequencies to prevent tiling
-    vec2 d0 = normalize(vec2( 0.91,  0.41));
-    vec2 d1 = normalize(vec2( 0.52,  0.85));
-    vec2 d2 = normalize(vec2(-0.66,  0.75));
-    vec2 d3 = normalize(vec2( 0.82, -0.57));
+    vec3 toCam = uSharc.cfg.cameraPosition.xyz - worldPos;
+    float camDist = length(toCam);
+    vec3 viewDir = (camDist > 1e-4) ? (toCam / camDist) : vec3(0.0, 1.0, 0.0);
 
-    float k0 = 0.92; float a0 = 1.00 * macroFade; float ph0 = dot(p, d0) * k0 + t * 0.88;
-    float k1 = 1.88; float a1 = 0.48 * macroFade; float ph1 = dot(p, d1) * k1 - t * 1.20;
-    float k2 = 3.45; float a2 = 0.24 * oct2Fade;  float ph2 = dot(p, d2) * k2 + t * 1.58;
-    float k3 = 6.10; float a3 = (0.11 + 0.10 * rain) * oct3Fade; float ph3 = dot(p, d3) * k3 - t * 2.25;
+    // Safe scalar check across int/uint/float eyeInFluid (1 = water; excludes air=0 and lava=2)
+    float eif = float(vsWorld.eyeInFluid);
+    float eyeInWater = clamp(eif, 0.0, 1.0) * step(eif, 1.5);
 
-    // Gentle trochoidal crest sharpening on the two primary swells
-    float w0 = ph0 + 0.20 * sin(ph0);
-    float w1 = ph1 + 0.16 * sin(ph1);
-    float dw0 = 1.0 + 0.20 * cos(ph0);
-    float dw1 = 1.0 + 0.16 * cos(ph1);
+    vec3 geomNormal = vsSafeNormalize(s.normal, vec3(0.0, 1.0, 0.0));
+    bool isHorizontal = abs(geomNormal.y) > 0.5;
+    bool isUnderwaterSnell = isHorizontal && (eyeInWater > 0.5) && (viewDir.y < 0.0);
 
-    float h = sin(w0) * a0
-            + sin(w1) * a1
-            + sin(ph2) * a2
-            + sin(ph3) * a3;
+    // Analytical perspective + grazing-foreshortening footprint (monotonic, derivative-free for RT/PT)
+    float absMuGeom = isHorizontal ? abs(viewDir.y) : abs(dot(geomNormal, viewDir));
+    float muFilter = max(absMuGeom, 0.10);
+    float foreshorten = 1.0 + 0.55 * (inversesqrt(muFilter) - 1.0);
+    float sigmaFilter = camDist * 0.00333 * foreshorten;
+    float macroCalm = 1.0 - 0.60 * smoothstep(120.0, 400.0, camDist);
 
-    vec2 grad = d0 * (cos(w0) * dw0 * k0 * a0)
-              + d1 * (cos(w1) * dw1 * k1 * a1)
-              + d2 * (cos(ph2) * k2 * a2)
-              + d3 * (cos(ph3) * k3 * a3);
+    float timeSec = vsWorld.gameTimeSec;
+    float waveTime = timeSec * (1.0 + 0.18 * sea);
 
-    // Raindrop impact rings when raining (faded with distance)
-    if (rain > 0.02 && rainFade > 0.01) {
-        vec2 r1 = sv_rainRippleSlope(p * 1.32, vsWorld.gameTimeSec);
-        vec2 r2 = sv_rainRippleSlope(p * 1.82 + vec2(3.7, 5.1), vsWorld.gameTimeSec * 1.16 + 0.37);
-        grad += (r1 + r2 * 0.72) * (rain * 2.05 * rainFade);
-    }
+    vec3 baseAlbedo = clamp(s.albedo, vec3(0.0), vec3(1.0));
+    // Infer optical clarity from biome water chromaticity (high for oceans/rivers, low for murky swamps)
+    float clarity = clamp((baseAlbedo.b - baseAlbedo.r) / max(baseAlbedo.g + baseAlbedo.b, 0.05), 0.0, 1.0);
 
-    vec3 slope = vec3(-grad.x * amp, 0.0, -grad.y * amp);
-    if (abs(s.normal.y) > 0.5) {
-        s.normal = normalize(vec3(0.0, 1.0, 0.0) + slope) * sign(s.normal.y);
+    if (isHorizontal) {
+        vec2 p = worldPos.xz;
+        float groupEnv = sv_waterGroupEnvelope(p, waveTime, rain);
+        float swellMod = mix(1.0, groupEnv, 0.35);
+        float steepScale = 0.85 + 0.28 * sea;
+
+        float h = 0.0;
+        vec2 grad = vec2(0.0);
+        float unresolvedVar = 0.0;
+
+        // Octaves 0-1: Primary wind-aligned gravity swells (dispersive omega = 0.40 * sqrt(g*k + (gamma/rho)*k^3))
+        sv_waterAccumWave(p, vec2( 0.891007,  0.453990), 0.74, 1.078, 1.180, 0.24 * steepScale,
+                          waveTime, 0.000, sigmaFilter, macroCalm, swellMod, 1.0 + 0.22 * sea, amp,
+                          h, grad, unresolvedVar);
+        sv_waterAccumWave(p, vec2( 0.990268,  0.139173), 1.59, 1.580, 0.464, 0.20 * steepScale,
+                          waveTime, 1.713, sigmaFilter, macroCalm, swellMod, 1.0 + 0.35 * sea, amp,
+                          h, grad, unresolvedVar);
+
+        // Octaves 2-3: Crossing medium gravity chop with mild orbital advection from primary swells
+        vec2 pMid = p + grad * (0.065 * macroCalm);
+        sv_waterAccumWave(pMid, vec2( 0.500000,  0.866025), 3.17, 2.231, 0.200, 0.15 * steepScale,
+                          waveTime, 3.426, sigmaFilter, macroCalm, groupEnv, 1.0 + 0.52 * sea, amp,
+                          h, grad, unresolvedVar);
+        sv_waterAccumWave(pMid, vec2( 0.939693, -0.342020), 5.75, 3.005, 0.097, 0.11 * steepScale,
+                          waveTime, 5.139, sigmaFilter, macroCalm, groupEnv, 1.0 + 0.68 * sea, amp,
+                          h, grad, unresolvedVar);
+
+#ifdef VS_ACTIVE_RENDER_TIER
+#if VS_ACTIVE_RENDER_TIER >= 2
+        // Octaves 4-5 (Tier 2+): Sub-block wind ripples for sharp ray-traced reflection micro-facets
+        vec2 pFine = p + grad * (0.035 * macroCalm);
+        sv_waterAccumWave(pFine, vec2( 0.121869,  0.992546), 9.85, 3.933, 0.050, 0.07 * steepScale,
+                          waveTime, 0.852, sigmaFilter, macroCalm, groupEnv, 1.0 + 0.78 * sea, amp,
+                          h, grad, unresolvedVar);
+        sv_waterAccumWave(pFine, vec2( 0.656059, -0.754710), 15.90, 5.000, 0.028, 0.05 * steepScale,
+                          waveTime, 2.565, sigmaFilter, macroCalm, groupEnv, 1.0 + 0.85 * sea, amp,
+                          h, grad, unresolvedVar);
+#endif
+#if VS_ACTIVE_RENDER_TIER >= 3
+        // Octaves 6-7 (Tier 3 PT): Close-range micro-ripples (< ~20m) for path-traced refractions & glints
+        sv_waterAccumWave(pFine, vec2(-0.422618,  0.906308), 23.40, 6.073, 0.0175, 0.0,
+                          waveTime, 4.278, sigmaFilter, macroCalm, groupEnv, 1.0 + 0.88 * sea, amp,
+                          h, grad, unresolvedVar);
+        sv_waterAccumWave(pFine, vec2( 0.224951, -0.974370), 34.20, 7.358, 0.0110, 0.0,
+                          waveTime, 5.991, sigmaFilter, macroCalm, groupEnv, 1.0 + 0.90 * sea, amp,
+                          h, grad, unresolvedVar);
+#endif
+#endif
+
+        vec2 slopeXZ = -grad * amp;
+
+        // Raindrop impact rings (orthonormal rotated layers with transpose gradient pull-back)
+        if (rain > 0.02) {
+            float rainEnable = smoothstep(0.0, 0.12, userStrength);
+            float rainAmp = (0.105 + 0.045 * thunder) * rainEnable * (0.45 + 0.55 * rain);
+            float rainFilter = exp(-0.5 * (13.5 * sigmaFilter) * (13.5 * sigmaFilter));
+            // Fold distant unresolved raindrop ripple energy smoothly into micro-roughness
+            unresolvedVar += 0.18 * rainAmp * rainAmp * max(1.0 - rainFilter * rainFilter, 0.0);
+
+            if (rainFilter > 0.015 && rainEnable > 0.001) {
+                vec2 pR1 = sv_waterRot2(p * 1.18, 0.80, -0.60);
+                vec2 r1 = sv_waterRainPacket(pR1, timeSec, 1.08 + 0.24 * rain, rain);
+                vec2 rWorld = sv_waterRot2(r1, 0.80, 0.60);
+
+                vec2 pR2 = sv_waterRot2(p * 1.67 + vec2(4.3, 7.1), 0.60, 0.80);
+                vec2 r2 = sv_waterRainPacket(pR2, timeSec + 0.41, 1.29 + 0.28 * rain, rain);
+                rWorld += sv_waterRot2(r2, 0.60, -0.80) * 0.72;
+
+#ifdef VS_ACTIVE_RENDER_TIER
+#if VS_ACTIVE_RENDER_TIER >= 2
+                float fineRainFilter = exp(-0.5 * (22.0 * sigmaFilter) * (22.0 * sigmaFilter));
+                if (fineRainFilter > 0.02) {
+                    vec2 pR3 = sv_waterRot2(p * 2.38 + vec2(9.2, 2.6), 0.96, -0.28);
+                    vec2 r3 = sv_waterRainPacket(pR3, timeSec + 0.73, 1.54 + 0.32 * rain, rain);
+                    rWorld += sv_waterRot2(r3, 0.96, 0.28) * (0.50 * fineRainFilter / max(rainFilter, 0.015));
+                }
+#endif
+#endif
+
+                // Attenuate slightly on underwater underside view to keep overhead refractions clean
+                float underScale = isUnderwaterSnell ? 0.65 : 1.0;
+                slopeXZ += -rWorld * (rainAmp * rainFilter * underScale);
+            }
+        }
+
+        vec3 upNormal = vsSafeNormalize(vec3(slopeXZ.x, 1.0, slopeXZ.y), vec3(0.0, 1.0, 0.0));
+        s.normal = upNormal * sign(geomNormal.y);
+
+        // Refracted optical path length via Snell's law (n = 1.333)
+        float muView = clamp(abs(dot(upNormal, viewDir)), 0.0, 1.0);
+        float sin2I = max(1.0 - muView * muView, 0.0);
+        float cosT = sqrt(max(1.0 - sin2I / (1.333 * 1.333), 0.18));
+        float oblique = clamp((1.0 / cosT - 1.0) * 1.95, 0.0, 1.0);
+
+        // Couple analytical wave height with engine-provided geometric waveHeight
+        float combinedH = h + clamp(waveHeight * 2.2, -1.2, 1.2);
+        float crest = clamp(combinedH * 0.34 + 0.48, 0.0, 1.0);
+        float trough = clamp(0.50 - combinedH * 0.34, 0.0, 1.0);
+
+        // Physical crest-steepness micro-foam (virtually zero on calm lakes, natural whitecaps in storms)
+        float slopeMag = length(slopeXZ);
+        float foamDrive = clamp(sea * 0.95 + max(userStrength - 0.55, 0.0) * 0.65, 0.0, 1.0);
+        float foamBase = smoothstep(0.58, 0.92, crest) * smoothstep(0.11, 0.26, slopeMag) * foamDrive;
+        float foamFade = 1.0 - smoothstep(12.0, 48.0, camDist);
+        float foam = 0.0;
+        if (foamBase > 0.002 && foamFade > 0.002) {
+            float lace = sv_waterFoamLace(p + grad * 0.12, waveTime);
+            foam = clamp(foamBase * lace * foamFade * 0.52, 0.0, 0.42);
+        }
+
+        // Biome-adaptive Beer-Lambert absorption (Pope-Fry clear spectrum vs CDOM/chlorophyll murky spectrum)
+        vec3 sigmaClear = vec3(0.52, 0.14, 0.045);
+        vec3 sigmaMurky = vec3(0.48, 0.28, 0.55);
+        vec3 sigma = mix(sigmaMurky, sigmaClear, clarity);
+        float optDepth = 0.25 + oblique * 2.10 + trough * 0.55;
+        vec3 beer = exp(-sigma * optDepth);
+
+        vec3 shallowCol = mix(baseAlbedo, vec3(0.035, 0.40, 0.54), 0.18 * clarity);
+        vec3 deepCol = shallowCol * (0.45 + 0.55 * beer);
+        vec3 col = mix(shallowCol, deepCol, 0.55 * oblique);
+
+        // Subtle emerald-aqua forward scattering through thin wave crests
+        vec3 crestTint = vec3(0.03, 0.36, 0.42) * clarity + baseAlbedo * (0.25 * (1.0 - clarity));
+        col += crestTint * (crest * 0.22 * (1.0 - 0.45 * rain));
+
+        if (isUnderwaterSnell) {
+            float snellOpen = smoothstep(0.62, 0.78, muView);
+            col = mix(col, vec3(0.06, 0.48, 0.64), 0.24 * clarity * snellOpen);
+        }
+
+        float colLum = vsLuminance(col);
+        col = mix(col, vec3(colLum), 0.16 * rain);
+        vec3 foamCol = vec3(0.80, 0.86, 0.90) * (1.0 - 0.18 * rain);
+        s.albedo = clamp(mix(col, foamCol, foam), vec3(0.0), vec3(1.0));
+
+        // Bruneton-Neyret roughness from unresolved slope variance + tier-tuned specular floor
+        float baseRough = 0.010;
+        float sssTierBoost = 1.0;
+#ifdef VS_ACTIVE_RENDER_TIER
+#if VS_ACTIVE_RENDER_TIER >= 3
+        baseRough = 0.006;
+        sssTierBoost = 1.25;
+#elif VS_ACTIVE_RENDER_TIER >= 2
+        baseRough = 0.008;
+        sssTierBoost = 1.10;
+#endif
+#endif
+        float rough = sqrt(baseRough * baseRough + 0.14 * unresolvedVar);
+        rough = mix(rough, 0.38, foam);
+        if (isUnderwaterSnell) {
+            // Crisp liquid-mirror reflections outside Snell's window
+            rough *= mix(0.85, 1.0, smoothstep(0.62, 0.78, muView));
+        }
+        s.roughness = clamp(rough, 0.005, 0.55);
+
+        s.f0 = isUnderwaterSnell ? sv_waterInternalF0(muView) : WATER_F0;
+        s.metallic = 0.0;
+
+        float sss = (0.06 + 0.26 * crest * crest)
+                  * (0.35 + 0.65 * clarity)
+                  * (1.0 - 0.50 * rain)
+                  * sssTierBoost;
+        s.subsurface = clamp(mix(sss, 0.10, foam), 0.0, 0.42);
+
+        // Preserve engine-baked AO while adding mild wave-trough self-occlusion
+        float troughAo = mix(0.92, 1.0, clamp(combinedH * 0.35 + 0.65, 0.0, 1.0));
+        s.ao *= troughAo;
     } else {
-        s.normal = normalize(s.normal + slope * 0.30);
-    }
+        // Vertical flowing water / waterfall faces: downward gravity-advected stream ripples
+        vec3 horizT = vsSafeNormalize(vec3(-geomNormal.z, 0.0, geomNormal.x), vec3(1.0, 0.0, 0.0));
+        float u = dot(worldPos.xz, horizT.xz);
+        float v = worldPos.y;
+        float flowRate = 2.6 + sea * 1.1;
 
-    // Crisp turquoise clarity with mirror-clean RT reflections on calm water
-    s.albedo = mix(s.albedo, vec3(0.06, 0.52, 0.64), 0.24);
-    float crest = clamp(h * 0.40 + 0.5, 0.0, 1.0);
-    s.roughness = mix(0.008, 0.036, crest * (0.24 + 0.76 * rain));
-    s.f0 = 0.02;
+        float wf1 = exp(-0.5 * (4.2 * sigmaFilter) * (4.2 * sigmaFilter)) * macroCalm;
+        float wf2 = exp(-0.5 * (8.4 * sigmaFilter) * (8.4 * sigmaFilter)) * macroCalm;
+
+        float ph1 = mod(u * 4.2 + v * 1.35, TAU) + mod(timeSec * flowRate, TAU);
+        float ph2 = mod(-u * 6.8 + v * 2.40, TAU) + mod(timeSec * (flowRate * 1.38), TAU);
+
+        float du = (cos(ph1) * 4.2 * 0.032 * wf1 - cos(ph2) * 6.8 * 0.014 * wf2) * (0.45 + effStrength * 1.4);
+        float dv = (cos(ph1) * 1.35 * 0.032 * wf1 + cos(ph2) * 2.40 * 0.014 * wf2) * (0.45 + effStrength * 1.4);
+
+        s.normal = vsSafeNormalize(geomNormal + horizT * (-du) + vec3(0.0, -dv, 0.0), geomNormal);
+
+        float fallFade = 1.0 - smoothstep(14.0, 56.0, camDist);
+        float streak = 0.5 + 0.5 * sin(mod(u * 5.6, TAU) + sin(mod(v * 1.6, TAU) + mod(timeSec * flowRate, TAU)));
+        float mistFoam = clamp(streak * 0.24 * fallFade * (0.65 + 0.35 * clarity), 0.0, 0.30);
+
+        vec3 fallCol = mix(baseAlbedo, vec3(0.05, 0.44, 0.58), 0.16 * clarity);
+        vec3 foamCol = vec3(0.84, 0.90, 0.94) * (1.0 - 0.16 * rain);
+        s.albedo = clamp(mix(fallCol, foamCol, mistFoam), vec3(0.0), vec3(1.0));
+        s.roughness = mix(0.022 + 0.04 * (1.0 - wf1), 0.36, mistFoam);
+        s.f0 = WATER_F0;
+        s.metallic = 0.0;
+        s.subsurface = clamp(0.14 * (0.4 + 0.6 * clarity), 0.0, 0.24);
+    }
 }
