@@ -1197,9 +1197,14 @@ pub unsafe extern "C" fn vs_core_compile_active_pack(
     .compute_key();
     pipelines.ensure_pipeline_cache_for_key(&ctx, cache_key);
 
-    let vsl_dir = env::var_os("VSL_UNIT_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("shaderpacks/vsl-units"));
+    let bundled_units = pack_path.join("vsl-units");
+    let vsl_dir = if bundled_units.is_dir() {
+        bundled_units
+    } else {
+        env::var_os("VSL_UNIT_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("shaderpacks/vsl-units"))
+    };
     pipelines.pending_vsl_artifacts = collect_vsl_units(&vsl_dir);
     let count = pipelines.compile_pack_directory_with_layouts(
         &ctx,

@@ -1,0 +1,12 @@
+[pack]
+id = "hyaloclast-vsl-native"
+name = "VSL Native"
+version = "1.0.0"
+author = "VulkanShaders"
+description = "Native VSL 2.0 SPIR-V unit pack for Hyaloclast."
+
+[capabilities]
+tiers = [0, 1, 2, 3]
+
+[pipeline]
+mode = "extend"
