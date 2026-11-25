@@ -109,6 +109,8 @@ object ShaderPackManager {
                 "hooks/clouds.vsl",
                 "hooks/fog.vsl",
                 "hooks/post_grade.vsl",
+                "lang/en_us.json",
+                "lang/ru_ru.json",
             ),
             legacyFilesToPrune = listOf(
                 "shaders/compute/mc_depth.comp",
@@ -162,6 +164,8 @@ object ShaderPackManager {
                 "vsl-units/vsl_tiled_lighting.spv",
                 "vsl-units/vsl_tiled_lighting.stage",
                 "vsl-units/vsl_tiled_lighting.json",
+                "lang/en_us.json",
+                "lang/ru_ru.json",
             ),
         ),
         BuiltinPackSpec(
@@ -178,6 +182,8 @@ object ShaderPackManager {
                 "hooks/clouds.vsl",
                 "hooks/fog.vsl",
                 "hooks/post_grade.vsl",
+                "lang/en_us.json",
+                "lang/ru_ru.json",
             ),
         ),
     )
@@ -237,6 +243,7 @@ object ShaderPackManager {
     }
 
     fun reloadAll() {
+        PackLocalization.clearCache()
         val dir = shaderpacksDir()
         Files.createDirectories(dir)
         val rawPacks = mutableListOf<LoadedShaderPack>()

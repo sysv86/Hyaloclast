@@ -336,9 +336,9 @@ class ShaderPacksScreen(
     private fun packLabel(name: Component, active: Boolean): Component =
         if (active) text("active", name).withStyle(ChatFormatting.GREEN) else name
 
-    private fun localizedManifest(pack: LoadedShaderPack) = PackLocalization.localize(
-        pack.manifest,
-        PackLocalization.load(pack.rootPath, minecraft.languageManager.selected),
+    private fun localizedManifest(pack: LoadedShaderPack) = PackLocalization.localizePack(
+        pack,
+        minecraft.languageManager.selected,
     )
 
     private fun packDetails(pack: LoadedShaderPack, canEnable: Boolean): Component {

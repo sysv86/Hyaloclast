@@ -1,0 +1,33 @@
+{
+  "pack": {
+    "name": "Obsidian Showcase",
+    "description": "Hyaloclast Vulkan technology showcase featuring multi-bounce SHaRC GI, ReSTIR DI colored lights, mirror-polished LabPBR metals, POM relief, volumetric cumulus, and AgX grading."
+  },
+  "categories": {
+    "diagnostics": "Diagnostics",
+    "lighting": "Lighting",
+    "atmosphere": "Atmosphere",
+    "water": "Water",
+    "post": "Post",
+    "performance": "Performance",
+    "general": "General"
+  },
+  "presets": {
+    "low": {
+      "label": "Low",
+      "description": "Lighter showcase profile with foliage wind disabled, reduced fog, and single-bounce path tracing."
+    },
+    "medium": {
+      "label": "Medium",
+      "description": "Balanced showcase profile with foliage wind, subtle parallax occlusion, and two-bounce GI."
+    },
+    "high": {
+      "label": "High",
+      "description": "Default Obsidian Showcase profile with POM relief, volumetric shafts, SHaRC multi-bounce GI, and wet puddles."
+    },
+    "ultra": {
+      "label": "Ultra",
+      "description": "Uncompromised showcase with deep POM relief, high-bounce path tracing, intense god rays, and mirror-wet puddles."
+    }
+  }
+}

@@ -1,27 +1,118 @@
 {
+  "pack": {
+    "name": "ReLight Vanilla",
+    "description": "Flagship VSL 2.0 vanilla-faithful shader pack with blackbody dynamic lighting, vanilla-preserving incandescent lava, interactive water waves, volumetric aurora, and native SPIR-V tiled lighting."
+  },
+  "categories": {
+    "diagnostics": "Diagnostics",
+    "lighting": "Lighting",
+    "atmosphere": "Atmosphere",
+    "water": "Water",
+    "post": "Post",
+    "performance": "Performance",
+    "general": "General"
+  },
   "settings": {
     "debug_view": {
       "label": "Shader Debug View",
-      "category": "Diagnostics",
-      "description": "Display an internal render target instead of the final image.",
+      "description": "Display internal render targets instead of the final image.",
       "options": {
         "off": "Off",
-        "radiance": "Final Radiance",
+        "radiance": "Radiance",
         "albedo": "Albedo",
         "encoded_normal": "Encoded Normal",
-        "normal": "World Normal",
+        "normal": "Normal",
         "roughness": "Roughness",
         "metallic": "Metallic",
         "emission": "Emission",
-        "material": "Packed Material",
+        "material": "Material",
         "depth": "Depth",
-        "motion": "Motion Vectors",
+        "motion": "Motion",
         "raw_radiance": "Raw Radiance",
         "sharp_radiance": "Sharp Radiance",
-        "sharc": "SHaRC Cache Occupancy",
-        "restir_di": "ReSTIR DI Selection",
+        "sharc": "SHaRC Cache",
+        "restir_di": "ReSTIR DI",
         "svgf_variance": "SVGF Variance"
       }
+    },
+    "restir_gi": {
+      "label": "ReSTIR Indirect GI",
+      "description": "Reuse first-bounce diffuse samples over time to reduce path-traced indirect-light noise."
+    },
+    "sun_intensity": {
+      "label": "Sun Intensity",
+      "description": "Direct solar irradiance multiplier for sunlight and sky lighting."
+    },
+    "fog_density": {
+      "label": "Atmospheric Fog Density",
+      "description": "Base density of distance and volumetric atmospheric fog."
+    },
+    "water_wave_strength": {
+      "label": "Water Wave Strength",
+      "description": "Amplitude of animated surface waves and normal perturbation on water."
+    },
+    "tone_mapping": {
+      "label": "Tone Mapping",
+      "description": "HDR-to-display tone mapping curve applied during final color grading.",
+      "options": {
+        "agx": "AgX",
+        "aces": "ACES",
+        "pbr_neutral": "PBR Neutral"
+      }
+    },
+    "torch_intensity": {
+      "label": "Torch & Dynamic Light Strength",
+      "description": "Emission multiplier for torches, lanterns, and dynamic block lights."
+    },
+    "godrays_intensity": {
+      "label": "RT Volumetric God Rays",
+      "description": "Strength of volumetric light shafts through air and fog."
+    },
+    "gi_bounce_strength": {
+      "label": "Path-Traced GI Bounce",
+      "description": "Intensity of indirect multi-bounce global illumination."
+    },
+    "wetness_strength": {
+      "label": "Rain Wetness & Puddles",
+      "description": "Surface darkening, specular sheen, and puddle reflection strength during rain."
+    },
+    "pom_depth": {
+      "label": "Parallax Occlusion Depth",
+      "description": "Height-map parallax occlusion depth on PBR textures (0 disables POM for best FPS)."
+    },
+    "pt_max_bounces": {
+      "label": "Path Tracing Max Bounces",
+      "description": "Maximum indirect ray bounce depth for Tier 3 path tracing. Higher values increase GPU cost."
+    },
+    "enable_wind": {
+      "label": "Foliage Wind",
+      "description": "Enables vertex wind sway animation on leaves, grass, and crops."
+    },
+    "lava_glow": {
+      "label": "Lava Glow",
+      "description": "Emission multiplier for molten vanilla lava channels, magma blocks, and thermal bloom."
+    },
+    "lava_flow_speed": {
+      "label": "Lava Flow Speed",
+      "description": "Animation speed of convective thermal pulses and incandescent shimmer on lava."
+    }
+  },
+  "presets": {
+    "low": {
+      "label": "Low",
+      "description": "Performance-focused ReLight Vanilla profile with foliage wind disabled, lighter mist, and single-bounce path tracing."
+    },
+    "medium": {
+      "label": "Medium",
+      "description": "Balanced visuals and frame rate with smooth foliage breeze, gentle valley mist, and single-bounce path tracing."
+    },
+    "high": {
+      "label": "High",
+      "description": "Default ReLight Vanilla profile with PBR Neutral color fidelity, interactive water, volumetric aurora, and two-bounce path tracing."
+    },
+    "ultra": {
+      "label": "Ultra",
+      "description": "Maximum visual fidelity with POM relief, rich atmospheric scattering, dynamic water effects, and deep multi-bounce path tracing."
     }
   }
 }

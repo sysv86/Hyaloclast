@@ -39,9 +39,9 @@ import kotlin.math.round
 import kotlin.math.roundToInt
 
 private fun localizedManifest(pack: LoadedShaderPack) =
-    PackLocalization.localize(
-        pack.manifest,
-        PackLocalization.load(pack.rootPath, Minecraft.getInstance().languageManager.selected),
+    PackLocalization.localizePack(
+        pack,
+        Minecraft.getInstance().languageManager.selected,
     )
 
 /**
@@ -59,7 +59,17 @@ class PackSettingsScreen(
     options,
     Component.translatable("vulkanshaders.screen.pack_settings.title", localizedManifest(pack).name),
 ) {
-    private val manifest = localizedManifest(pack)
+    private var cachedLocale: String = Minecraft.getInstance().languageManager.selected
+    private var cachedManifest: ShaderPackManifest = localizedManifest(pack)
+    private val manifest: ShaderPackManifest
+        get() {
+            val currentLocale = Minecraft.getInstance().languageManager.selected
+            if (currentLocale != cachedLocale) {
+                cachedLocale = currentLocale
+                cachedManifest = localizedManifest(pack)
+            }
+            return cachedManifest
+        }
     private var selectedCategory: String? = null
     private var searchQuery: String = ""
     private var modifiedOnly: Boolean = false
@@ -434,12 +444,19 @@ class PackSettingsScreen(
         }
     }
 
-    private fun localizedPresetLabel(preset: PackPresetDefinition): Component = when (preset.id.lowercase(Locale.ROOT)) {
-        "low" -> Component.translatable("vulkanshaders.screen.pack_settings.preset.low")
-        "medium" -> Component.translatable("vulkanshaders.screen.pack_settings.preset.medium")
-        "high" -> Component.translatable("vulkanshaders.screen.pack_settings.preset.high")
-        "ultra" -> Component.translatable("vulkanshaders.screen.pack_settings.preset.ultra")
-        else -> Component.literal(preset.label)
+    private fun localizedPresetLabel(preset: PackPresetDefinition): Component {
+        val rawPreset = pack.manifest.presets.firstOrNull { it.id == preset.id }
+        val wasLocalizedByPack = rawPreset != null && preset.label != rawPreset.label
+        if (wasLocalizedByPack) {
+            return Component.literal(preset.label)
+        }
+        return when (preset.id.lowercase(Locale.ROOT)) {
+            "low" -> Component.translatable("vulkanshaders.screen.pack_settings.preset.low")
+            "medium" -> Component.translatable("vulkanshaders.screen.pack_settings.preset.medium")
+            "high" -> Component.translatable("vulkanshaders.screen.pack_settings.preset.high")
+            "ultra" -> Component.translatable("vulkanshaders.screen.pack_settings.preset.ultra")
+            else -> Component.literal(preset.label)
+        }
     }
 
     private fun buildPresetButtonLabel(activePreset: PackPresetDefinition?): Component {
@@ -737,8 +754,17 @@ class PackSettingsScreen(
             text.append(Component.literal(desc))
             text.append(Component.literal("\n"))
         }
+        val displayDefault: Any = when (setting.type) {
+            SettingType.ENUM -> displayOptionLabel(setting, setting.defaultValue)
+            SettingType.BOOL -> if (setting.defaultValue.equals("true", ignoreCase = true)) {
+                CommonComponents.OPTION_ON
+            } else {
+                CommonComponents.OPTION_OFF
+            }
+            else -> setting.defaultValue
+        }
         text.append(
-            Component.translatable("vulkanshaders.screen.pack_settings.default_hint", setting.defaultValue)
+            Component.translatable("vulkanshaders.screen.pack_settings.default_hint", displayDefault)
                 .withStyle(ChatFormatting.GRAY),
         )
         text.append(Component.literal("\n"))
