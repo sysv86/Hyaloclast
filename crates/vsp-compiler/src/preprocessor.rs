@@ -659,11 +659,13 @@ impl VslPreprocessor {
                 );
                 hook_prelude.push_str("VsHookWorld vsHookWorld;\n");
                 hook_prelude.push_str("#define vsWorld vsHookWorld\n");
+                // The native wind compute scheduler state is not mirrored in the raster UBOs.
+                hook_prelude.push_str("#define VS_WIND_COMPUTE_ACTIVE 0\n");
                 if per_stage_blocks.contains_key("water_waves") {
                     hook_prelude.push_str("#define VS_HOOK_WATER_WAVES_BOUND 1\n");
                 }
                 if !Self::contains_identifier(&expanded, "VsVertexInput") {
-                    hook_prelude.push_str("struct VsVertexInput { uint materialFlags; };\n");
+                    hook_prelude.push_str("struct VsVertexInput { uint materialFlags; vec3 worldPos; vec2 uv0; vec2 midUv; };\n");
                 }
                 if !Self::contains_identifier(&expanded, "VsSurface") {
                     hook_prelude.push_str(
@@ -747,7 +749,7 @@ impl VslPreprocessor {
     fn raster_hook_call(stage: HookStage) -> String {
         match stage {
             HookStage::VertexDisplace => {
-                "vsHookWorld = VsHookWorld(vsMotion.cameraDeltaTime.w, vsMotion.sunDirRain.w, vsMotion.heldLightData.x, vsMotion.heldLightData.y, vsMotion.heldLightData.z, vsMotion.sunDirRain.xyz);\n    vsHookVertexDisplace(localPos, VsVertexInput(vertexHookFlags));".to_owned()
+                "vsHookWorld = VsHookWorld(vsMotion.cameraDeltaTime.w, vsMotion.sunDirRain.w, vsMotion.heldLightData.x, vsMotion.heldLightData.y, vsMotion.heldLightData.z, vsMotion.sunDirRain.xyz);\n    // worldPos uses the section world anchor: Position is region-local, RegionOrigin is absolute block space.\n    vsHookVertexDisplace(localPos, VsVertexInput(vertexHookFlags, Position + vec3(RegionOrigin), UV0, MidUV));".to_owned()
             }
             HookStage::WaterWaves => {
                 "vsHookWorld = VsHookWorld(vsMotion.cameraDeltaTime.w, vsMotion.sunDirRain.w, vsMotion.heldLightData.x, vsMotion.heldLightData.y, vsMotion.heldLightData.z, vsMotion.sunDirRain.xyz);\n    float vsWaveStrength = 0.35;\n    float vsWaveSpeed = 1.8;\n    float vsWaveScale = 2.2;\n    vsHookWaterWaves(vsWaveStrength, vsWaveSpeed, vsWaveScale);".to_owned()

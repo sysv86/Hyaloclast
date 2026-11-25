@@ -442,7 +442,8 @@ layout(std140, set = 0, binding = 0) uniform WorldUBO {
     vec4 packParams[12];
     vec4 heldLightPosition;
     uvec2 packParamsBda;
-    uvec2 packParamsBdaPad;
+    float windPhase;
+    uint windPhasePad;
 } vsWorld;
 
 // Smoothly-blended biome & dimension telemetry packed by WorldStateCollector.kt

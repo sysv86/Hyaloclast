@@ -760,6 +760,8 @@ object GbufferPipelineRegistry {
     ): String = buildString {
         appendLine("// --- Hyaloclast .vsl pack defines ---")
         appendLine("#define VS_SPEC_ENABLE_WIND ${specDefines["enable_wind"] ?: "true"}")
+        // No raster-visible flag mirrors the native wind compute scheduler state.
+        appendLine("#define VS_WIND_COMPUTE_ACTIVE 0")
         for ((k, v) in specDefines) {
             if (k != "enable_wind") {
                 appendLine("#define VS_SPEC_${k.uppercase(Locale.ROOT)} $v")
@@ -784,7 +786,7 @@ object GbufferPipelineRegistry {
         appendLine("struct VsHookWorld { float gameTimeSec; float rain; float heldLight; float thunder; float eyeInFluid; vec3 sunDir; };")
         appendLine("VsHookWorld vsHookWorld;")
         appendLine("#define vsWorld vsHookWorld")
-        appendLine("struct VsVertexInput { uint materialFlags; };")
+        appendLine("struct VsVertexInput { uint materialFlags; vec3 worldPos; vec2 uv0; vec2 midUv; };")
         appendLine("struct VsSurface { vec3 albedo; vec3 normal; float roughness; float metallic; float emission; float ao; float subsurface; float f0; };")
         for (hook in applied) {
             if (hook.helperCode.isNotBlank()) {
@@ -809,7 +811,8 @@ object GbufferPipelineRegistry {
             vsHookWorld = VsHookWorld(vsMotion.cameraDeltaTime.w, vsMotion.sunDirRain.w,
                                       vsMotion.heldLightData.x, vsMotion.heldLightData.y,
                                       vsMotion.heldLightData.z, vsMotion.sunDirRain.xyz);
-            vsHookVertexDisplace(localPos, VsVertexInput(vertexHookFlags));
+            // worldPos uses the section world anchor: Position is region-local, RegionOrigin is absolute block space.
+            vsHookVertexDisplace(localPos, VsVertexInput(vertexHookFlags, Position + vec3(RegionOrigin), UV0, MidUV));
         """.trimIndent()
         "water_waves" -> """
             vsHookWorld = VsHookWorld(vsMotion.cameraDeltaTime.w, vsMotion.sunDirRain.w,

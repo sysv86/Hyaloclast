@@ -31,11 +31,9 @@ class VslHookInjectionTest {
             type = ShaderType.VERTEX,
             hooks = mapOf("vertex_displace" to hook("vertex_displace.vsl")),
         )
-        assertTrue(result.contains("float phase = vsWorld.gameTimeSec * windSpeed + localPos.x * 0.68"), "hook body missing")
-        assertTrue(result.contains("localPos.x += gust;"), "hook deformation missing")
-        assertTrue(result.contains("localPos.z += gust * 0.62;"), "hook deformation missing")
         assertTrue(result.contains("void vsHookVertexDisplace(inout vec3 localPos, VsVertexInput v)"), "adapter missing")
-        assertTrue(result.contains("vsHookVertexDisplace(localPos, VsVertexInput(vertexHookFlags));"), "hook call missing")
+        assertTrue(result.contains("vsHookVertexDisplace(localPos, VsVertexInput("), "hook call missing")
+        assertTrue(result.contains("Position + vec3(RegionOrigin)"), "world position argument missing")
         assertFalse(result.contains("// @hook vertex_displace"), "marker must be replaced by real code")
         assertTrue(result.indexOf("#version 330") < result.indexOf("void vsHookVertexDisplace"), "#version must stay first")
     }

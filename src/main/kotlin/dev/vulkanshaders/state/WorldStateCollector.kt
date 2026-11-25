@@ -52,8 +52,15 @@ import kotlin.math.sin
  * (`HeldLightPolicy.java`, Apache License 2.0).
  */
 object WorldStateCollector {
-    // 528-byte v1 WorldUBO payload + 8-byte VSL packParams BDA + 8-byte std140 padding.
+    // 528-byte v1 WorldUBO payload + 8-byte VSL packParams BDA (528..535) + 4-byte integrated
+    // wind phase (536..539) + 4-byte std140 padding (540..543).
     const val WORLD_UBO_BYTES: Int = 544
+    private const val WIND_PHASE_OFFSET_BYTES: Int = 536
+    private const val WIND_TICK_SECONDS: Double = 0.05
+    private const val MAX_WIND_FRAME_TICKS: Double = 5.0
+    // Matches the built-in vertex-displace hook: `windSpeed = 1.75 + rain * 1.10`.
+    private const val WIND_BASE_SPEED: Float = 1.75f
+    private const val WIND_RAIN_SPEED: Float = 1.10f
     const val MAX_PACK_PARAM_FLOATS: Int = 48
     const val MAX_RGB24: Int = 0xFFFFFF
     const val JITTER_PHASE_COUNT: Int = 16
@@ -271,6 +278,13 @@ object WorldStateCollector {
     private var smoothBiomeFogB: Float = 0.90f
     private var smoothBiomeDensity: Float = 1.0f
 
+    // Integrated wind phase (radians). Accumulated from the game clock (never wall clock) so a
+    // weather-driven wind-speed change cannot introduce a phase jump, and the 72000-tick
+    // gameTimeSec wrap cannot either. Kept as a double so sub-frame precision survives long
+    // uptimes; the WorldUBO stores it as a single-precision float at offset 536.
+    private var windPhase: Double = 0.0
+    private var lastWindGameTick: Double? = null
+
     @JvmStatic
     fun resetHistory() {
         frameIndex = 0
@@ -298,6 +312,9 @@ object WorldStateCollector {
         cachedPackSettingsValid = false
         cachedPackConfigRef = null
         cachedPackRef = null
+        // Drop the wind delta baseline so the first frame after a history reset integrates 0 s;
+        // the accumulated phase itself stays continuous (no visible jump on pack reload).
+        lastWindGameTick = null
         jitterX = 0.0f
         jitterY = 0.0f
         prevJitterX = 0.0f
@@ -451,6 +468,21 @@ object WorldStateCollector {
         val eyeInFluid = cameraState.fogType.ordinal
         val submergedInWater = eyeInFluid == 1
 
+        // Integrate wind phase from the game clock (gameTime + partialTick), never wall clock.
+        // `gameTimeSec * windSpeed` jumps whenever rain/thunder changes and again at the
+        // 72000-tick gameTimeSec wrap; accumulating dt * speed keeps the phase continuous at any
+        // uptime. Clamp pathological frame gaps (e.g. a long stall or a /time jump) to 5 ticks.
+        val windGameTick = level.gameTime.toDouble() + partialTick.toDouble()
+        val prevWindGameTick = lastWindGameTick
+        val windTickDelta = if (!isDiscontinuousFrame && prevWindGameTick != null) {
+            (windGameTick - prevWindGameTick).coerceIn(0.0, MAX_WIND_FRAME_TICKS)
+        } else {
+            0.0
+        }
+        lastWindGameTick = windGameTick
+        val windSpeed = (WIND_BASE_SPEED + rainLevel * WIND_RAIN_SPEED).toDouble()
+        windPhase += windTickDelta * WIND_TICK_SECONDS * windSpeed
+
         // Held-light evaluation for BOTH hands simultaneously with unified underwater open-flame policy
         val player = mc.player
         val firstPerson = mc.options.cameraType.isFirstPerson
@@ -525,6 +557,7 @@ object WorldStateCollector {
             dimensionId = dimensionId,
             heldPosition = primaryHeldPosition,
             heldLightKind = primaryLightKind,
+            windPhase = windPhase.toFloat(),
         )
         NativeCoreBridge.updateWorldUbo(uniformBufferAddress(), WORLD_UBO_BYTES)
         collectAndSubmitEmissiveLights(
@@ -949,6 +982,7 @@ object WorldStateCollector {
         dimensionId: Int = 0,
         heldPosition: Vec3 = Vec3.ZERO,
         heldLightKind: Int = 0,
+        windPhase: Float = 0.0f,
     ) {
         uboBuffer.clear()
         curViewProj.get(0, uboBuffer)
@@ -1029,6 +1063,8 @@ object WorldStateCollector {
         // 528..535: VSL pack-parameter BDA. Native core overwrites this with the live
         // device address each frame; the placeholder keeps the 544-byte upload deterministic.
         uboBuffer.putLong(528, 0L)
+        // 536..539: integrated wind phase (radians). 540..543 stay std140 padding.
+        uboBuffer.putFloat(WIND_PHASE_OFFSET_BYTES, windPhase)
     }
 
     internal fun updateMatrices(

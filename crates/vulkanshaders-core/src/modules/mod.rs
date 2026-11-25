@@ -44,7 +44,8 @@ type ShadowLayerGroup = (bool, u32, u64, u64, [i32; 3], u32, u32);
 /// - `320..511`: `pack_params` (`[[f32; 4]; 12]` = 48 scalar floats)
 /// - `512..527`: camera-relative held-light position (`vec4`)
 /// - `528..535`: `pack_params_bda` (`u64` address of the VSL live pack-parameter buffer)
-/// - `536..543`: alignment padding (the `std140` block is rounded to a 16-byte multiple)
+/// - `536..539`: `wind_phase` (`f32`, CPU-integrated `sum(dt * windSpeed)` from the game clock)
+/// - `540..543`: alignment padding (the `std140` block is rounded to a 16-byte multiple)
 ///
 /// The first 528 bytes are byte-for-byte the v1 WorldUBO ABI; v1 shaders may keep declaring the
 /// original 528-byte block. Only the producer (`WorldStateCollector.kt`) must supply 544 bytes.
@@ -68,13 +69,18 @@ pub struct WorldUboData {
     pub pack_params: [[f32; 4]; 12],
     pub held_light_position: [f32; 4],
     pub pack_params_bda: u64,
-    pub pack_params_bda_pad: [u8; 8],
+    /// Integrated wind phase in radians. Produced by `WorldStateCollector.kt` as
+    /// `windPhase += dtSeconds * windSpeed`, so changing wind speed with weather never causes a
+    /// phase discontinuity (unlike `gameTimeSec * windSpeed`).
+    pub wind_phase: f32,
+    pub pack_params_bda_pad: [u8; 4],
 }
 
 const _: () = assert!(std::mem::size_of::<WorldUboData>() == 544);
 const _: () = assert!(std::mem::offset_of!(WorldUboData, pack_params) == 320);
 const _: () = assert!(std::mem::offset_of!(WorldUboData, held_light_position) == 512);
 const _: () = assert!(std::mem::offset_of!(WorldUboData, pack_params_bda) == 528);
+const _: () = assert!(std::mem::offset_of!(WorldUboData, wind_phase) == 536);
 
 /// Fixed capacity of the VSL pack-parameter BDA buffer. Reflected offsets are pack-schema
 /// relative and comfortably fit this size; allocating once avoids mid-frame buffer churn.
@@ -5322,8 +5328,11 @@ mod world_ubo_layout_tests {
         assert_eq!(std::mem::offset_of!(WorldUboData, pack_params), 320);
         assert_eq!(std::mem::offset_of!(WorldUboData, held_light_position), 512);
         assert_eq!(std::mem::offset_of!(WorldUboData, pack_params_bda), 528);
+        assert_eq!(std::mem::offset_of!(WorldUboData, wind_phase), 536);
+        assert_eq!(std::mem::offset_of!(WorldUboData, pack_params_bda_pad), 540);
         let ubo = WorldUboData::default();
         assert_eq!(ubo.pack_params_bda, 0);
+        assert_eq!(ubo.wind_phase, 0.0);
     }
 
     #[test]
