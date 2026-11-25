@@ -25,10 +25,10 @@ void main() {
     vec3 radiance = vec3(0.0);
     vs_dispatch_hook_sky(radiance, rayDir, sky);
 
-    // Evaluate overworld clouds only in the Overworld (`dimId == 0`) on primary, specular, and
-    // optical (water/glass/mirror) rays (bit 17), preventing overworld clouds from leaking into
-    // the Nether or The End.
-    if (vsDimensionId() == 0 && (payload.flags & (1u << 17u)) != 0u) {
+    // The clouds hook now handles all dimensions internally (Overworld voxel clouds, End void
+    // atmosphere and its black hole). Keep it on primary, specular and optical rays (bit 17);
+    // do not gate by dimension here or the End sky never receives the hook at all.
+    if ((payload.flags & (1u << 17u)) != 0u) {
         vec4 clouds = vs_dispatch_hook_clouds(rayDir, uSharc.cfg.cameraPosition.xyz, sky);
         radiance = radiance * clouds.a + clouds.rgb;
         if (((payload.flags >> 8u) & 255u) > 0u) {

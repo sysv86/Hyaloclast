@@ -15,7 +15,9 @@ void sv_fog(in float dist, in vec3 dir, inout vec3 scatter, inout vec3 transmitt
     // The End: additive sky-plane godrays from the fixed black-hole accretion source.
     // This stage has no depth or TLAS access, so obsidian spires cannot occlude the fan;
     // ray-traced visibility would need a separate pass.
-    if (vsDimensionId() == 2 && vsHasBiomeTelemetry()) {
+    // Only add the fan to distant/background samples. Near geometry (including obsidian RT
+    // reflections) has a short `dist` and must not receive this sky-only effect.
+    if (vsDimensionId() == 2 && vsHasBiomeTelemetry() && dist > 180.0) {
         const vec3 endSource = vec3(0.300526, 0.560983, -0.771351);
         float cosSource = clamp(dot(dir, endSource), -1.0, 1.0);
         if (cosSource > 0.55) {
