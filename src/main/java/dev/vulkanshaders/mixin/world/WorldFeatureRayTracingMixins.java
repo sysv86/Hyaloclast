@@ -211,6 +211,89 @@ public final class WorldFeatureRayTracingMixins {
 
     @Mixin({ StagedVertexBuffer.Draw.class, ModelFeatureRenderer.class })
     public static class DrawMixin implements RayTracedWorldDraw {
+        // Mixin classes in a defined mixin package must not reference the outer container class,
+        // so all tracking state lives inside this mixin itself.
+        private static final int ENTITY_CATEGORY_PLAYER = 1;
+        private static final int ENTITY_FLAGS_PLAYER_NO_SHADOW = 0x07 | 0x20;
+        private static final List<int[]> localPlayerVertexRanges = new ArrayList<>();
+        private static int modelMeshVertexCursor = 0;
+
+        private static final class CountingVertexConsumer implements VertexConsumer {
+            private final VertexConsumer delegate;
+            private int written;
+
+            private CountingVertexConsumer(VertexConsumer delegate) {
+                this.delegate = delegate;
+            }
+
+            @Override
+            public VertexConsumer addVertex(float x, float y, float z) {
+                this.written++;
+                this.delegate.addVertex(x, y, z);
+                return this;
+            }
+
+            @Override
+            public VertexConsumer setColor(int a, int r, int g, int b) {
+                this.delegate.setColor(a, r, g, b);
+                return this;
+            }
+
+            @Override
+            public VertexConsumer setColor(int color) {
+                this.delegate.setColor(color);
+                return this;
+            }
+
+            @Override
+            public VertexConsumer setUv(float u, float v) {
+                this.delegate.setUv(u, v);
+                return this;
+            }
+
+            @Override
+            public VertexConsumer setUv1(int u, int v) {
+                this.delegate.setUv1(u, v);
+                return this;
+            }
+
+            @Override
+            public VertexConsumer setUv2(int u, int v) {
+                this.delegate.setUv2(u, v);
+                return this;
+            }
+
+            @Override
+            public VertexConsumer setUv3(float u, float v) {
+                this.delegate.setUv3(u, v);
+                return this;
+            }
+
+            @Override
+            public VertexConsumer setNormal(float x, float y, float z) {
+                this.delegate.setNormal(x, y, z);
+                return this;
+            }
+
+            @Override
+            public VertexConsumer setLineWidth(float width) {
+                this.delegate.setLineWidth(width);
+                return this;
+            }
+        }
+
+        private static boolean isLocalPlayerThirdPersonBody(ModelFeatureRenderer.Submit submit) {
+            if (submit == null || !(submit.state() instanceof AvatarRenderState avatar)) {
+                return false;
+            }
+            Minecraft client = Minecraft.getInstance();
+            return client.player != null
+                && avatar.id == client.player.getId()
+                && !client.player.isSpectator()
+                && client.getCameraEntity() == client.player
+                && !client.options.getCameraType().isFirstPerson()
+                && !VulkanShadersTurboExtension.capturingFirstPersonAvatar;
+        }
         @WrapOperation(
             method = "prepareModel",
             at = @At(
