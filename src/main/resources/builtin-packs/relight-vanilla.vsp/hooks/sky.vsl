@@ -128,13 +128,49 @@ vec3 sv_endLensedStarDir(vec3 dir) {
 void sv_sky(inout vec3 radiance, in vec3 dir, in VsSkyState sky) {
     int dimId = vsDimensionId();
 
-    // The Nether: warm volcanic haze
+    // The Nether: warm volcanic haze with a slow churn and sparse airborne embers
     if (dimId == 1) {
         vec3 bTint = vsHasBiomeTelemetry() ? vsBiomeFogTint() : vec3(0.28, 0.07, 0.04);
-        float horizonBand = exp(-abs(dir.y) * 5.0);
-        vec3 ceilingCol = bTint * 0.40;
-        vec3 horizonCol = bTint * 1.15 + vec3(0.09, 0.028, 0.012);
-        radiance = max(mix(ceilingCol, horizonCol, horizonBand), vec3(0.012, 0.005, 0.004));
+
+        // Bounded time keeps the churn phases stable over long sessions.
+        float t = mod(sky.gameTimeSec, 1024.0);
+
+        // Two counter-phased low-frequency swells: ceiling and horizon breathe out of step,
+        // so the haze never reads as a static gradient.
+        float churn = 0.5 + 0.5 * sin(t * 0.19 + dir.y * 1.9);
+        float drift = 0.5 + 0.5 * sin(t * 0.11 - dir.x * 1.4 + dir.z * 1.1);
+
+        float horizonBand = exp(-abs(dir.y) * 4.6);
+        float lowBand = exp(-abs(dir.y) * 11.0);
+
+        // Dark ash ceiling above, hotter ember band along the horizon.
+        vec3 ashCeiling = mix(bTint * 0.34, vec3(0.040, 0.030, 0.030), 0.45 + 0.30 * churn);
+        vec3 emberHorizon = bTint * (1.05 + 0.30 * drift) + vec3(0.11, 0.030, 0.010);
+        radiance = mix(ashCeiling, emberHorizon, horizonBand);
+        radiance += vec3(0.20, 0.055, 0.016) * lowBand * (0.55 + 0.45 * churn) * 0.55;
+        radiance = max(radiance, vec3(0.010, 0.004, 0.004));
+
+        // Distant embers: one candidate per coarse direction cell, drifting slowly inside it.
+        // The in-cell drift fades out at cell borders, so embers never pop across cells.
+        vec3 emberGrid = dir * 44.0;
+        vec3 cell = floor(emberGrid);
+        vec3 cellFrac = fract(emberGrid);
+        float hEmber = sv_starHash(cell);
+        float host = smoothstep(0.9958, 0.9990, hEmber);
+        if (host > 0.0) {
+            vec3 seed = vec3(
+                sv_starHash(cell + 7.0),
+                sv_starHash(cell + 19.0),
+                sv_starHash(cell + 31.0)
+            );
+            vec3 centre = 0.5 + 0.30 * sin(t * 0.09 + seed * 6.2831);
+            vec3 delta = cellFrac - centre;
+            float core = exp(-dot(delta, delta) * 34.0);
+            float flicker = 0.55 + 0.45 * sin(t * (0.28 + seed.x * 0.30) + hEmber * 63.0);
+            vec3 emberCol = mix(vec3(1.00, 0.36, 0.10), vec3(0.72, 0.26, 0.13), seed.y);
+            float horizonFade = smoothstep(-0.03, 0.14, dir.y);
+            radiance += emberCol * core * host * flicker * horizonFade * 0.34;
+        }
         return;
     }
 

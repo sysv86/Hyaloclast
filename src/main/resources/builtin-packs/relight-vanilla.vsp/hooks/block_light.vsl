@@ -91,13 +91,17 @@ void sv_block_light(inout vec3 radiance, in uint lightKind, in float dist) {
         tint = mix(mix(outerSoul, midSoul, nearness), coreSoul, hotCore * 0.74);
         targetBright = 0.84;
     } else if (lightKind == 2u) {
-        // Lava / magma: silicate melt Planckian blackbody (1240K crust -> 1700K molten -> 2520K core)
+        // Lava / magma: silicate melt Planckian blackbody (1240K crust -> 1700K molten -> 2520K core).
+        // A slow churn swell on top of the fast shimmer reads as a convecting lake rather than a
+        // pulsing lamp, while staying under ~0.4 Hz so TAA/SVGF can resolve it cleanly.
+        float w0 = sin(mod(timeSec * 0.37, TAU));
         float w1 = sin(mod(timeSec * 1.32, TAU));
         float w2 = sin(mod(timeSec * 2.14, TAU) + 0.8);
-        float pulse = (0.70 * w1 + 0.30 * w2) * 0.022 * flickerDamp;
+        float pulse = (0.48 * w0 + 0.36 * w1 + 0.16 * w2)
+                    * (0.030 + 0.008 * stormDraft) * flickerDamp;
         flicker = 1.0 + pulse;
 
-        float kelvin = mix(mix(1240.0, 1700.0, nearness), 2520.0, hotCore)
+        float kelvin = mix(mix(1240.0, 1720.0, nearness), 2580.0, hotCore)
                      * tempScale * (1.0 + pulse * ptTempCoupling);
         tint = sv_blockPlanckLinear(kelvin);
         targetBright = 0.86;

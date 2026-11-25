@@ -12,6 +12,27 @@ void sv_fog(in float dist, in vec3 dir, inout vec3 scatter, inout vec3 transmitt
     scatter *= mix(vec3(0.84, 0.87, 0.90), vec3(0.98, 0.90, 0.80), sunWarmth * 0.45);
     transmittance = mix(vec3(1.0), transmittance, 0.98);
 
+    // The Nether: ember-lit volcanic haze. There is no world position at this stage, so all
+    // variation is temporal or horizon-weighted; nothing here can swim with the camera.
+    if (vsDimensionId() == 1) {
+        // Bounded time keeps the pulse phase stable over long sessions.
+        float t = mod(vsWorld.gameTimeSec, 1024.0);
+        float emberPulse = 0.5 + 0.5 * sin(t * 1.05);      // ~6 s breathing
+        float churn = 0.5 + 0.5 * sin(t * 0.31 + 2.1);     // slower secondary swell
+
+        // Push the ambient scatter toward ember orange/red without crushing its brightness.
+        vec3 warmShift = vec3(1.10 + 0.10 * emberPulse, 0.86, 0.74);
+        scatter *= mix(vec3(1.0), warmShift, 0.85);
+
+        // Horizon-weighted ember glow. The distance ramp keeps it on the far haze, so nearby
+        // geometry keeps its own shading instead of receiving a flat orange wash.
+        float horizonWeight = exp(-abs(dir.y) * 3.6);
+        float distRamp = smoothstep(8.0, 110.0, dist);
+        vec3 emberGlow = vec3(0.16, 0.045, 0.015)
+            * (0.60 + 0.40 * emberPulse) * (0.85 + 0.15 * churn);
+        scatter += emberGlow * horizonWeight * distRamp;
+    }
+
     // The End: additive sky-plane godrays from the fixed black-hole accretion source.
     // This stage has no depth or TLAS access, so obsidian spires cannot occlude the fan;
     // ray-traced visibility would need a separate pass.

@@ -163,6 +163,28 @@ runtime = true
 min_tier = 1
 max_tier = 3
 
+[settings.lava_glow]
+label = "Lava Glow"
+category = "Atmosphere"
+description = "Emission multiplier for molten lava, magma blocks, and their bloom halo."
+type = "float"
+default = 1.0
+min = 0.0
+max = 2.5
+step = 0.05
+runtime = true
+
+[settings.lava_flow_speed]
+label = "Lava Flow Speed"
+category = "Atmosphere"
+description = "Animation speed of molten crust churn, glowing cracks, and bubbles."
+type = "float"
+default = 1.0
+min = 0.0
+max = 2.5
+step = 0.05
+runtime = true
+
 [settings.wetness_strength]
 label = "Rain Wetness & Puddles"
 category = "Water"
