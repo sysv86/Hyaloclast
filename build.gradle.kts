@@ -160,6 +160,10 @@ val stageNativesAndChecksums by tasks.registering {
     group = "build"
     description = "Stages native libraries under natives/<platform>/ and generates SHA-256 integrity manifests"
     inputs.property("nativePlatformFilter", platformFilterProp)
+    // cargoBuild has no declared source inputs/outputs, so it always runs. Track its cdylib here:
+    // without this, a rebuilt .so leaves this task's inputs/filter and output dir unchanged, so it
+    // stays UP-TO-DATE and a stale library propagates into processResources / build/resources/main.
+    inputs.file(projectDir.file("target/release/$hostLibraryName"))
     outputs.dir(outNativesRoot)
 
     doLast {

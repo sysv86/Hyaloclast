@@ -454,7 +454,10 @@ class VspTomlParserTest {
         val expectedRuntimeKeys = baseManifest.runtimeSettings.map { it.key }
         val expectedSettingKeys = baseManifest.settings.map { it.key }.toSet()
 
-        assertEquals(listOf(baseId, showcaseId), ShaderPackManager.BUILTIN_PACK_IDS)
+        assertEquals(
+            listOf(baseId, "relight-vanilla", showcaseId),
+            ShaderPackManager.BUILTIN_PACK_IDS,
+        )
         assertEquals(listOf(0, 1, 2, 3), baseManifest.supportedTiers)
         assertEquals(listOf("low", "medium", "high", "ultra"), baseManifest.presets.map { it.id })
         assertTrue(baseManifest.resources.any { it.name == "blue_noise" })

@@ -34,12 +34,15 @@ A pack may declare `extends = "<parent-pack-id>"` in `[pack]`. `VspCompiler::res
 
 ### Built-In Shader Packs
 
-Hyaloclast ships two built-in packs under `src/main/resources/builtin-packs/`:
+Hyaloclast ships three built-in packs under `src/main/resources/builtin-packs/`:
 
 | Pack ID | Display Name | Role |
 | :--- | :--- | :--- |
 | `hyaloclast-sunlit-vanilla.vsp` | **Sunlit Vanilla** | Default gameplay-tuned pack covering Tiers 0–3 with vanilla-faithful lighting, Gerstner water, voxel clouds, foliage wind, and `pbr_neutral` tone mapping |
+| `relight-vanilla.vsp` | **ReLight Vanilla** | Sunlit Vanilla baseline extended with a native VSL 2.0 tiled-lighting unit under `vsl-units/` |
 | `hyaloclast-obsidian-showcase.vsp` | **Obsidian Showcase** | Engine technology showcase (`extends = "hyaloclast-sunlit-vanilla"`) demonstrating multi-bounce SHaRC GI, ReSTIR DI, POM, volumetric cumulus/aurora, and AgX grading |
+
+Although the Sunlit Vanilla and ReLight Vanilla folders contain `lang/en_us.json`, that path is **not** listed in `BUILTIN_PACKS.files` (`ShaderPackManager.kt`), so built-in packs do not extract it. Built-in localization comes from `assets/vulkanshaders/lang/`; user-installed packs may still ship `lang/` files.
 
 ## 2. `pack.toml` Manifest Schema
 

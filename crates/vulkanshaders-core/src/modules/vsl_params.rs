@@ -59,6 +59,18 @@ pub fn load_used_params(dir: &Path, stage_name: &str) -> Vec<VslUsedParam> {
         .collect()
 }
 
+/// Loads `used_params` from each candidate directory, accumulating bindings in directory order.
+/// Missing or malformed sidecars are ignored so pack-local units still work without a global
+/// `VSL_UNIT_DIR`.
+pub fn load_used_params_from_dirs<'a>(
+    dirs: impl IntoIterator<Item = &'a Path>,
+    stage_name: &str,
+) -> Vec<VslUsedParam> {
+    dirs.into_iter()
+        .flat_map(|dir| load_used_params(dir, stage_name))
+        .collect()
+}
+
 /// Deduplicates and sorts reflected bindings so buffer layout and writes stay deterministic.
 pub fn merge_used_params(bindings: impl IntoIterator<Item = VslUsedParam>) -> Vec<VslUsedParam> {
     let mut seen = HashSet::new();
@@ -158,6 +170,38 @@ mod tests {
     fn missing_sidecar_yields_no_bindings() {
         let bindings = load_used_params(Path::new("/definitely/not/a/real/path"), "unit");
         assert!(bindings.is_empty());
+    }
+
+    #[test]
+    fn loads_used_params_from_pack_and_global_dirs() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("vsl_params_dirs_{}_{stamp}", std::process::id()));
+        let pack_dir = root.join("pack/vsl-units");
+        let global_dir = root.join("global/vsl-units");
+        fs::create_dir_all(&pack_dir).unwrap();
+        fs::create_dir_all(&global_dir).unwrap();
+        fs::write(
+            pack_dir.join("probe.json"),
+            r#"{"used_params":[{"name":"torch_intensity","byte_offset":0,"byte_size":4}]}"#,
+        )
+        .unwrap();
+        fs::write(
+            global_dir.join("probe.json"),
+            r#"{"used_params":[{"name":"sun_intensity","byte_offset":4,"byte_size":4}]}"#,
+        )
+        .unwrap();
+
+        let bindings =
+            load_used_params_from_dirs([pack_dir.as_path(), global_dir.as_path()], "probe");
+        assert_eq!(bindings.len(), 2);
+        assert_eq!(bindings[0].name, "torch_intensity");
+        assert_eq!(bindings[1].name, "sun_intensity");
+
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
