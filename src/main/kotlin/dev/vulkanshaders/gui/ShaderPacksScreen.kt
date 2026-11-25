@@ -11,6 +11,9 @@ import dev.vulkanshaders.pack.ShaderPackManager
 import net.minecraft.ChatFormatting
 import net.minecraft.client.Options
 import net.minecraft.client.gui.components.Button
+import net.minecraft.client.gui.components.EditBox
+import net.minecraft.client.gui.components.OptionsList
+import net.minecraft.client.gui.components.StringWidget
 import net.minecraft.client.gui.components.Tooltip
 import net.minecraft.client.gui.layouts.LinearLayout
 import net.minecraft.client.gui.screens.AlertScreen
@@ -30,6 +33,8 @@ class ShaderPacksScreen(
     }
 
     private var importStatus: Component? = null
+    private var searchQuery: String = ""
+    private var searchBox: EditBox? = null
 
     private fun createLogScreen(): Screen =
         if (StandaloneRenderPearlBridge.vulkanTurboLoaded) {
@@ -45,10 +50,46 @@ class ShaderPacksScreen(
             StandaloneRenderPearlBridge.isVulkanBackendActive() &&
             NativeCoreBridge.initialized
 
+    private fun unavailableReason(): Component = text(
+        when {
+            !StandaloneRenderPearlBridge.vulkanTurboLoaded -> "requires_pyroclast"
+            StandaloneRenderPearlBridge.isVulkanBackendActive() -> "runtime_unavailable"
+            else -> "requires_vulkan"
+        },
+    )
+
+    private fun shouldShowSearch(): Boolean =
+        ShaderPackManager.discoveredPacks.size > SEARCH_THRESHOLD || searchQuery.isNotEmpty()
+
     override fun init() {
         layout.removeChildren()
-        layout.setFooterHeight(56)
+        layout.setHeaderHeight(if (shouldShowSearch()) HEADER_WITH_SEARCH_HEIGHT else HEADER_DEFAULT_HEIGHT)
+        layout.setFooterHeight(FOOTER_HEIGHT)
         super.init()
+    }
+
+    override fun addTitle() {
+        searchBox = null
+        if (!shouldShowSearch()) {
+            super.addTitle()
+            return
+        }
+
+        val header = layout.addToHeader(LinearLayout.vertical().spacing(4))
+        header.defaultCellSetting().alignHorizontallyCenter()
+        header.addChild(StringWidget(title, font))
+
+        val field = header.addChild(EditBox(font, COLUMN_WIDTH, 20, text("packs.search")))
+        field.setMaxLength(128)
+        field.setHint(text("packs.search"))
+        field.value = searchQuery
+        field.setResponder { newQuery ->
+            if (newQuery != searchQuery) {
+                searchQuery = newQuery
+                refreshOptionsList(resetScroll = true)
+            }
+        }
+        searchBox = field
     }
 
     override fun addOptions() {
@@ -58,43 +99,51 @@ class ShaderPacksScreen(
         val active = ShaderPackManager.activePack.takeIf { VulkanShaders.shaderPackActive }
 
         if (!canEnable) {
-            list.addHeader(
-                text(
-                    when {
-                        !StandaloneRenderPearlBridge.vulkanTurboLoaded -> "requires_pyroclast"
-                        StandaloneRenderPearlBridge.isVulkanBackendActive() -> "runtime_unavailable"
-                        else -> "requires_vulkan"
-                    },
-                ).withStyle(ChatFormatting.YELLOW),
-            )
+            list.addHeader(unavailableReason().copy().withStyle(ChatFormatting.YELLOW))
         }
         importStatus?.let(list::addHeader)
-        ShaderPackManager.lastPackError?.takeIf { it.isNotBlank() }?.let {
-            list.addBig(Button.builder(text("load_error").withStyle(ChatFormatting.RED)) {
-                minecraft.gui.setScreen(createLogScreen())
-            }.build())
-        }
-        if (HyaloclastErrorLog.errorCount() > 0) {
+
+        // Show a single deduplicated error/log entry rather than two identical red buttons.
+        val hasPackError = !ShaderPackManager.lastPackError.isNullOrBlank()
+        val errorCount = HyaloclastErrorLog.errorCount()
+        if (hasPackError || errorCount > 0) {
+            val errorLabel = when {
+                hasPackError -> text("load_error")
+                else -> Component.translatable("vulkanshaders.screen.packs.view_log_count", errorCount)
+            }.withStyle(ChatFormatting.RED)
             list.addBig(
-                Button.builder(
-                    Component.translatable("vulkanshaders.screen.packs.view_log").withStyle(ChatFormatting.RED),
-                ) {
+                Button.builder(errorLabel) {
                     minecraft.gui.setScreen(createLogScreen())
                 }.build(),
             )
         }
 
+        val query = searchQuery.trim()
         val off = !cfg.enabled || cfg.selectedPackId.equals("off", ignoreCase = true) || cfg.selectedPackId.isBlank()
-        list.addBig(Button.builder(packLabel(text("pack.none"), off)) {
-            if (!off) {
-                VulkanShaders.updateConfig(VulkanShaders.config.copy(selectedPackId = "off"))
-                refreshWidgets()
-            }
-        }.build())
+        if (query.isEmpty()) {
+            list.addBig(
+                Button.builder(packLabel(text("pack.none"), off)) {
+                    if (!off) {
+                        VulkanShaders.updateConfig(VulkanShaders.config.copy(selectedPackId = "off"))
+                        refreshWidgets()
+                    }
+                }.build(),
+            )
+        }
 
+        var matchedAny = false
         for (pack in ShaderPackManager.discoveredPacks) {
             val manifest = localizedManifest(pack)
+            if (query.isNotEmpty() &&
+                !manifest.name.contains(query, ignoreCase = true) &&
+                !manifest.id.contains(query, ignoreCase = true) &&
+                !manifest.author.contains(query, ignoreCase = true)
+            ) {
+                continue
+            }
+            matchedAny = true
             val selected = active?.manifest?.id == manifest.id
+            val tooltip = packDetails(pack, canEnable)
             list.addBig(
                 Button.builder(packLabel(Component.literal(manifest.name), selected)) {
                     if (!selected) {
@@ -108,36 +157,70 @@ class ShaderPacksScreen(
                         }
                         refreshWidgets()
                     }
-                }.tooltip(Tooltip.create(packDetails(pack))).build().apply {
+                }.tooltip(Tooltip.create(tooltip)).build().apply {
                     this.active = canEnable
                 },
             )
+        }
+
+        if (query.isNotEmpty() && !matchedAny) {
+            list.addBig(StringWidget(text("packs.no_matches").withStyle(ChatFormatting.GRAY), font))
         }
     }
 
     override fun addFooter() {
         val footer = LinearLayout.vertical().spacing(4)
-        val files = footer.addChild(LinearLayout.horizontal().spacing(5))
-        val settings = footer.addChild(LinearLayout.horizontal().spacing(5))
+        val files = footer.addChild(LinearLayout.horizontal().spacing(FOOTER_GAP))
+        val actions = footer.addChild(LinearLayout.horizontal().spacing(FOOTER_GAP))
 
+        // Align both footer rows to the exact same 3 x 100px grid (310px total).
         files.addChild(
             Button.builder(text("import")) { minecraft.gui.setScreen(ShaderPackImportScreen(this, options)) }
-                .width(100).tooltip(Tooltip.create(text("import.tooltip"))).build(),
+                .width(FOOTER_BUTTON_WIDTH)
+                .tooltip(Tooltip.create(text("import.tooltip")))
+                .build(),
         )
-        files.addChild(Button.builder(text("open_folder")) {
-            runCatching { Blaze3D.openPath(ShaderPackManager.shaderpacksDir()) }
-                .onFailure { showDetails(text("folder_error"), Component.literal(it.message ?: it.javaClass.simpleName)) }
-        }.width(100).build())
-        files.addChild(Button.builder(text("reload")) { reloadPacks() }.width(100).build())
+        files.addChild(
+            Button.builder(text("open_folder")) {
+                runCatching { Blaze3D.openPath(ShaderPackManager.shaderpacksDir()) }
+                    .onFailure { showDetails(text("folder_error"), Component.literal(it.message ?: it.javaClass.simpleName)) }
+            }.width(FOOTER_BUTTON_WIDTH)
+                .tooltip(Tooltip.create(text("open_folder.tooltip")))
+                .build(),
+        )
+        files.addChild(
+            Button.builder(text("reload")) { reloadPacks() }
+                .width(FOOTER_BUTTON_WIDTH)
+                .tooltip(Tooltip.create(text("reload.tooltip")))
+                .build(),
+        )
 
         val pack = ShaderPackManager.activePack.takeIf { VulkanShaders.shaderPackActive }
-        settings.addChild(Button.builder(text("pack_settings")) {
+        val hasPackSettings = pack != null && pack.manifest.settings.isNotEmpty()
+        val packSettingsButton = Button.builder(text("pack_settings")) {
             if (pack != null) minecraft.gui.setScreen(PackSettingsScreen(this, options, pack))
-        }.width(110).build().apply { active = pack != null && pack.manifest.settings.isNotEmpty() })
-        settings.addChild(Button.builder(text("graphics")) {
+        }.width(FOOTER_BUTTON_WIDTH).apply {
+            if (!hasPackSettings) {
+                tooltip(Tooltip.create(text("pack_settings.disabled_tooltip")))
+            }
+        }.build().apply { active = hasPackSettings }
+        actions.addChild(packSettingsButton)
+
+        val canEnable = canEnableShaders()
+        val graphicsButton = Button.builder(text("graphics")) {
             minecraft.gui.setScreen(ShaderGraphicsScreen(this, options))
-        }.width(90).build().apply { active = canEnableShaders() })
-        settings.addChild(Button.builder(CommonComponents.GUI_DONE) { onClose() }.width(100).build())
+        }.width(FOOTER_BUTTON_WIDTH).apply {
+            if (!canEnable) {
+                tooltip(Tooltip.create(unavailableReason()))
+            }
+        }.build().apply { active = canEnable }
+        actions.addChild(graphicsButton)
+
+        actions.addChild(
+            Button.builder(CommonComponents.GUI_DONE) { onClose() }
+                .width(FOOTER_BUTTON_WIDTH)
+                .build(),
+        )
 
         layout.addToFooter(footer)
     }
@@ -198,10 +281,46 @@ class ShaderPacksScreen(
         refreshWidgets()
     }
 
+    private fun refreshOptionsList(resetScroll: Boolean = false) {
+        val listWidget = this.list ?: return
+        val scroll = if (resetScroll) 0.0 else listWidget.scrollAmount()
+        clearOptionsListEntries(listWidget)
+        addOptions()
+        listWidget.setScrollAmount(scroll)
+    }
+
+    private fun clearOptionsListEntries(listWidget: OptionsList) {
+        val cleared = runCatching {
+            var cls: Class<*>? = listWidget.javaClass
+            var method: java.lang.reflect.Method? = null
+            while (cls != null && method == null) {
+                method = cls.declaredMethods.firstOrNull { it.name == "clearEntries" && it.parameterCount == 0 }
+                cls = cls.superclass
+            }
+            if (method != null) {
+                method.isAccessible = true
+                method.invoke(listWidget)
+                true
+            } else {
+                false
+            }
+        }.getOrDefault(false)
+        if (!cleared) {
+            runCatching { listWidget.children().clear() }
+        }
+    }
+
     private fun refreshWidgets() {
         val scroll = list?.scrollAmount() ?: 0.0
+        val wasSearchFocused = searchBox?.isFocused == true
         rebuildWidgets()
         list?.setScrollAmount(scroll)
+        if (wasSearchFocused) {
+            searchBox?.let { box ->
+                this.focused = box
+                box.isFocused = true
+            }
+        }
     }
 
     private fun showDetails(title: Component, message: Component, returnTo: Screen = this) {
@@ -222,15 +341,26 @@ class ShaderPacksScreen(
         PackLocalization.load(pack.rootPath, minecraft.languageManager.selected),
     )
 
-    private fun packDetails(pack: LoadedShaderPack): Component {
+    private fun packDetails(pack: LoadedShaderPack, canEnable: Boolean): Component {
         val manifest = localizedManifest(pack)
         val details = text("pack.info", manifest.version, manifest.author)
         if (pack.isBuiltin) details.append("\n").append(text("pack.builtin"))
         if (manifest.description.isNotBlank()) details.append("\n\n").append(manifest.description)
+        if (!canEnable) {
+            details.append("\n\n").append(unavailableReason().copy().withStyle(ChatFormatting.YELLOW))
+        }
         return details
     }
 
     companion object {
+        private const val COLUMN_WIDTH: Int = 310
+        private const val HEADER_DEFAULT_HEIGHT: Int = 33
+        private const val HEADER_WITH_SEARCH_HEIGHT: Int = 56
+        private const val FOOTER_HEIGHT: Int = 56
+        private const val FOOTER_BUTTON_WIDTH: Int = 100
+        private const val FOOTER_GAP: Int = 5
+        private const val SEARCH_THRESHOLD: Int = 4
+
         internal fun text(key: String, vararg args: Any) =
             Component.translatable("vulkanshaders.screen.$key", *args)
     }
