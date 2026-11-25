@@ -250,7 +250,8 @@ class HardwareAutoCalibratorTest {
         )
         val resGtx = HardwareAutoCalibrator.calibrate(gtx1660, VulkanShadersConfig(), sampleManifest())
         assertEquals(LightingMode.COMPUTE, resGtx.config.renderTier)
-        assertEquals("medium", resGtx.recommendedPresetId)
+        // Compute mode is the full-quality non-RT path; mid-tier discrete GPUs get High.
+        assertEquals("high", resGtx.recommendedPresetId)
         assertEquals(2048, resGtx.config.shadowResolution)
         assertEquals(12, resGtx.config.shadowDistanceChunks)
         assertTrue(resGtx.config.autoCalibrated)
@@ -270,7 +271,7 @@ class HardwareAutoCalibratorTest {
         )
         val resRx = HardwareAutoCalibrator.calibrate(rx6600, VulkanShadersConfig(), sampleManifest())
         assertEquals(LightingMode.COMPUTE, resRx.config.renderTier)
-        assertEquals("medium", resRx.recommendedPresetId)
+        assertEquals("high", resRx.recommendedPresetId)
         assertEquals(UpscalerMode.NONE, resRx.config.upscalerMode)
     }
 

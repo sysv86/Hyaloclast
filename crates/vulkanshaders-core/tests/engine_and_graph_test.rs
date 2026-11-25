@@ -500,7 +500,8 @@ fn gpu_tier_class_classification_scales_by_arch_vram_and_device_type() {
             6 * GIB,
             "NVIDIA GeForce RTX 3050",
         ),
-        GpuTierClass::Low
+        // 6 GB discrete GPUs are now eligible for Compute mode (threshold lowered to 5.5 GiB).
+        GpuTierClass::Mid
     );
     assert_eq!(
         GpuTierClass::classify(
@@ -509,7 +510,8 @@ fn gpu_tier_class_classification_scales_by_arch_vram_and_device_type() {
             16 * GIB,
             "AMD Radeon 780M",
         ),
-        GpuTierClass::Low
+        // Modern high-bandwidth APUs are explicitly classified Mid for Compute mode.
+        GpuTierClass::Mid
     );
 
     assert!(GpuTierClass::Enthusiast.is_high_end());

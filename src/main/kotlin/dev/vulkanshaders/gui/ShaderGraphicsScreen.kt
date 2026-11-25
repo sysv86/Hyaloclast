@@ -99,10 +99,12 @@ class ShaderGraphicsScreen(
         ): Boolean = when (tier) {
             LightingMode.CLASSIC, LightingMode.COMPUTE -> true
             LightingMode.HYBRID ->
-                (caps and NativeCoreBridge.CAP_RAY_QUERY) != 0 &&
+                !macOsMoltenVk &&
+                    (caps and NativeCoreBridge.CAP_RAY_QUERY) != 0 &&
                     (caps and NativeCoreBridge.CAP_RAY_TRACING_AS) != 0
             LightingMode.PATH ->
-                (caps and NativeCoreBridge.CAP_RAY_TRACING_PIPELINE) != 0 &&
+                !macOsMoltenVk &&
+                    (caps and NativeCoreBridge.CAP_RAY_TRACING_PIPELINE) != 0 &&
                     (caps and NativeCoreBridge.CAP_RAY_TRACING_AS) != 0
         }
 

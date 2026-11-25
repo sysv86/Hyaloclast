@@ -1366,16 +1366,15 @@ default = 1.0
 
 #[test]
 fn pt_max_bounces_specialization_constant_is_not_shadowed_by_fallback_macro() {
-    let pack_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    let pack_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../src/main/resources/builtin-packs/relight-vanilla.vsp");
-    let compiler = VspCompiler::new();
+    let compiler = VspCompiler::new(None);
     let artifacts = compiler
         .compile_pack_dir_with_caps(
             &pack_dir,
             RenderTier::Tier3PathTracing,
             HardwareShaderCaps {
-                ray_tracing_pipeline: true,
-                ray_query: true,
+                ada_or_newer: true,
                 high_end_gpu: true,
                 ..Default::default()
             },
@@ -1383,7 +1382,7 @@ fn pt_max_bounces_specialization_constant_is_not_shadowed_by_fallback_macro() {
         .expect("relight-vanilla Tier 3 shaders must compile cleanly");
     let rgen = artifacts
         .iter()
-        .find(|a| a.stage == ShaderStageKind::RayGen)
+        .find(|a| a.stage_kind == ShaderStageKind::RayGen)
         .expect("relight-vanilla must emit a RayGen artifact");
     assert!(
         !rgen.reflection.spec_constant_ids.is_empty(),
