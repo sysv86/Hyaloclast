@@ -125,7 +125,7 @@ public abstract class LevelRendererMixin {
         }
 
         RenderTarget mainTarget = this.gameRenderer.mainRenderTarget();
-        if (VulkanShaders.INSTANCE.getConfig().getLightingMode() == LightingMode.PATH) {
+        if (VulkanShaders.INSTANCE.getConfig().getRenderTier() == LightingMode.PATH) {
             this.vulkanshaders$keepOcclusionGraphFed();
             if (VulkanShaders.INSTANCE.getConfig().getEnableOverlayPass() && NativeCoreBridge.initialized && mainTarget != null) {
                 GpuTexture depthTex = mainTarget.getDepthTexture();
@@ -153,7 +153,7 @@ public abstract class LevelRendererMixin {
         if (!VulkanShaders.shaderPackActive) {
             return;
         }
-        if (VulkanShaders.INSTANCE.getConfig().getLightingMode() != LightingMode.PATH) {
+        if (VulkanShaders.INSTANCE.getConfig().getRenderTier() != LightingMode.PATH) {
             GbufferTargetManager.prepareTerrainMrtPass();
         }
     }
@@ -166,7 +166,7 @@ public abstract class LevelRendererMixin {
         CallbackInfo ci
     ) {
         if (VulkanShaders.shaderPackActive
-            && VulkanShaders.INSTANCE.getConfig().getLightingMode() == LightingMode.PATH) {
+            && VulkanShaders.INSTANCE.getConfig().getRenderTier() == LightingMode.PATH) {
             ci.cancel();
         }
     }
@@ -179,7 +179,7 @@ public abstract class LevelRendererMixin {
         CallbackInfo ci
     ) {
         if (VulkanShaders.shaderPackActive
-            && VulkanShaders.INSTANCE.getConfig().getLightingMode() == LightingMode.PATH) {
+            && VulkanShaders.INSTANCE.getConfig().getRenderTier() == LightingMode.PATH) {
             ci.cancel();
         }
     }
@@ -192,7 +192,7 @@ public abstract class LevelRendererMixin {
         CallbackInfo ci
     ) {
         if (VulkanShaders.shaderPackActive
-            && VulkanShaders.INSTANCE.getConfig().getLightingMode() == LightingMode.PATH) {
+            && VulkanShaders.INSTANCE.getConfig().getRenderTier() == LightingMode.PATH) {
             ci.cancel();
         }
     }
@@ -204,7 +204,7 @@ public abstract class LevelRendererMixin {
         CallbackInfo ci
     ) {
         if (VulkanShaders.shaderPackActive
-            && VulkanShaders.INSTANCE.getConfig().getLightingMode() == LightingMode.PATH) {
+            && VulkanShaders.INSTANCE.getConfig().getRenderTier() == LightingMode.PATH) {
             ci.cancel();
         }
     }

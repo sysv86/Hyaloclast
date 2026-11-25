@@ -5,7 +5,6 @@ import dev.vulkanshaders.VulkanShaders
 import dev.vulkanshaders.backend.NativeCoreBridge
 import dev.vulkanshaders.config.LightingMode
 import dev.vulkanshaders.state.WorldStateCollector
-import dev.vulkanshaders.backend.NativeCoreBridge
 import dev.vulkanshaders.bridge.StandaloneRenderPearlBridge
 import dev.vulkanshaders.diagnostics.HyaloclastErrorLog
 import dev.vulkanshaders.pack.LoadedShaderPack

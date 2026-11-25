@@ -104,7 +104,7 @@ object HyaloclastDebugHud {
         return DebugSnapshot(
             shadersEnabled = VulkanShaders.shaderPackActive,
             activePackName = pack?.manifest?.name,
-            renderTier = config.renderTier,
+            renderMode = config.renderTier,
             upscalerMode = config.upscalerMode,
             upscalerScalePercent = scalePct,
             frameGenMode = config.frameGenMode,
@@ -135,7 +135,7 @@ object HyaloclastDebugHud {
         } else {
             "Off"
         }
-        val tierLabel = formatTierShort(snapshot.renderTier)
+        val tierLabel = formatTierShort(snapshot.renderMode)
         val upscalerLabel = formatUpscaler(snapshot.upscalerMode, snapshot.upscalerScalePercent)
         val fgLabel = formatFrameGen(snapshot.frameGenMode)
 

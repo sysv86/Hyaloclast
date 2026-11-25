@@ -494,7 +494,7 @@ void sv_water_surface(inout VsSurface s, in vec3 worldPos, in float waveHeight) 
         // Bruneton-Neyret roughness from unresolved slope variance + tier-tuned specular floor
         float baseRough = 0.010;
         float sssTierBoost = 1.0;
-#ifdef VS_ACTIVE_RENDER_TIER
+#ifdef VS_LIGHTING_MODE
 #if VS_LIGHTING_MODE >= VS_MODE_PATH
         baseRough = 0.006;
         sssTierBoost = 1.25;

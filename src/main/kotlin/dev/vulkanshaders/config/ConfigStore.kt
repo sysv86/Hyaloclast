@@ -19,7 +19,15 @@ object ConfigStore {
         "hyaloclast-cinder-mist",
     )
 
-    private val gson: Gson = GsonBuilder().setPrettyPrinting().create()
+    private val gson: Gson = GsonBuilder()
+        .setPrettyPrinting()
+        .registerTypeAdapter(
+            LightingMode::class.java,
+            JsonDeserializer { json, _, _ ->
+                LightingMode.fromToken(runCatching { json.asString }.getOrNull()) ?: LightingMode.COMPUTE
+            },
+        )
+        .create()
 
     private fun resolveConfigDir(): Path =
         runCatching { FabricLoader.getInstance().configDir }

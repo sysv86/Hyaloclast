@@ -195,7 +195,7 @@ public final class WorldFeatureRayTracingMixins {
             }
 
             boolean crumbling = prepared.pipeline() == RenderPipelines.CRUMBLING;
-            if (crumbling && VulkanShaders.INSTANCE.getConfig().getLightingMode() != LightingMode.PATH) {
+            if (crumbling && VulkanShaders.INSTANCE.getConfig().getRenderTier() != LightingMode.PATH) {
                 return draw;
             }
             for (PreparedRenderType.Texture texture : prepared.textures()) {
