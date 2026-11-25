@@ -604,7 +604,10 @@ void main() {
         vs_dispatch_hook_water_waves(waveStrength, waveSpeed, waveScale);
         float waveHeight = sin(worldApprox.x * waveScale + vsWorld.gameTimeSec * waveSpeed) * waveStrength;
         vs_dispatch_hook_water_surface(s, worldApprox, waveHeight);
-        s.normal = vsFaceWaterNormal(s.normal, V);
+        // Horizontal surfaces only: vertical waterfall faces keep their flat per-face normal.
+        if (abs(s.normal.y) > 0.5) {
+            s.normal = vsFaceWaterNormal(s.normal, V);
+        }
     } else if (!isGlass && !isDhPixel && dimId == 0 && vsWorld.rain > 0.01) {
         vsApplyRainWetness(s, worldApprox, skyLight, vsWorld.rain, clamp(VS_PARAM_WETNESS_STRENGTH, 0.0, 1.0));
     }

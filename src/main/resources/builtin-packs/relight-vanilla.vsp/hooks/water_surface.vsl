@@ -355,33 +355,76 @@ void sv_water_surface(inout VsSurface s, in vec3 worldPos, in float waveHeight) 
         float troughAo = mix(0.92, 1.0, clamp(combinedH * 0.35 + 0.65, 0.0, 1.0));
         s.ao *= troughAo;
     } else {
-        // Vertical flowing water / waterfall faces: downward gravity-advected stream ripples
-        vec3 horizT = vsSafeNormalize(vec3(-geomNormal.z, 0.0, geomNormal.x), vec3(1.0, 0.0, 0.0));
-        float u = dot(worldPos.xz, horizT.xz);
-        float v = worldPos.y;
-        float flowRate = 2.6 + sea * 1.1;
+        // Vertical flowing water / waterfall faces.
+        // The pattern is a pure function of world position and time, so neighbouring coplanar
+        // quads and quads meeting at block corners share the same field and read as one sheet
+        // instead of per-face panels. No tangent basis and no block-boundary terms are used.
+        float fallSpeed = 1.0 + 0.16 * sea;
 
-        float wf1 = exp(-0.5 * (4.2 * sigmaFilter) * (4.2 * sigmaFilter)) * macroCalm;
-        float wf2 = exp(-0.5 * (8.4 * sigmaFilter) * (8.4 * sigmaFilter)) * macroCalm;
+        // Three plane waves: mostly horizontal wave vectors give long vertical strands, a small
+        // positive k.y makes constant phase drift downward (-k direction) at a steady speed.
+        vec3 kw1 = vec3( 3.325, 0.648,  2.312);
+        vec3 kw2 = vec3(-3.118, 0.759,  6.107);
+        vec3 kw3 = vec3( 3.500, 1.750, -11.875);
 
-        float ph1 = mod(u * 4.2 + v * 1.35, TAU) + mod(timeSec * flowRate, TAU);
-        float ph2 = mod(-u * 6.8 + v * 2.40, TAU) + mod(timeSec * (flowRate * 1.38), TAU);
+        // Gaussian Nyquist anti-aliasing per wave, matching the horizontal branch filtering
+        float wf1 = exp(-0.5 * (4.1 * sigmaFilter) * (4.1 * sigmaFilter)) * macroCalm;
+        float wf2 = exp(-0.5 * (6.9 * sigmaFilter) * (6.9 * sigmaFilter)) * macroCalm;
+        float wf3 = exp(-0.5 * (12.5 * sigmaFilter) * (12.5 * sigmaFilter)) * macroCalm;
 
-        float du = (cos(ph1) * 4.2 * 0.032 * wf1 - cos(ph2) * 6.8 * 0.014 * wf2) * (0.45 + effStrength * 1.4);
-        float dv = (cos(ph1) * 1.35 * 0.032 * wf1 + cos(ph2) * 2.40 * 0.014 * wf2) * (0.45 + effStrength * 1.4);
+        float tFall = timeSec * fallSpeed;
+        float ph1 = dot(worldPos, kw1) + tFall * 2.27;
+        float ph2 = dot(worldPos, kw2) + tFall * 3.00;
+        float ph3 = dot(worldPos, kw3) + tFall * 6.00;
 
-        s.normal = vsSafeNormalize(geomNormal + horizT * (-du) + vec3(0.0, -dv, 0.0), geomNormal);
+        // 3D gradient of the phase field, projected onto the face plane
+        vec3 wfGrad = kw1 * (cos(ph1) * 0.028 * wf1)
+                    + kw2 * (cos(ph2) * 0.015 * wf2)
+                    + kw3 * (cos(ph3) * 0.006 * wf3);
+        vec3 wfTan = wfGrad - geomNormal * dot(wfGrad, geomNormal);
+        float wfStrength = 0.60 + 0.85 * effStrength;
+        s.normal = vsSafeNormalize(geomNormal - wfTan * wfStrength, geomNormal);
+
+        // Slope variance removed by filtering is folded into roughness (Bruneton-Neyret style)
+        float unresolved = 0.5 * (1.0 - wf1 * wf1) * (4.1 * 0.028) * (4.1 * 0.028)
+                         + 0.5 * (1.0 - wf2 * wf2) * (6.9 * 0.015) * (6.9 * 0.015)
+                         + 0.5 * (1.0 - wf3 * wf3) * (12.5 * 0.006) * (12.5 * 0.006);
+
+        // Continuous falling-water strands from the same world-space phases (stretched along Y)
+        float bandA = 0.5 + 0.5 * cos(ph1);
+        float bandB = 0.5 + 0.5 * cos(ph2 + 1.9 * sin(ph3 * 0.7));
+        float strandA = smoothstep(0.70, 0.995, bandA);
+        float strandB = smoothstep(0.80, 0.995, bandB);
+        float strands = max(strandA, 0.85 * strandB);
 
         float fallFade = 1.0 - smoothstep(14.0, 56.0, camDist);
-        float streak = 0.5 + 0.5 * sin(mod(u * 5.6, TAU) + sin(mod(v * 1.6, TAU) + mod(timeSec * flowRate, TAU)));
-        float mistFoam = clamp(streak * 0.24 * fallFade * (0.65 + 0.35 * clarity), 0.0, 0.30);
+        float mistFoam = clamp(strands * fallFade * (0.26 + 0.16 * sea) * (0.65 + 0.35 * clarity), 0.0, 0.34);
 
-        vec3 fallCol = mix(baseAlbedo, vec3(0.05, 0.44, 0.58), 0.16 * clarity);
+        // Glossy flowing sheet (0.09-0.18 base, denser strands are rougher); foam raises it further
+        float streakDensity = 0.5 + 0.5 * cos(ph1 + 0.5 * ph2);
+        float sheetRough = mix(0.09, 0.18, clamp(0.30 + 0.45 * streakDensity + 0.25 * sea, 0.0, 1.0));
+        float rough = sqrt(sheetRough * sheetRough + 0.10 * unresolved);
+        rough = mix(rough, 0.42, clamp(mistFoam * 3.0, 0.0, 1.0));
+
+        // Recover the biome water hue from the raster albedo. Dividing by luminance cancels the
+        // repeating water-sprite texel brightness and the per-face cardinal shade, which are both
+        // pure scalars, so the same sheet keeps one hue across every block and every face.
+        float albedoLuma = max(vsLuminance(baseAlbedo), 0.04);
+        vec3 sheetTint = clamp(baseAlbedo / albedoLuma, vec3(0.35), vec3(2.2));
+        // Re-normalize to unit luminance: brightness no longer depends on which sprite texel a
+        // block happened to sample, and the clamp above keeps dark texels from blowing up.
+        sheetTint /= max(vsLuminance(sheetTint), 0.25);
+
+        // Continuous world-space sheet brightness: a fixed base plus the falling strand field.
+        // No UV, fract(worldPos) or other per-block term is used, so no panel seams can appear.
+        float sheetLevel = 0.28 + 0.07 * strands;
+        vec3 fallCol = mix(sheetTint * sheetLevel, vec3(0.05, 0.44, 0.58), 0.16 * clarity);
         vec3 foamCol = vec3(0.84, 0.90, 0.94) * (1.0 - 0.16 * rain);
         s.albedo = clamp(mix(fallCol, foamCol, mistFoam), vec3(0.0), vec3(1.0));
-        s.roughness = mix(0.022 + 0.04 * (1.0 - wf1), 0.36, mistFoam);
+        s.roughness = clamp(rough, 0.02, 0.55);
         s.f0 = WATER_F0;
         s.metallic = 0.0;
-        s.subsurface = clamp(0.14 * (0.4 + 0.6 * clarity), 0.0, 0.24);
+        float sss = 0.12 * (0.45 + 0.55 * clarity);
+        s.subsurface = clamp(mix(sss, 0.06, clamp(mistFoam * 2.0, 0.0, 1.0)), 0.0, 0.22);
     }
 }

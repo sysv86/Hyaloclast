@@ -131,7 +131,10 @@ void main() {
         vec3 wavePos = hitPosRel + uSharc.cfg.cameraPosition.xyz;
         float waveHeight = sin(wavePos.x * waveScale + vsWorld.gameTimeSec * waveSpeed) * waveStrength;
         vs_dispatch_hook_water_surface(s, wavePos, waveHeight);
-        s.normal = vsFaceWaterNormal(s.normal, V);
+        // Horizontal surfaces only: vertical waterfall faces keep their flat per-face normal.
+        if (abs(s.normal.y) > 0.5) {
+            s.normal = vsFaceWaterNormal(s.normal, V);
+        }
     } else if (bounce == 0u && !isGlass && !isDhLod && vsDimensionId() == 0 && vsWorld.rain > 0.01) {
         vec3 worldAbs = hitPosRel + uSharc.cfg.cameraPosition.xyz;
         float wetStrength = clamp(VS_PARAM_WETNESS_STRENGTH, 0.0, 1.0);

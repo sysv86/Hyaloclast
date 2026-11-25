@@ -73,7 +73,9 @@ void main() {
     float vsWaveSpeed = 1.8;
     float vsWaveScale = 2.2;
 #endif
-    if (matId == 8u && vsWaveStrength > 0.0) {
+    // Only horizontal water surfaces bob with the wave field. Vertical waterfall quads must keep
+    // their exact block-aligned silhouette or the top edge detaches from the source surface.
+    if (matId == 8u && vsWaveStrength > 0.0 && abs(Normal.y) > 0.5) {
         float t = vsMotion.cameraDeltaTime.w * vsWaveSpeed;
         vec2 worldXZ = vec2(RegionOrigin.xz) + localPos.xz;
         float wave = sin(worldXZ.x * vsWaveScale + t) * cos(worldXZ.y * vsWaveScale * 0.85 - t * 0.7);
