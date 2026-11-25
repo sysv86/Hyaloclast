@@ -107,7 +107,7 @@ void main() {
             s.f0 = water ? 0.02 : (isGlass ? 0.042 : 0.04);
 
             // Run pack surface hook BEFORE LabPBR so authored LabPBR _s textures are never overwritten.
-            vs_dispatch_hook_surface(s, flags, bounce);
+            vs_dispatch_hook_surface(s, hitPosRel + uSharc.cfg.cameraPosition.xyz, flags, bounce);
 
             bool hasNorm = !water && !isDhLod && meta.bindlessNormalSlot != 0u;
             bool hasSpec = !water && !isDhLod && meta.bindlessSpecularSlot != 0u;

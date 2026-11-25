@@ -8,6 +8,10 @@
 #define VS_PARAM_POM_DEPTH 0.0
 #endif
 
+// Stable absolute world anchor for pack hooks (lava crust noise, etc.). camRelPos is
+// world-minus-camera; invView translation is the camera world position.
+#define VS_SURFACE_WORLD_POS (camRelPos + vsMotion.invView[3].xyz)
+
 uniform sampler2D Sampler0;
 uniform sampler2D VsNormalAtlas;
 uniform sampler2D VsSpecularAtlas;

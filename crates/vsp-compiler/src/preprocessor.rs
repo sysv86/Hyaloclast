@@ -704,7 +704,7 @@ impl VslPreprocessor {
                         }
                         HookStage::Surface => {
                             hook_prelude.push_str(&format!(
-                                "void vsHookSurface(inout VsSurface s, uint flags, uint bounce) {{\n{combined_body}}}\n"
+                                "void vsHookSurface(inout VsSurface s, vec3 worldPos, uint flags, uint bounce) {{\n{combined_body}}}\n"
                             ));
                         }
                         HookStage::GbufferPack => {
@@ -755,7 +755,7 @@ impl VslPreprocessor {
                 "vsHookWorld = VsHookWorld(vsMotion.cameraDeltaTime.w, vsMotion.sunDirRain.w, vsMotion.heldLightData.x, vsMotion.heldLightData.y, vsMotion.heldLightData.z, vsMotion.sunDirRain.xyz);\n    float vsWaveStrength = 0.35;\n    float vsWaveSpeed = 1.8;\n    float vsWaveScale = 2.2;\n    vsHookWaterWaves(vsWaveStrength, vsWaveSpeed, vsWaveScale);".to_owned()
             }
             HookStage::Surface => {
-                "vsHookWorld = VsHookWorld(vsMotion.cameraDeltaTime.w, vsMotion.sunDirRain.w, vsMotion.heldLightData.x, vsMotion.heldLightData.y, vsMotion.heldLightData.z, vsMotion.sunDirRain.xyz);\n    VsSurface vsHookSurf = VsSurface(pow(max(color.rgb, vec3(0.0)), vec3(2.2)), N, roughness, metallic, emission, 1.0, subsurface, f0);\n    vsHookSurface(vsHookSurf, materialFlags, 0u);\n    N = vsHookSurf.normal;\n    color.rgb = pow(max(vsHookSurf.albedo, vec3(0.0)), vec3(1.0 / 2.2));\n    fragColor.rgb = color.rgb;\n    metallic = vsHookSurf.metallic;\n    roughness = vsHookSurf.roughness;\n    f0 = vsHookSurf.f0;\n    emission = vsHookSurf.emission;\n    subsurface = vsHookSurf.subsurface;".to_owned()
+                "vsHookWorld = VsHookWorld(vsMotion.cameraDeltaTime.w, vsMotion.sunDirRain.w, vsMotion.heldLightData.x, vsMotion.heldLightData.y, vsMotion.heldLightData.z, vsMotion.sunDirRain.xyz);\n    VsSurface vsHookSurf = VsSurface(pow(max(color.rgb, vec3(0.0)), vec3(2.2)), N, roughness, metallic, emission, 1.0, subsurface, f0);\n    #if defined(VS_SURFACE_WORLD_POS)\n    vec3 vsHookWorldPos = VS_SURFACE_WORLD_POS;\n    #else\n    vec3 vsHookWorldPos = vec3(0.0);\n    #endif\n    vsHookSurface(vsHookSurf, vsHookWorldPos, materialFlags, 0u);\n    N = vsHookSurf.normal;\n    color.rgb = pow(max(vsHookSurf.albedo, vec3(0.0)), vec3(1.0 / 2.2));\n    fragColor.rgb = color.rgb;\n    metallic = vsHookSurf.metallic;\n    roughness = vsHookSurf.roughness;\n    f0 = vsHookSurf.f0;\n    emission = vsHookSurf.emission;\n    subsurface = vsHookSurf.subsurface;".to_owned()
             }
             HookStage::GbufferPack => {
                 "vsHookWorld = VsHookWorld(vsMotion.cameraDeltaTime.w, vsMotion.sunDirRain.w, vsMotion.heldLightData.x, vsMotion.heldLightData.y, vsMotion.heldLightData.z, vsMotion.sunDirRain.xyz);\n    VsSurface vsPackSurf = VsSurface(pow(max(color.rgb, vec3(0.0)), vec3(2.2)), N, roughness, metallic, emission, 1.0, subsurface, f0);\n    vsHookGbufferPack(vsPackSurf, fragColor, outNormalRoughness, outMaterialPbr);".to_owned()

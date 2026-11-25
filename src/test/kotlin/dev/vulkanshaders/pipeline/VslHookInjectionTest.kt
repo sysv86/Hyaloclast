@@ -112,8 +112,8 @@ class VslHookInjectionTest {
             assertTrue(result.contains("s.roughness = clamp(s.roughness, 0.72, 0.88);"), "$name: hook body missing")
             assertTrue(result.contains("s.albedo *= 0.84;"), "$name: hook body missing")
             assertTrue(result.contains("s.f0 = min(s.f0, 0.038);"), "$name: hook body missing")
-            assertTrue(result.contains("void vsHookSurface(inout VsSurface s, uint flags, uint bounce)"), "$name: adapter missing")
-            assertTrue(result.contains("vsHookSurface(vsHookSurf, materialFlags, 0u);"), "$name: hook call missing")
+            assertTrue(result.contains("void vsHookSurface(inout VsSurface s, vec3 worldPos, uint flags, uint bounce)"), "$name: adapter missing")
+            assertTrue(result.contains("vsHookSurface(vsHookSurf, vsHookWorldPos, materialFlags, 0u);"), "$name: hook call missing")
             assertTrue(result.contains("roughness = clamp(roughness, 0.02, 1.0);"), "$name: roughness clamp missing")
             assertFalse(result.contains("// @hook surface"), "$name: marker must be replaced")
         }

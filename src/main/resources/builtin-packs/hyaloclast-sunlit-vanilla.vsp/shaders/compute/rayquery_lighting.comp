@@ -45,7 +45,7 @@ layout(set = 1, binding = 4, std430) buffer RestirReservoirSSBO {
 } uReservoirs;
 layout(set = 2, binding = 0) uniform sampler2D uBindlessTextures[];
 
-void vs_dispatch_hook_surface(inout VsSurface s, in uint flags, in uint bounce);
+void vs_dispatch_hook_surface(inout VsSurface s, in vec3 worldPos, in uint flags, in uint bounce);
 void vs_dispatch_hook_direct_light(in VsSurface s, in vec3 viewDir, in vec3 lightDir, inout vec3 brdf);
 void vs_dispatch_hook_block_light(inout vec3 radiance, in uint lightKind, in float dist);
 void vs_dispatch_hook_sky(inout vec3 radiance, in vec3 dir, in VsSkyState sky);
@@ -361,7 +361,7 @@ bool traceClosestHitSurface(
     outSurface.f0 = water ? 0.02 : 0.04;
 
     // Run surface hook BEFORE LabPBR so authored LabPBR _s textures are never overwritten.
-    if (!water) vs_dispatch_hook_surface(outSurface, flags, 1u);
+    if (!water) vs_dispatch_hook_surface(outSurface, outHitPosRel + uSharc.cfg.cameraPosition.xyz, flags, 1u);
 
     bool hasNorm = !water && meta.layerOrdinal != 4u && meta.bindlessNormalSlot != 0u;
     bool hasSpec = !water && meta.layerOrdinal != 4u && meta.bindlessSpecularSlot != 0u;

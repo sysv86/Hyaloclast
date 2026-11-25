@@ -98,8 +98,8 @@ impl SpirvHookLinker {
                 "(s, outAlbedo, outNormalRoughness, outMaterialPbr)",
             ),
             HookStage::Surface => (
-                "void vs_dispatch_hook_surface(inout VsSurface s, in uint flags, in uint bounce)",
-                "(s, flags, bounce)",
+                "void vs_dispatch_hook_surface(inout VsSurface s, in vec3 worldPos, in uint flags, in uint bounce)",
+                "(s, worldPos, flags, bounce)",
             ),
             HookStage::EmissiveSample => (
                 "void vs_dispatch_hook_emissive_sample(in vec3 worldPos, in vec3 normal, in uint lightIndex, inout vec3 lightRadiance, inout float lightWeight)",

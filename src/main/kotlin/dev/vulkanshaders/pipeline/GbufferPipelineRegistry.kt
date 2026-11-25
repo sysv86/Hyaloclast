@@ -798,7 +798,7 @@ object GbufferPipelineRegistry {
                 "water_waves" ->
                     appendLine("void vsHookWaterWaves(inout float strength, inout float speed, inout float scale) {\n${hook.body}\n}")
                 "surface" ->
-                    appendLine("void vsHookSurface(inout VsSurface s, uint flags, uint bounce) {\n${hook.body}\n}")
+                    appendLine("void vsHookSurface(inout VsSurface s, vec3 worldPos, uint flags, uint bounce) {\n${hook.body}\n}")
                 "gbuffer_pack" ->
                     appendLine("void vsHookGbufferPack(in VsSurface s, inout vec4 rt0, inout vec4 rt1, inout vec4 rt2, inout vec2 rt3) {\n${hook.body}\n}")
             }
@@ -828,7 +828,12 @@ object GbufferPipelineRegistry {
                                       vsMotion.heldLightData.x, vsMotion.heldLightData.y,
                                       vsMotion.heldLightData.z, vsMotion.sunDirRain.xyz);
             VsSurface vsHookSurf = VsSurface(pow(max(color.rgb, vec3(0.0)), vec3(2.2)), N, roughness, metallic, emission, 1.0, subsurface, f0);
-            vsHookSurface(vsHookSurf, materialFlags, 0u);
+            #if defined(VS_SURFACE_WORLD_POS)
+            vec3 vsHookWorldPos = VS_SURFACE_WORLD_POS;
+            #else
+            vec3 vsHookWorldPos = vec3(0.0);
+            #endif
+            vsHookSurface(vsHookSurf, vsHookWorldPos, materialFlags, 0u);
             N = vsHookSurf.normal;
             color.rgb = pow(max(vsHookSurf.albedo, vec3(0.0)), vec3(1.0 / 2.2));
             fragColor.rgb = color.rgb;

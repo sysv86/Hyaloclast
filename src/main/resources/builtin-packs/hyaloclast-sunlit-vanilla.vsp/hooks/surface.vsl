@@ -4,7 +4,7 @@
 // Sunlit Vanilla - Grounded natural vanilla-faithful PBR calibration across all 15 material IDs.
 // Preserves authentic Minecraft block identity without plastic glare while giving metals, crystals,
 // foliage, snow/ice, ceramics, sculk, and emissives clean physical response.
-void sv_surface(inout VsSurface s, in uint flags, in uint bounce) {
+void sv_surface(inout VsSurface s, in vec3 worldPos, in uint flags, in uint bounce) {
     uint materialId = (flags >> 3u) & 15u;
 
     if (materialId == 1u) {
