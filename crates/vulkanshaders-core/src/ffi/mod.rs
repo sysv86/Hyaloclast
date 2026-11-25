@@ -2630,6 +2630,16 @@ pub unsafe extern "C" fn vs_core_configure_pipeline(
     {
         let mut graph = engine.render_graph.lock();
         if graph.config != cfg {
+            // A tier change rebuilds the whole render graph. Wait for all in-flight GPU work
+            // to finish first: otherwise the first submitted frame of the new tier can reference
+            // targets that are being replaced, stalling the queue until RenderPearl's 5 s
+            // semaphore timeout fires.
+            let ctx = engine.ctx.read();
+            let wait_res = crate::gpu::with_queue_lock(|| unsafe { ctx.device.device_wait_idle() });
+            if let Err(err) = wait_res {
+                crate::crash::global_device_lost_guard()
+                    .record_vk_result("ffi::configure_pipeline::device_wait_idle", err);
+            }
             graph.rebuild(cfg);
         }
     }

@@ -973,6 +973,13 @@ impl GpuPipelineManager {
                 .insert(artifact.stage_name.clone(), artifact);
         }
 
+        // Pipeline rebuild replaces shader modules and descriptor sets that in-flight frames may
+        // still reference. Drain the GPU before doing so; otherwise the first frame submitted
+        // after a tier switch can stall the queue until RenderPearl's 5 s semaphore timeout.
+        if let Err(err) = unsafe { ctx.device.device_wait_idle() } {
+            tracing::warn!(?err, "device_wait_idle before pipeline rebuild failed");
+        }
+
         if let Some(rq) = retire_queue {
             self.rebuild_all_pipelines_from_artifacts(ctx, bindless_layout, rq)
         } else {
