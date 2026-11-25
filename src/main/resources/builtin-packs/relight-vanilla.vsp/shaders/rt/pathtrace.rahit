@@ -14,9 +14,10 @@ layout(set = 2, binding = 0) uniform sampler2D uBindlessTextures[];
 layout(location = 0) rayPayloadInEXT VsPathPayload payload;
 hitAttributeEXT vec2 barycentrics;
 
-// Matches `INSTANCE_FLAG_HAS_OMM` in `rt/omm.rs` and `ENTITY_FLAG_NO_SHADOW` in `rt/entities.rs`.
+// Matches `INSTANCE_FLAG_HAS_OMM` in `rt/omm.rs` and entity flags in `rt/entities.rs`.
 const uint INSTANCE_FLAG_HAS_OMM = (1u << 9u);
 const uint ENTITY_FLAG_NO_SHADOW = (1u << 5u);
+const uint ENTITY_FLAG_FIRST_PERSON = (1u << 6u);
 
 void main() {
     uint instIdx = gl_InstanceCustomIndexEXT;
@@ -29,10 +30,11 @@ void main() {
         return;
     }
 
-    // Particles and weather curtains carry ENTITY_FLAG_NO_SHADOW so they do not cast opaque shadows.
+    // Particles, weather curtains and the first-person avatar must not cast opaque shadows:
+    // the avatar geometry follows the camera, so its shadow would smear during temporal reprojection.
     if (meta.layerOrdinal == 3u
         && (payload.flags & 2u) != 0u
-        && (meta.materialFlags & ENTITY_FLAG_NO_SHADOW) != 0u) {
+        && (meta.materialFlags & (ENTITY_FLAG_NO_SHADOW | ENTITY_FLAG_FIRST_PERSON)) != 0u) {
         ignoreIntersectionEXT;
     }
 
