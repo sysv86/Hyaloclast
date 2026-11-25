@@ -60,7 +60,7 @@ body:
     attributes:
       label: Environment (Minecraft, mod versions, loader, OS, GPU & driver)
       description: Include Minecraft version, Hyaloclast & Pyroclast versions/commits, Fabric Loader version, OS, GPU model, and Vulkan driver version.
-      placeholder: "MC 26.3 | Fabric 0.20.1 | Hyaloclast 0.2.0-beta.1 | Pyroclast 0.1.0-alpha.1 | Linux x86_64 | RTX 3050 Mobile (565.xx)"
+      placeholder: "MC 26.3 | Fabric 0.20.1 | Hyaloclast 0.2.0-beta.1 | Pyroclast 0.1.0-alpha.1 | Linux x86_64 | RTX 4070 (565.xx)"
     validations:
       required: true
 

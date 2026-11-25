@@ -8,8 +8,8 @@
     "VulkanShaders contributors"
   ],
   "contact": {
-    "homepage": "https://github.com/vulkanshaders/hyaloclast",
-    "sources": "https://github.com/vulkanshaders/hyaloclast"
+    "homepage": "https://github.com/sysv86/Hyaloclast",
+    "sources": "https://github.com/sysv86/Hyaloclast"
   },
   "license": "GPL-3.0-only",
   "custom": {
@@ -46,7 +46,7 @@
   "suggests": {
     "modmenu": "*",
     "distanthorizons": ">=3.0.0",
-    "pyroclast": ">=0.1.0-alpha.1"
+    "vulkanturbo": ">=0.1.0-alpha.1"
   },
   "breaks": {
     "iris": "*",

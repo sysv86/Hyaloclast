@@ -42,9 +42,11 @@ jobs:
           cargo test --workspace --locked
           cargo run --locked -p vsp-cli -- check src/main/resources/builtin-packs/hyaloclast-sunlit-vanilla.vsp --tier 0
           cargo run --locked -p vsp-cli -- check src/main/resources/builtin-packs/hyaloclast-sunlit-vanilla.vsp --tier 3
-          cargo run --locked -p vsp-cli -- check src/main/resources/builtin-packs/hyaloclast-obsidian-showcase.vsp --tier 0
-          cargo run --locked -p vsp-cli -- check src/main/resources/builtin-packs/hyaloclast-obsidian-showcase.vsp --tier 3
-          cargo run --locked -p vulkanshaders-sdk-bench -- verify --repo-root . --download
+          cargo run --locked -p vsp-cli -- check src/main/resources/builtin-packs/hyaloclast-obsidian-showcase.vsp
+          cargo run --locked -p vsp-cli -- check src/main/resources/builtin-packs/relight-vanilla.vsp --tier 0
+          cargo run --locked -p vsp-cli -- check src/main/resources/builtin-packs/hyaloclast-obsidian-showcase.vsp
+          cargo run --locked -p vsp-cli -- check src/main/resources/builtin-packs/relight-vanilla.vsp --tier 3
+          cargo run --locked -p vulkanshaders-sdk-bench -- verify --repo-root .
 
       - name: Run smoke harness
         run: python3 dev/smoke/smoke.py --ci
@@ -60,25 +62,25 @@ jobs:
             target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             lib_name: libvulkanshaders_core.so
-            cli_name: vsp-cli
+            cli_name: vsp
             cross_arm64: false
           - platform_dir: linux-aarch64
             target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             lib_name: libvulkanshaders_core.so
-            cli_name: vsp-cli
+            cli_name: vsp
             cross_arm64: true
           - platform_dir: win32-x86-64
             target: x86_64-pc-windows-msvc
             os: windows-latest
             lib_name: vulkanshaders_core.dll
-            cli_name: vsp-cli.exe
+            cli_name: vsp.exe
             cross_arm64: false
           - platform_dir: macos-aarch64
             target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-15
             lib_name: libvulkanshaders_core.dylib
-            cli_name: vsp-cli
+            cli_name: vsp
             cross_arm64: false
     runs-on: ${{ matrix.os }}
     timeout-minutes: 35
@@ -163,7 +165,7 @@ jobs:
             for f in "$SRC"/*; do
               base="$(basename "$f")"
               case "$base" in
-                vsp-cli*)
+                vsp*)
                   cp "$f" "dist/${platform}-${base}"
                   ;;
                 *)
@@ -182,6 +184,13 @@ jobs:
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
+
+      - name: Build sibling Pyroclast compileOnly dependency
+        run: |
+          set -euo pipefail
+          rm -rf ../Pyroclast
+          git clone --depth 1 https://github.com/sysv86/Pyroclast.git ../Pyroclast
+          (cd ../Pyroclast && chmod +x gradlew && ./gradlew jar --no-daemon)
 
       - name: Run Kotlin unit tests and build fat Fabric JAR
         run: |
