@@ -234,5 +234,6 @@
   "vulkanshaders.screen.pack_settings.category_cycle": "Cat: %s",
   "vulkanshaders.screen.pack_settings.category_cycle.tooltip": "Click to filter settings by category.",
   "vulkanshaders.screen.pack_settings.modified_short": "Mod: %s",
-  "vulkanshaders.screen.pack_settings.modified_only.tooltip": "Show only settings that differ from defaults."
+  "vulkanshaders.screen.pack_settings.modified_only.tooltip": "Show only settings that differ from defaults.",
+  "vulkanshaders.screen.pack_settings.high_bounces_hint": "Values above 4 significantly increase GPU load (standard GPUs cap at 6)."
 }

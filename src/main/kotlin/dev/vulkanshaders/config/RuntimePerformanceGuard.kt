@@ -93,8 +93,27 @@ object RuntimePerformanceGuard {
         consecutiveOverloadTicks = 0
         lastDowngradeAtMs = nowMs
 
-        val lowerTier = nextLowerTier(cfg.renderTier, pack.manifest.supportedTiers)
         val reasonMs = avgGpuMs?.takeIf { it >= OVERLOAD_GPU_MS } ?: deltaMs
+        if (cfg.renderTier == RenderTier.TIER_3_PATH_TRACING) {
+            val activeOverrides = cfg.activePackOverrides(pack.manifest.id, cfg.renderTier)
+            val currentBounces = activeOverrides["pt_max_bounces"]?.toIntOrNull()
+                ?: pack.manifest.settings.firstOrNull { it.key == "pt_max_bounces" }?.defaultValue?.toIntOrNull()
+                ?: 2
+            if (currentBounces > 2) {
+                val updatedMap = activeOverrides.toMutableMap()
+                updatedMap["pt_max_bounces"] = "2"
+                val tierMap = cfg.packOverridesByTier[pack.manifest.id]?.toMutableMap() ?: mutableMapOf()
+                tierMap[cfg.renderTier.tierIndex] = updatedMap
+                val byTier = cfg.packOverridesByTier.toMutableMap()
+                byTier[pack.manifest.id] = tierMap
+                VulkanShaders.updateConfig(cfg.copy(packOverridesByTier = byTier))
+                val msg = "GPU overload (${"%.0f".format(reasonMs)} ms/frame) — lowered path-tracing bounces from $currentBounces to 2."
+                HyaloclastErrorLog.recordError("PerfGuard", msg)
+                notifyPlayer(mc, msg)
+                return
+            }
+        }
+        val lowerTier = nextLowerTier(cfg.renderTier, pack.manifest.supportedTiers)
         if (lowerTier != null) {
             VulkanShaders.updateConfig(cfg.copy(renderTier = lowerTier))
             val msg = "GPU overload (${"%.0f".format(reasonMs)} ms/frame) — lowered render tier to ${lowerTier.name}."

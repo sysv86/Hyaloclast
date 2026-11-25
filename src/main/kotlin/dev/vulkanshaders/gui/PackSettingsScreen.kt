@@ -779,6 +779,13 @@ class PackSettingsScreen(
                     .withStyle(ChatFormatting.GOLD),
             )
         }
+        if (setting.key == "pt_max_bounces") {
+            text.append(Component.literal("\n"))
+            text.append(
+                Component.translatable("vulkanshaders.screen.pack_settings.high_bounces_hint")
+                    .withStyle(ChatFormatting.YELLOW),
+            )
+        }
         return Tooltip.create(text)
     }
 

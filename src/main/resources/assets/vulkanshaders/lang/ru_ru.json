@@ -234,5 +234,6 @@
   "vulkanshaders.screen.pack_settings.category_cycle": "Разд.: %s",
   "vulkanshaders.screen.pack_settings.category_cycle.tooltip": "Нажмите, чтобы отфильтровать параметры по категории.",
   "vulkanshaders.screen.pack_settings.modified_short": "Изм.: %s",
-  "vulkanshaders.screen.pack_settings.modified_only.tooltip": "Показывать только параметры, отличающиеся от значений по умолчанию."
+  "vulkanshaders.screen.pack_settings.modified_only.tooltip": "Показывать только параметры, отличающиеся от значений по умолчанию.",
+  "vulkanshaders.screen.pack_settings.high_bounces_hint": "Значения выше 4 заметно повышают нагрузку на GPU (на стандартных GPU лимит 6)."
 }

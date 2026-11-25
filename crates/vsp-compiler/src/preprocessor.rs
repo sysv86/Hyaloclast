@@ -2000,11 +2000,14 @@ impl VslPreprocessor {
 
         if expanded_source.contains("VS_SPEC_") {
             for (key, &const_id) in &layout.specialization_constant_ids {
-                let const_name = format!("VS_SPEC_{}", key.to_ascii_uppercase());
+                let upper_key = key.to_ascii_uppercase();
+                let const_name = format!("VS_SPEC_{upper_key}");
+                let guard_macro = format!("VS_HAS_SPEC_{upper_key}");
                 if !expanded_source.contains(&const_name) {
                     continue;
                 }
                 if let Some(decl) = manifest.settings.get(key) {
+                    out.push_str(&format!("#define {guard_macro} 1\n"));
                     match decl.value_type {
                         SettingValueType::Bool => {
                             let def =

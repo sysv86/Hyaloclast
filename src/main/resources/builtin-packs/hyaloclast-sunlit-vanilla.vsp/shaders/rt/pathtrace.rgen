@@ -10,8 +10,8 @@
 #include <vulkanshaders/v1/lighting.vsl>
 #include <vulkanshaders/v1/restir.vsl>
 
-#ifndef VS_SPEC_PT_MAX_BOUNCES
-#define VS_SPEC_PT_MAX_BOUNCES 2
+#ifndef VS_HAS_SPEC_PT_MAX_BOUNCES
+const int VS_SPEC_PT_MAX_BOUNCES = 2;
 #endif
 
 #if VS_ACTIVE_RENDER_TIER >= 2
@@ -54,13 +54,13 @@ const uint FIRST_PERSON_AVATAR_MASK = 0x10u;
 const uint FLAG_EVAL_CLOUDS = (1u << 17u);
 
 #ifdef VS_HIGH_END_GPU
-const int VS_PT_MAX_BOUNCES_CAP = 6;
+const int VS_PT_MAX_BOUNCES_CAP = 8;
 const float VS_PT_INDIRECT_RAY_DIST = 128.0;
 const float VS_PT_OPTICAL_RAY_DIST = 256.0;
 const float VS_PT_SUN_SHADOW_DIST = 320.0;
 const uint VS_PT_RESTIR_CANDIDATES = 16u;
 #else
-const int VS_PT_MAX_BOUNCES_CAP = 4;
+const int VS_PT_MAX_BOUNCES_CAP = 6;
 const float VS_PT_INDIRECT_RAY_DIST = 72.0;
 const float VS_PT_OPTICAL_RAY_DIST = 128.0;
 const float VS_PT_SUN_SHADOW_DIST = 196.0;

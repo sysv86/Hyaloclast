@@ -1689,7 +1689,7 @@ impl GpuPipelineManager {
 
     /// Builds the hardware RT pipeline with four descriptor sets and TWO hit groups:
     /// Group 0 = opaque (`pathtrace.rchit`, no any-hit) and Group 1 = cutout
-    /// (`pathtrace.rchit` + `pathtrace.rahit`). The recursion depth is 2 so the closest-hit shader
+    /// (`pathtrace.rchit` + `pathtrace.rahit`). The recursion depth is 1 so the closest-hit shader
     /// can trace a shadow/NEE ray.
     #[allow(clippy::too_many_arguments)]
     fn build_ray_tracing_pipeline_bundle(
