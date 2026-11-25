@@ -81,11 +81,11 @@ class ShaderGraphicsScreen(
             caps: Int,
             macOsMoltenVk: Boolean = isMacOsOrMoltenVk(),
         ): Boolean = when (tier) {
-            // The TIER_2 ray-query graph stalls the GPU on first submission on this driver
-            // (RenderPearl times out after 5 s waiting for the submit semaphore). Keep the
-            // option disabled until the graph is fixed; TIER_0/1 and TIER_3 remain selectable.
-            RenderTier.TIER_2_RAY_QUERY -> false
             RenderTier.TIER_0_RASTER, RenderTier.TIER_1_COMPUTE_GI -> true
+            RenderTier.TIER_2_RAY_QUERY ->
+                !macOsMoltenVk &&
+                    (caps and NativeCoreBridge.CAP_RAY_QUERY) != 0 &&
+                    (caps and NativeCoreBridge.CAP_RAY_TRACING_AS) != 0
             RenderTier.TIER_3_PATH_TRACING ->
                 !macOsMoltenVk &&
                     (caps and NativeCoreBridge.CAP_RAY_TRACING_PIPELINE) != 0 &&
