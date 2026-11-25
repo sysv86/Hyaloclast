@@ -267,7 +267,8 @@ vec3 vsEmissiveRadiance(
     // Warm subsurface wrap on foliage and snow near torches/lanterns
     if (s.subsurface > 0.01) {
         float wrap = max(0.0, (dot(s.normal, toLight) + 0.45) / 1.45);
-        brdf += s.albedo * wrap * s.subsurface * 0.20;
+        // Normalize the wrapped diffuse lobe by PI so SSS does not add unnormalized emittance.
+        brdf += s.albedo * wrap * s.subsurface * (0.20 / 3.14159265);
     }
     return brdf * light.colorIntensity.rgb * (light.colorIntensity.a * flicker * atten);
 }

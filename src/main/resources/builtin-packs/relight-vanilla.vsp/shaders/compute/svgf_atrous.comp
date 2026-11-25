@@ -124,16 +124,8 @@ void main() {
     }
 
     vec3 filtered = sum / totalWeight;
-    if (pc.stepSize <= 0) {
-#if defined(VS_ACTIVE_RENDER_TIER) && (VS_ACTIVE_RENDER_TIER >= 3)
-        vec3 albedo = max(texelFetch(gAlbedo, p, 0).rgb, vec3(0.0));
-#else
-        vec3 albedo = pow(max(texelFetch(gAlbedo, p, 0).rgb, vec3(0.0)), vec3(2.2));
-#endif
-        filtered = filtered * max(albedo, vec3(0.035));
-#if VS_ACTIVE_RENDER_TIER >= 2
-        filtered += sharp.rgb;
-#endif
-    }
+    // uNoisyColor already holds sharp specular plus albedo-modulated diffuse from the
+    // lighting pass; output the filtered radiance directly to avoid remultiplying albedo
+    // (squaring diffuse) and re-adding sharp radiance (double-counting specular).
     imageStore(uFilteredColor, p, vec4(filtered, 1.0));
 }

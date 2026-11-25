@@ -36,6 +36,14 @@ void main() {
         }
     }
 
+    // Optical reflection/refraction misses set bit 8 (shadeOpticalRay) and can hit the
+    // analytic sun disc in the sky hook while the surface already adds direct specular.
+    // Cap them like secondary misses; primary rays (bit 8 clear) and shadow rays (early
+    // return above) are untouched.
+    if ((payload.flags & 256u) != 0u) {
+        radiance = min(radiance, vec3(2.4));
+    }
+
     vsPayloadSetRadianceRough(payload, max(radiance, vec3(0.0)), 1.0);
     payload.hitT = 65536.0;
     payload.flags &= ~1u;

@@ -392,6 +392,8 @@ vec3 shadeGbufferSurface(
         vs_dispatch_hook_water_waves(waveStrength, waveSpeed, waveScale);
         float waveHeight = sin(worldApprox.x * waveScale + vsWorld.gameTimeSec * waveSpeed) * waveStrength;
         vs_dispatch_hook_water_surface(s, worldApprox, waveHeight);
+        // Bias the wave normal toward the viewer for stable grazing-angle Fresnel/Snell.
+        s.normal = vsFaceWaterNormal(s.normal, V);
     } else if (!isDhPixel && dimId == 0 && vsWorld.rain > 0.01) {
         vsApplyRainWetness(s, worldApprox, skyLight, vsWorld.rain, clamp(VS_PARAM_WETNESS_STRENGTH, 0.0, 1.0));
     }
@@ -430,9 +432,13 @@ vec3 shadeGbufferSurface(
 
     vec3 skyAmbHook = vec3(0.0);
     vs_dispatch_hook_sky(skyAmbHook, s.normal, skyState);
+    // The sky hook includes the bright sun/moon disc; cap it for diffuse irradiance only
+    // so upward-facing surfaces facing the light do not blow out. Reflections keep the
+    // unclamped sky radiance.
+    vec3 skyAmbDiffuse = min(skyAmbHook, vec3(0.85));
     vec3 caveFloor = (dimId == 1) ? (vsBiomeFogTint() * 0.35) : vec3(0.024, 0.028, 0.040);
     vec3 diffuseAlbedo = s.albedo * (1.0 - s.metallic * 0.85);
-    vec3 ambient = diffuseAlbedo * mix(caveFloor, skyAmbHook * 0.44, (dimId == 1) ? 0.35 : skyVis) * ssao;
+    vec3 ambient = diffuseAlbedo * mix(caveFloor, skyAmbDiffuse * 0.44, (dimId == 1) ? 0.35 : skyVis) * ssao;
 
     vec3 specIbl = vec3(0.0);
     if (!isWater && (s.metallic > 0.05 || s.roughness < 0.65)) {
@@ -457,6 +463,8 @@ vec3 shadeGbufferSurface(
     }
 
     // Dynamic emissive point lights culled per 8x8 workgroup tile in shared memory.
+    // torchParam scales the analytic lights only; the block-light hook already shapes
+    // vanilla block/held fallbacks with intensity coupling and its soft knee.
     float torchParam = clamp(VS_PARAM_TORCH_INTENSITY, 0.3, 2.5);
     vec3 dynamicLights = vec3(0.0);
     uint totalSceneLights = isDhPixel ? 0u : min(uEmissiveLights.lightCount, 64u);
@@ -492,11 +500,11 @@ vec3 shadeGbufferSurface(
         vec3 hCol = vec3(1.0);
         if (heldEnergy > 1e-4) {
             vs_dispatch_hook_block_light(hCol, heldKind, heldDistance);
-            heldFallback = s.albedo * hCol * (heldEnergy * 1.25 * torchParam);
+            heldFallback = s.albedo * hCol * (heldEnergy * 1.25);
         }
     }
 
-    vec3 blockFallback = s.albedo * blockRadiance * (blockEnergy * 1.25 * torchParam * blockFallbackWeight);
+    vec3 blockFallback = s.albedo * blockRadiance * (blockEnergy * 1.25 * blockFallbackWeight);
     if (isWater) {
         blockFallback *= 0.25;
         heldFallback *= 0.25;
@@ -514,15 +522,17 @@ vec3 shadeGbufferSurface(
         reflSky = reflSky * reflClouds.a + reflClouds.rgb;
 
         float NoV = clamp(dot(s.normal, V), 0.0, 1.0);
-        // Physical dielectric water F0 = 0.02 (no artificial 0.14 floor) for clearer shallow water.
-        float fresnel = 0.02 + 0.98 * pow(1.0 - NoV, 5.0);
+        // Use the F0 set by the water hook (sv_waterInternalF0 for underwater Snell/TIR)
+        // instead of a hardcoded dielectric value, so this interface matches the hook.
+        float fresnel = s.f0 + (1.0 - s.f0) * pow(1.0 - NoV, 5.0);
         vec3 waterBody = (direct + ambient + torchLight) * mix(vec3(0.55, 0.74, 0.94), vec3(0.84, 0.97, 1.08), dayFactor);
         colorHdr = mix(waterBody, reflSky * max(skyVis, 0.22), clamp(fresnel, 0.02, 0.96));
 
         vec3 H = normalize(V + L);
         float glintExp = mix(320.0, 48.0, clamp(s.roughness * 8.0, 0.0, 1.0));
         float glint = pow(max(dot(s.normal, H), 0.0), glintExp) * shadowTerm * skyVis;
-        colorHdr += directColor * glint * 3.0 + dynamicLights;
+        // dynamicLights is already included through torchLight in waterBody; add only the glint.
+        colorHdr += directColor * glint * 3.0;
     }
 
     return colorHdr;

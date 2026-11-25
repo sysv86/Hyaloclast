@@ -159,10 +159,11 @@ bool traceVisibilityRay(vec3 origin, vec3 dir, float tMin, float tMax) {
     while (rayQueryProceedEXT(rq)) {
         if (rayQueryGetIntersectionTypeEXT(rq, false) == gl_RayQueryCandidateIntersectionTriangleEXT) {
             // First-person avatar geometry is camera-locked; letting it block visibility rays produces
-            // a shadow that follows the player and pulses through temporal reprojection.
+            // a shadow that follows the player and pulses through temporal reprojection. NO_SHADOW
+            // instances (local player, particles) must not cast local-light shadows either.
             uint candidateInstIdx = rayQueryGetIntersectionInstanceCustomIndexEXT(rq, false);
             if (candidateInstIdx < uInstanceMeta.instances.length()
-                && (uInstanceMeta.instances[candidateInstIdx].materialFlags & 0x40u) != 0u) {
+                && (uInstanceMeta.instances[candidateInstIdx].materialFlags & (0x20u | 0x40u)) != 0u) {
                 continue;
             }
             if (evaluateCandidateAlpha(rq, SKIP_WATER, true)) {
@@ -195,6 +196,11 @@ vec3 traceSunTransmittance(vec3 origin, vec3 dir, float tMin, float tMax) {
                 return vec3(0.0);
             }
             VsInstanceMeta meta = uInstanceMeta.instances[instIdx];
+            // Same filter as pathtrace.rahit / traceVisibilityRay: first-person and NO_SHADOW
+            // instances must not attenuate the sun. instIdx is bounds-checked above.
+            if ((meta.materialFlags & (0x20u | 0x40u)) != 0u) {
+                continue;
+            }
             if (meta.layerOrdinal == 0u || vsPackU64(meta.vertexBda) == 0ul) {
                 rayQueryConfirmIntersectionEXT(rq);
                 rayQueryTerminateEXT(rq);
@@ -435,6 +441,9 @@ vec3 shadeSecondaryHit(
         vec3 R = reflect(rayDir, hitSurf.normal);
         vec3 reflSky = vec3(0.0);
         vs_dispatch_hook_sky(reflSky, R, skyState);
+        // Secondary IBL also sees the analytic sun disc; clamp it so it cannot double-count
+        // against the explicit direct specular term evaluated on the same surface.
+        reflSky = min(reflSky, vec3(2.0));
         float NoV = clamp(dot(hitSurf.normal, -rayDir), 0.0, 1.0);
         vec3 F0 = mix(vec3(hitSurf.f0), hitSurf.albedo, hitSurf.metallic);
         vec3 F = F0 + (vec3(1.0) - F0) * pow(1.0 - NoV, 5.0);
@@ -825,10 +834,17 @@ void main() {
     float waterReflectance = isWater ? vsWaterOptics(-V, s.normal, waterNormal, submerged, transmission) : 0.0;
     vec3 waterTint = isWater ? vsWaterTint(s.albedo, skyLight, dayFactor) : vec3(0.0);
     vec3 waterBias = waterNormal * (tracedWaterOnly ? 0.015 : 0.065);
+    // Default Schlick term uses NoV; valid where H == N (mirror, glass) and for water's own f0 path.
     float fresnelWeight = pow(1.0 - NoV, 5.0);
     if (isWater || isGlass || s.roughness < 0.45) {
         vec3 H = (isWater || isGlass || s.roughness < 0.14) ? s.normal
             : vsSampleGgxHalfVector(s.normal, s.roughness, vec2(vsRandFloat(rng), vsRandFloat(rng)));
+        // For rough GGX surfaces Schlick must use the sampled half vector: VoH = dot(V, H).
+        // H == N for mirror/glass (VoH == NoV, unchanged) and water keeps waterReflectance.
+        if (!isWater && !isGlass) {
+            float VoH = clamp(dot(V, H), 0.0, 1.0);
+            fresnelWeight = pow(1.0 - VoH, 5.0);
+        }
         vec3 direction = isWater ? vsWaterReflection(-V, H, waterNormal) : reflect(-V, H);
         if (isWater || isGlass || dot(direction, geomN) > 0.0) {
             float hitT;
@@ -840,9 +856,12 @@ void main() {
             vec3 reflectionOrigin = isWater ? P + waterBias : rayOrigin;
             bool wetReflection = isWater && submerged;
             uint waterMode = isWater ? INCLUDE_WATER : SKIP_WATER;
+            // hitWaterNormal is non-zero only for actual water hits, so it cannot be used as a
+            // rejection test. Reject only near self-hits; keep INCLUDE_WATER so water still
+            // reflects nearby water.
             if (!isDhPixel && VS_RQ_SECONDARY_TRACES && traceClosestHitSurface(reflectionOrigin, direction, 0.005, VS_RQ_REFLECTION_DIST, waterMode, isGlass,
                                        hitT, hitPos, hitSurf, hitLight, hitWaterNormal)
-                    && dot(hitWaterNormal, hitWaterNormal) < 0.5) {
+                    && hitT > 0.05) {
                 reflected = shadeSecondaryHit(pixel, hitPos, direction, hitSurf, hitLight, L, directColor, skyState, true);
                 if (wetReflection) reflected = vsWaterTransmission(reflected, waterTint, hitT);
             } else if (wetReflection) {

@@ -742,13 +742,16 @@ void main() {
         vec3 ambient = vec3(0.0);
         vec3 ambSampleDir = normalize(mix(primary.normal, vec3(0.0, 1.0, 0.0), 0.30));
         vs_dispatch_hook_sky(ambient, ambSampleDir, sky);
+        // The sky hook bakes in the bright analytic sun/moon disc. Cap it for diffuse
+        // irradiance only; reflections and miss radiance keep the uncapped sky.
+        vec3 skyAmbDiffuse = min(ambient, vec3(0.85));
         float overworldSkyCurve = mix(0.04, 1.0, pow(clamp(primarySkyLight, 0.0, 1.0), 1.35));
         float skyAmbScale = (dimId == 1)
             ? 0.26
             : ((dimId == 2) ? max(0.18, 0.24 * primarySkyLight) : (0.40 * overworldSkyCurve));
         float giStrength = clamp(VS_PARAM_GI_BOUNCE_STRENGTH, 0.2, 2.0);
         // Apply primary.ao to ambient/GI only (not direct sunlight or metallic F0).
-        diffuse += ambient * primary.albedo * (1.0 - primary.metallic * 0.85) * skyAmbScale * primary.ao
+        diffuse += skyAmbDiffuse * primary.albedo * (1.0 - primary.metallic * 0.85) * skyAmbScale * primary.ao
             + blockLighting(primary, primaryBlockLight, position, vsBlockLightFallback(position)) * primary.ao
             + sampleLocalLight(pixel, prevUv, validPrevUv, primaryDepth, primary, primaryGeomN, position, -direction, firstWorldLight, rng);
 

@@ -105,8 +105,10 @@ void main() {
             vec2 hitMotion = textureLod(gVelocity, hitUv, 0.0).xy;
             vec2 prevHitUv = hitUv - hitMotion;
             bool hitInBounds = all(greaterThanEqual(prevHitUv, vec2(0.0))) && all(lessThanEqual(prevHitUv, vec2(1.0)));
+            // uPrevLitColor is stored in sRGB (pow(hdr, 1/2.2)) by post_tonemap;
+            // decode to linear radiance before reusing it as bounce lighting.
             vec3 hitPrevLit = hitInBounds
-                ? max(textureLod(uPrevLitColor, prevHitUv, 0.0).rgb, vec3(0.0))
+                ? pow(max(textureLod(uPrevLitColor, prevHitUv, 0.0).rgb, vec3(0.0)), vec3(2.2))
                 : vec3(0.0);
             vec3 hitAlbedo = pow(max(textureLod(gAlbedo, hitUv, 0.0).rgb, vec3(0.0)), vec3(2.2));
             float hitLuma = dot(hitPrevLit, vec3(0.2126, 0.7152, 0.0722));

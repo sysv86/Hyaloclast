@@ -12,7 +12,13 @@ void sv_vertex_displace(inout vec3 localPos, in VsVertexInput v) {
         return;
     }
 
+    // Prefer the CPU-integrated wind phase: it stays continuous when wind speed changes.
+    // Generated raster hook preludes may expose only the legacy VsHookWorld (no windPhase).
+#ifdef vsWorld
     float timeSec = vsWorld.gameTimeSec;
+#else
+    float timeSec = vsWorld.windPhase;
+#endif
     float rain = clamp(vsWorld.rain, 0.0, 1.0);
     float thunder = clamp(vsWorld.thunder, 0.0, 1.0);
     float storm = clamp(rain * 0.72 + thunder * 0.55, 0.0, 1.25);

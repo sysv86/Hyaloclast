@@ -45,7 +45,8 @@ void sv_direct_light(in VsSurface s, in vec3 viewDir, in vec3 lightDir, inout ve
     if (s.subsurface > 0.01) {
         // Dual frost/snow and foliage subsurface scattering
         vec3 Hback = normalize(directLightDir + s.normal * 0.34);
-        float backlit = pow(clamp(dot(viewDir, -Hback), 0.0, 1.0), 2.4) * 0.85;
+        // Conservative foliage backlight gain: the tint already boosts saturated greens.
+        float backlit = pow(clamp(dot(viewDir, -Hback), 0.0, 1.0), 2.4) * 0.45;
         float wrap = max(0.0, (ndotlRaw + 0.48) / 1.48) * 0.26;
 
         float maxCh = max(max(s.albedo.r, s.albedo.g), s.albedo.b);
