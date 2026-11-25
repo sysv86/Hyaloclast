@@ -110,7 +110,7 @@
   "vulkanshaders.screen.pack_settings.copied_profile": "Профиль скопирован в буфер обмена.",
   "vulkanshaders.screen.pack_settings.pasted_profile": "Применено параметров из буфера: %s.",
   "vulkanshaders.screen.pack_settings.reset_tab": "Сброс разд.",
-  "vulkanshaders.screen.pack_settings.reset_all": "Сброс всё",
+  "vulkanshaders.screen.pack_settings.reset_all": "Сбросить",
   "vulkanshaders.screen.pack_settings.no_matches": "Нет параметров по текущему фильтру.",
   "vulkanshaders.screen.pack_settings.recompile_hint": "Требует пересборки шейдерного конвейера",
   "vulkanshaders.screen.pack_settings.runtime_hint": "Применяется мгновенно без перекомпиляции",

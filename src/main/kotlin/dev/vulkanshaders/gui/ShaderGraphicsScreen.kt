@@ -156,6 +156,7 @@ class ShaderGraphicsScreen(
         if (displayedFrameGenMode != mode) {
             displayedFrameGenMode = mode
             frameGenButton?.message = frameGenLabel(mode)
+            frameGenButton?.setTooltip(Tooltip.create(Component.translatable(frameGenTooltipKey(mode))))
         }
     }
 

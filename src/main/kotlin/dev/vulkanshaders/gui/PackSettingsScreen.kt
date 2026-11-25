@@ -46,7 +46,7 @@ private fun localizedManifest(pack: LoadedShaderPack) =
 
 /**
  * Dynamic vanilla-styled settings screen generated from a `.vsp` shader pack's `[settings.*]` definitions.
- * Supports Low/Medium/High/Ultra quality presets, category tabs, live search, modified-only filtering,
+ * Supports Low/Medium/High/Ultra quality presets, category filter, live search, modified-only filtering,
  * per-setting tooltips and reset buttons, JSON profile copy/paste via clipboard, live `WorldUBO.packParams`
  * updates (`runtime = true`), and native `VkSpecializationInfo` pipeline specialization (`runtime = false`).
  */
