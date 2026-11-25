@@ -44,6 +44,8 @@ import org.lwjgl.vulkan.VkCommandBuffer
 import org.lwjgl.vulkan.VkImageBlit
 import java.lang.Float.floatToFloat16
 
+private const val DEFERRED_TIER_2_ACTIVATION_FRAMES: Int = 3
+
 /**
  * `TurboShadersExtension` SPI implementation connecting **VulkanShaders (Hyaloclast / IGNIS)**
  * to **VulkanTurbo (Pyroclast / TEPHRA)**.
@@ -192,6 +194,9 @@ object VulkanShadersTurboExtension : TurboShadersExtension {
 
     @Volatile
     private var worldGraphExecutedThisFrame: Boolean = false
+
+    @Volatile
+    private var deferredTier2Frames: Int = 0
 
     @JvmField
     var capturingWorldFeatures: Boolean = false
@@ -777,6 +782,20 @@ object VulkanShadersTurboExtension : TurboShadersExtension {
         }
 
         worldGraphExecutedThisFrame = steps > 0
+        if (VulkanShaders.hasPendingDeferredTier2()) {
+            if (worldGraphExecutedThisFrame) {
+                val frames = ++deferredTier2Frames
+                if (frames >= DEFERRED_TIER_2_ACTIVATION_FRAMES) {
+                    deferredTier2Frames = 0
+                    // Rebuild on the client task queue so it lands between frames, not mid-render.
+                    Minecraft.getInstance().execute {
+                        VulkanShaders.applyDeferredTier2(frames)
+                    }
+                }
+            }
+        } else {
+            deferredTier2Frames = 0
+        }
         return worldGraphExecutedThisFrame
     }
 

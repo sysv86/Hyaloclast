@@ -2934,6 +2934,39 @@ object NativeCoreBridge {
     }
 
     @JvmStatic
+    fun submitEntityVerticesCategorized(
+        basePtr: Long,
+        vertexCount: Int,
+        vertexStride: Int,
+        isQuads: Boolean,
+        textureId: Int,
+        normalTexId: Int,
+        specularTexId: Int,
+        kind: Int,
+        category: Int,
+        entityFlags: Int,
+    ) {
+        if (!initialized || basePtr == 0L || vertexCount <= 0 || vertexStride <= 0) return
+        val fn = fnSubmitEntityVerticesCategorized ?: return
+        try {
+            fn.invokeExact(
+                basePtr,
+                vertexCount,
+                vertexStride,
+                if (isQuads) 1 else 0,
+                textureId,
+                normalTexId,
+                specularTexId,
+                kind,
+                category,
+                entityFlags,
+            )
+        } catch (t: Throwable) {
+            logNativeCallError("submitEntityVerticesCategorized", t)
+        }
+    }
+
+    @JvmStatic
     fun onDisplayResized() {
         if (!initialized) return
         val fn = fnOnDisplayResized ?: return
