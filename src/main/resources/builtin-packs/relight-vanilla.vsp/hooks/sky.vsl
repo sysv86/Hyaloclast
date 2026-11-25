@@ -94,6 +94,34 @@ vec3 sv_evaluateAurora(vec3 dir, float timeSec) {
     return accum * elevationMask;
 }
 
+// End-only gravitational lensing of the background star field around the black hole.
+// The weak-field (Beloborodov) deflection alpha(b) = 2*rs/b is evaluated in the same
+// tangent-plane units as clouds.vsl (offset tangent / 0.052, shadow at b = 1).
+// The stylized shadow radius is taken as 2*rs, so alpha(1) = 1 and the lensing ring
+// coincides with the photon ring. Only the sampling direction is bent here.
+vec3 sv_endLensedStarDir(vec3 dir) {
+    const vec3 bhDir = vec3(0.300526, 0.560983, -0.771351);
+    const vec3 bhRight = vec3(0.816626, 0.266478, 0.511968);
+    const vec3 bhUp = vec3(-0.492753, 0.783765, 0.378029);
+
+    float cosBH = dot(dir, bhDir);
+    if (cosBH <= 1e-3) {
+        return dir;
+    }
+
+    // Impact parameter in shadow-radius units; b = 1 is the pixel-art shadow edge.
+    vec2 uv = vec2(dot(dir, bhRight), dot(dir, bhUp)) / (cosBH * 0.052);
+    float b = max(length(uv), 1e-3);
+
+    // beta = b - alpha, alpha = 1/b; radial scale keeps the secondary image bounded.
+    float lensFactor = clamp(1.0 - 1.0 / (b * b), -1.0, 1.0);
+    vec2 sourceUv = uv * lensFactor;
+
+    // Rebuild the deflected direction in the black-hole tangent basis.
+    vec3 sourceDir = bhDir + (sourceUv.x * 0.052) * bhRight + (sourceUv.y * 0.052) * bhUp;
+    return normalize(sourceDir);
+}
+
 // @hook(stage = "sky", priority = 100)
 // Sunlit Vanilla - Enriched azure daylight, warm peach/amber golden hour, natural moon arc,
 // twinkling starfield, Kasten-Young twilight warmth, and subtle cold-biome night aurora.
@@ -112,9 +140,13 @@ void sv_sky(inout vec3 radiance, in vec3 dir, in VsSkyState sky) {
 
     // The End: deep starry violet void
     if (dimId == 2) {
-        float up = abs(dir.y);
+        vec3 starDir = dir;
+        if (vsHasBiomeTelemetry()) {
+            starDir = sv_endLensedStarDir(dir);
+        }
+        float up = abs(starDir.y);
         vec3 baseVoid = mix(vec3(0.026, 0.017, 0.054), vec3(0.007, 0.005, 0.018), pow(up, 0.68));
-        vec3 gridCell = floor(dir * 210.0);
+        vec3 gridCell = floor(starDir * 210.0);
         float h = sv_starHash(gridCell);
         float endSpecks = smoothstep(0.9945, 0.9992, h) * (0.65 + 0.35 * sin(sky.gameTimeSec * 1.5 + h * 80.0));
         radiance = baseVoid + vec3(0.74, 0.64, 0.98) * endSpecks * 0.48;

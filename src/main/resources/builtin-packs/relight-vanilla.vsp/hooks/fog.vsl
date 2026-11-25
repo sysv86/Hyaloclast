@@ -11,4 +11,34 @@ void sv_fog(in float dist, in vec3 dir, inout vec3 scatter, inout vec3 transmitt
         * daylight * (1.0 - vsWorld.rain * 0.75);
     scatter *= mix(vec3(0.84, 0.87, 0.90), vec3(0.98, 0.90, 0.80), sunWarmth * 0.45);
     transmittance = mix(vec3(1.0), transmittance, 0.98);
+
+    // The End: additive sky-plane godrays from the fixed black-hole accretion source.
+    // This stage has no depth or TLAS access, so obsidian spires cannot occlude the fan;
+    // ray-traced visibility would need a separate pass.
+    if (vsDimensionId() == 2 && vsHasBiomeTelemetry()) {
+        const vec3 endSource = vec3(0.300526, 0.560983, -0.771351);
+        float cosSource = clamp(dot(dir, endSource), -1.0, 1.0);
+        if (cosSource > 0.55) {
+            vec3 tangentX = normalize(cross(vec3(0.0, 1.0, 0.0), endSource));
+            vec3 tangentY = cross(endSource, tangentX);
+            vec2 plane = vec2(dot(dir, tangentX), dot(dir, tangentY)) / max(cosSource, 0.2);
+            float radius = length(plane);
+            float azimuth = atan(plane.y, plane.x);
+
+            // Mod-wrapped time keeps shaft phases bounded over long sessions.
+            float t = mod(vsWorld.gameTimeSec, 256.0);
+            float shimmer = 0.82 + 0.18 * sin(t * 0.21);
+            float shafts = 0.52
+                + 0.30 * sin(azimuth * 11.0 + sin(azimuth * 4.0 + t * 0.13) * 0.9 + t * 0.24)
+                + 0.18 * sin(azimuth * 27.0 - t * 0.17 + sin(azimuth * 7.0) * 0.5);
+            shafts = max(shafts, 0.0);
+
+            float core = exp(-radius * radius * 8.0);
+            float fan = exp(-radius * 1.9) * (1.0 - smoothstep(0.75, 1.25, radius));
+            float distAtten = 1.0 / (1.0 + max(dist, 0.0) * 0.0015);
+            vec3 endRays = vec3(0.62, 0.48, 0.94)
+                * (core * 0.55 + fan * shafts * 0.85) * shimmer * distAtten * 0.20;
+            scatter += max(transmittance, vec3(0.0)) * endRays;
+        }
+    }
 }

@@ -3,7 +3,8 @@
 // ReLight Vanilla - Physically based sculpted 16-block vanilla voxel clouds with convective morphing,
 // weather-driven condensation altitude and cumulonimbus towers, Rayleigh + Ozone golden-hour optics,
 // 3-order Wrenninge multi-scattering, continuous twilight handoff, high-altitude cirrus at y = 540,
-// and clear-night geomagnetic Aurora Borealis curtains composited behind clouds.
+// clear-night geomagnetic Aurora Borealis curtains, and a dedicated End void atmosphere featuring
+// stratified voxel clouds, cosmic dust veils, and a pixel-art relativistic black hole.
 
 float sv_cloudHash21(vec2 p) {
     p = mod(p, 512.0);
@@ -214,9 +215,339 @@ vec3 sv_cloudAuroraCurtains(
     return acc * (mask * 0.38);
 }
 
+// Keplerian differential accretion filament pattern: angular speed Omega(r) ~ r^(-3/2)
+float sv_endDiskStripes(float rVal, float angleVal, float timeSec) {
+    const float TAU = 6.28318530718;
+    float rc = clamp(rVal, 1.0, 4.0);
+    float omega = 1.15 / (rc * sqrt(rc));
+    float phi = mod(angleVal - mod(timeSec * omega, TAU), TAU);
+    float s1 = 0.5 + 0.5 * sin(mod(rc * 7.2 + phi * 2.0, TAU));
+    float s2 = 0.5 + 0.5 * sin(mod(rc * 12.5 - phi * 3.0, TAU) + 1.1);
+    return 0.56 + 0.28 * s1 + 0.16 * s2;
+}
+
+// Minecraft pixel-art relativistic Schwarzschild/Kerr Black Hole with photon ring,
+// gravitationally lensed upper/lower arches, Keplerian shear, Doppler beaming, and polar jets.
+// Returns vec4(emissive_radiance, horizon_shadow_mask).
+vec4 sv_endBlackHole(
+    vec3 dir,
+    vec3 bhDir,
+    vec3 bhRight,
+    vec3 bhUp,
+    float timeSec
+) {
+    const float TAU = 6.28318530718;
+    float cosBH = dot(dir, bhDir);
+    if (cosBH <= 0.35) {
+        return vec4(0.0);
+    }
+
+    float invCos = 1.0 / max(cosBH, 0.25);
+    float uRaw = (dot(dir, bhRight) * invCos) / 0.052;
+    float vRaw = (dot(dir, bhUp) * invCos) / 0.052;
+    float rRaw = sqrt(uRaw * uRaw + vRaw * vRaw);
+
+    // Smooth radial crepuscular accretion light rays streaming into the surrounding End void
+    float rayAngle = atan(vRaw, (abs(uRaw) < 1e-4) ? 1e-4 : uRaw);
+    float rayT = mod(timeSec * 0.085, TAU);
+    float rayWave1 = 0.5 + 0.5 * sin(mod(rayAngle * 7.0, TAU) + rayT);
+    float rayWave2 = 0.5 + 0.5 * sin(mod(rayAngle * 13.0, TAU) - rayT * 1.4 + 1.2);
+    float rayAngular = rayWave1 * (0.45 + 0.55 * rayWave2);
+    float rayRadial = smoothstep(0.95, 1.85, rRaw) * exp(-max(rRaw - 1.4, 0.0) * 0.24);
+    float coneFade = smoothstep(0.35, 0.62, cosBH);
+    vec3 haloGlow = vec3(0.42, 0.20, 0.64) * (exp(-rRaw * 0.52) * 0.28 * coneFade);
+    vec3 crepuscularRays = vec3(0.76, 0.54, 1.05) * (rayRadial * rayAngular * 0.22 * coneFade);
+
+    if (cosBH <= 0.72) {
+        return vec4(haloGlow + crepuscularRays, 0.0);
+    }
+
+    // Quantize onto a crisp world-locked Minecraft pixel-art grid in the BH tangent plane
+    const float PX = 0.115;
+    float u = (floor(uRaw / PX) + 0.5) * PX;
+    float v = (floor(vRaw / PX) + 0.5) * PX;
+    float b = sqrt(u * u + v * v);
+    float bSafe = max(b, 1e-4);
+
+    // Event horizon shadow at critical Schwarzschild impact parameter b_c = 3*sqrt(3)/2 * r_s (normalized to 1.0)
+    float shadow = 1.0 - smoothstep(0.92, 1.06, b);
+
+    // Unstable photon-sphere lensing ring right around b = 1.04
+    float dPhoton = b - 1.04;
+    float photonRing = exp(-(dPhoton * dPhoton) * 145.0) * 1.38;
+
+    // Inclined (~8 deg) front equatorial accretion disk crossing in front of the event horizon
+    const float SIN_INC = 0.145;
+    float rFront = sqrt(u * u + (v / SIN_INC) * (v / SIN_INC));
+    float frontHalf = 1.0 - smoothstep(-0.04, 0.14, v);
+    float frontRadial = smoothstep(1.00, 1.24, rFront) * (1.0 - smoothstep(2.55, 4.00, rFront));
+    float wingBand = exp(-((v / 0.24) * (v / 0.24)))
+                   * smoothstep(1.00, 1.24, abs(u))
+                   * (1.0 - smoothstep(2.60, 4.00, abs(u)));
+    float frontCore = frontRadial * frontHalf;
+    float frontMask = max(frontCore, wingBand * 0.90);
+
+    // Gravitationally lensed far-side disk arches (upper primary arch + lower secondary underside arch)
+    float upperHemi = smoothstep(-0.12, 0.20, v);
+    float upperArch = smoothstep(0.98, 1.12, b)
+                    * (1.0 - smoothstep(1.42, 2.25, b))
+                    * upperHemi
+                    * (1.0 - shadow * 0.92);
+    float lowerHemi = 1.0 - smoothstep(-0.20, 0.08, v);
+    float lowerArch = smoothstep(0.98, 1.10, b)
+                    * (1.0 - smoothstep(1.22, 1.68, b))
+                    * lowerHemi
+                    * (1.0 - shadow * 0.92)
+                    * 0.78;
+    float lensedMask = max(upperArch, lowerArch);
+
+    float angFront = atan(v / SIN_INC, u);
+    float angLens = atan(v, u);
+    float eFront = frontMask * sv_endDiskStripes(rFront, angFront, timeSec);
+    float eLens = lensedMask * sv_endDiskStripes(b * 1.12, angLens, timeSec) * 0.90;
+    float totalDisk = max(eFront, eLens) + min(eFront, eLens) * 0.30;
+    float rEff = max((eFront >= eLens) ? rFront : b, 1.02);
+
+    // Relativistic Doppler beaming D = 1 / (gamma * (1 - beta * cos_los)) and D^3 flux shift
+    float beta = sqrt(clamp(0.18 / rEff, 0.0, 0.24));
+    float invGamma = sqrt(max(1.0 - beta * beta, 0.42));
+    float cosLos = clamp(-u / max(bSafe, 1.05), -1.0, 1.0) * 0.86;
+    float doppler = invGamma / max(1.0 - beta * cosLos, 0.48);
+    float dBoost = clamp(doppler * doppler * doppler, 0.72, 1.82);
+
+    // Shakura-Sunyaev radial temperature profile T(r) ~ r^(-3/4) via nested sqrt (no pow)
+    float rInv075 = 1.0 / (sqrt(rEff) * sqrt(sqrt(rEff)));
+    float temp = clamp(rInv075 * doppler * 0.96, 0.0, 1.55);
+
+    vec3 colOuter = vec3(0.68, 0.22, 0.82);
+    vec3 colMid = vec3(0.98, 0.56, 1.06);
+    vec3 colWarm = vec3(1.32, 0.86, 0.72);
+    vec3 colHot = vec3(1.24, 1.24, 1.52);
+    vec3 diskCol = mix(colOuter, colMid, smoothstep(0.18, 0.64, temp));
+    diskCol = mix(diskCol, mix(colWarm, colHot, smoothstep(0.94, 1.26, doppler)), smoothstep(0.56, 1.12, temp));
+
+    // Front equatorial disk cleanly passes in front of the black hole shadow
+    float shadowVis = shadow * (1.0 - clamp(frontCore * 1.85, 0.0, 1.0));
+
+    // Collimated Blandford-Znajek relativistic polar jets along +-v spin axis
+    float absV = abs(v);
+    float jetEnv = smoothstep(1.05, 1.75, absV) * (1.0 - smoothstep(3.20, 6.20, absV));
+    float jetWidth = 0.14 + 0.065 * absV;
+    float jetCore = exp(-((u / jetWidth) * (u / jetWidth)));
+    float jetWave = 0.68 + 0.32 * sin(mod(absV * 2.6, TAU) - mod(timeSec * 1.25, TAU));
+    vec3 jetRad = vec3(0.52, 0.68, 1.22) * (jetEnv * jetCore * jetWave * 0.40);
+
+    vec3 photonCol = mix(vec3(1.14, 0.74, 1.26), vec3(1.45, 1.38, 1.62), smoothstep(0.86, 1.28, doppler));
+    vec3 bhRad = diskCol * (totalDisk * dBoost * 0.76)
+               + photonCol * (photonRing * (0.68 + 0.32 * clamp(doppler, 0.60, 1.55)))
+               + jetRad
+               + haloGlow
+               + crepuscularRays;
+
+    return vec4(max(bhRad, vec3(0.0)), clamp(shadowVis, 0.0, 1.0));
+}
+
+// Sculpted 16-block voxel End void clouds: stratified ethereal archipelago bands with slow harmonic morph
+float sv_sampleEndCloudDensity(
+    vec3 worldPos,
+    float timeSec,
+    float cloudBottom,
+    float cloudTop,
+    float biomeScale
+) {
+    const float TAU = 6.28318530718;
+    float h = clamp((worldPos.y - cloudBottom) / max(cloudTop - cloudBottom, 1.0), 0.0, 1.0);
+    if (h <= 0.0 || h >= 1.0) {
+        return 0.0;
+    }
+
+    vec2 drift = vec2(timeSec * 2.1, -timeSec * 0.85);
+    vec2 xz = (worldPos.xz + drift) / 16.0;
+    vec2 cell = floor(xz);
+    vec2 local = fract(xz);
+
+    // Slow stratified harmonic ripple across End void cells
+    float morphPhase = mod(cell.x * 0.31 + cell.y * 0.23, TAU) + mod(timeSec * 0.048, TAU);
+    float morph = sin(morphPhase) * 0.045;
+
+    // Stretched filamentary macro structure (distinct from puffy Overworld cumulus)
+    float n1 = sv_cloudNoise2D(cell * vec2(0.09, 0.17));
+    float n2 = sv_cloudNoise2D(cell * vec2(0.24, 0.19) + vec2(11.7, 23.4));
+    float macro = n1 * 0.62 + n2 * 0.38 + morph;
+
+    float coverage = clamp(0.40 * biomeScale, 0.24, 0.56);
+    float threshold = 1.0 - coverage;
+    float occupied = smoothstep(threshold - 0.04, threshold + 0.07, macro);
+    if (occupied <= 0.001) {
+        return 0.0;
+    }
+
+    vec2 edgeDist = min(local, 1.0 - local);
+    float bevel = smoothstep(0.0, 0.14, min(edgeDist.x, edgeDist.y));
+    float cellBlend = mix(0.70, 1.0, bevel);
+
+    // Thin terraced twin-stratum voxel ribbons (floating End shelves rather than heavy tall domes)
+    float lowerDeck = smoothstep(0.0, 0.14, h) * (1.0 - smoothstep(0.36, 0.56, h));
+    float upperMask = smoothstep(threshold + 0.07, threshold + 0.22, macro);
+    float upperShelf = smoothstep(0.46, 0.62, h) * (1.0 - smoothstep(0.78, 0.96, h)) * upperMask;
+    float verticalProfile = max(lowerDeck, upperShelf * 0.85);
+
+    return clamp(occupied * cellBlend * verticalProfile * 1.10, 0.0, 1.0);
+}
+
+// Complete End atmosphere: sculpted ethereal voxel void clouds, high-altitude dust veil,
+// abyssal under-void mist, and pixel-art relativistic black hole with polar jets and crepuscular rays.
+vec4 sv_endClouds(in vec3 dir, in vec3 cameraPos, in VsSkyState sky) {
+    float timeSec = sky.gameTimeSec;
+
+    // Exact orthonormal celestial frame for the relativistic black hole (~34 deg elevation, ~18 deg spin tilt)
+    vec3 bhDir = vec3(0.300526, 0.560983, -0.771351);
+    vec3 bhRight = vec3(0.816626, 0.266478, 0.511968);
+    vec3 bhUp = vec3(-0.492753, 0.783765, 0.378029);
+
+    vec3 biomeFog = vsHasBiomeTelemetry() ? clamp(vsBiomeFogTint(), vec3(0.0), vec3(1.0)) : vec3(0.09, 0.05, 0.14);
+    vec3 voidAmbientBase = mix(vec3(0.036, 0.020, 0.072), biomeFog * 0.55, 0.35);
+    vec3 voidAmbientTop = mix(vec3(0.078, 0.044, 0.145), biomeFog * 0.85, 0.35);
+    vec3 bhLightColor = vec3(0.82, 0.58, 1.15);
+
+    float cosBH = dot(dir, bhDir);
+    float bhForward = sv_cloudHgPhase(cosBH, 0.74) * 0.76 + sv_cloudHgPhase(cosBH, -0.20) * 0.24;
+    float bhPhase = 0.42 + clamp(bhForward * 2.8, 0.0, 2.0);
+
+    // 1. Sculpted 16-block voxel End void clouds (6 steps x 2 taps = 12 evals, half of Overworld budget)
+    const float endBottom = 206.0;
+    const float endTop = 254.0;
+    float voxelTrans = 1.0;
+    vec3 voxelScattered = vec3(0.0);
+    float tEnter = 0.0;
+    float tExit = 0.0;
+    bool hitBand = false;
+
+    if (cameraPos.y < endBottom) {
+        if (dir.y > 0.015) {
+            tEnter = (endBottom - cameraPos.y) / max(dir.y, 0.02);
+            tExit = (endTop - cameraPos.y) / max(dir.y, 0.02);
+            hitBand = true;
+        }
+    } else if (cameraPos.y > endTop) {
+        if (dir.y < -0.015) {
+            tEnter = (endTop - cameraPos.y) / min(dir.y, -0.02);
+            tExit = (endBottom - cameraPos.y) / min(dir.y, -0.02);
+            hitBand = true;
+        }
+    } else {
+        tEnter = 0.0;
+        tExit = (dir.y >= 0.0)
+            ? (endTop - cameraPos.y) / max(dir.y, 0.02)
+            : (endBottom - cameraPos.y) / min(dir.y, -0.02);
+        hitBand = true;
+    }
+
+    if (hitBand) {
+        tEnter = max(tEnter, 0.0);
+        tExit = min(tExit, 2000.0);
+        if (tExit > tEnter) {
+            const int END_STEPS = 6;
+            float stepSize = (tExit - tEnter) / float(END_STEPS);
+            float biomeScale = vsBiomeCloudScale();
+            float extinction = 0.028;
+
+            // Static view-locked IGN jitter (no frame-index snapping in dim End void)
+            float jitter = fract(52.9829189 * fract(dot(dir.xz * 256.0, vec2(0.06711056, 0.00583715))));
+            float invHeight = 1.0 / max(endTop - endBottom, 1.0);
+
+            for (int i = 0; i < END_STEPS; ++i) {
+                if (voxelTrans < 0.35) {
+                    break;
+                }
+                float t = tEnter + (float(i) + jitter) * stepSize;
+                vec3 pos = cameraPos + dir * t;
+                float density = sv_sampleEndCloudDensity(pos, timeSec, endBottom, endTop, biomeScale);
+                if (density > 0.003) {
+                    float dLight = sv_sampleEndCloudDensity(pos + bhDir * 24.0, timeSec, endBottom, endTop, biomeScale);
+                    float optDepth = dLight * 24.0 * extinction;
+                    float bhEnergy = exp(-optDepth) * 0.72 + exp(-optDepth * 0.25) * 0.28;
+
+                    float hNorm = clamp((pos.y - endBottom) * invHeight, 0.0, 1.0);
+                    vec3 ambCol = mix(voidAmbientBase, voidAmbientTop, hNorm);
+                    // Subtle warm-lavender accretion rim on black-hole-facing edges
+                    vec3 rimCol = mix(bhLightColor, vec3(1.18, 0.86, 0.96), smoothstep(0.65, 0.96, cosBH));
+                    vec3 litCol = ambCol + rimCol * (bhEnergy * bhPhase * mix(0.22, 0.52, hNorm));
+
+                    float stepTrans = exp(-density * extinction * stepSize);
+                    voxelScattered += voxelTrans * litCol * (1.0 - stepTrans);
+                    voxelTrans *= stepTrans;
+                }
+            }
+        }
+    }
+
+    // Keep End clouds translucent so the End sky and stars remain readable behind them
+    float bandFade = hitBand
+        ? smoothstep(0.015, 0.14, abs(dir.y)) * (1.0 - smoothstep(900.0, 2000.0, tEnter))
+        : 0.0;
+    vec3 scattered = voxelScattered * bandFade;
+    float transmittance = mix(1.0, max(voxelTrans, 0.45), bandFade);
+
+    // 2. High-altitude luminous End void-dust veil at y = 430 (independent horizon fade)
+    if (dir.y > 0.035 && cameraPos.y < 420.0 && transmittance > 0.08) {
+        float tVeil = (430.0 - cameraPos.y) / max(dir.y, 0.035);
+        float veilFade = smoothstep(0.035, 0.16, dir.y) * (1.0 - smoothstep(2400.0, 4400.0, tVeil));
+        if (veilFade > 0.005) {
+            vec2 vWorld = cameraPos.xz + dir.xz * min(tVeil, 4400.0);
+            vec2 vDrift = vec2(mod(timeSec * 0.0042, 512.0), mod(-timeSec * 0.0024, 512.0));
+            vec2 vUv = vWorld * vec2(0.00052, 0.00128) + vDrift;
+            float warp = sv_cloudNoise2D(vUv * 1.35);
+            vec2 vWarped = vUv + vec2(warp * 0.58, -warp * 0.36);
+            float filament = sv_cloudNoise2D(vWarped) * 0.60
+                           + sv_cloudNoise2D(vWarped * 2.5 + vec2(5.3, 1.9)) * 0.40;
+            float veilMask = smoothstep(0.50, 0.86, filament);
+            float veilAlpha = veilMask * 0.24 * veilFade;
+
+            vec3 dustTint = mix(vec3(0.16, 0.09, 0.28), vec3(0.58, 0.38, 0.82), smoothstep(0.25, 0.92, cosBH));
+            dustTint *= (0.75 + 0.55 * clamp(bhForward * 2.2, 0.0, 1.5));
+            scattered += transmittance * dustTint * veilAlpha;
+            transmittance *= (1.0 - veilAlpha * 0.28);
+        }
+    }
+
+    // 3. Subtle abyssal void mist drifting below floating End islands (dir.y < -0.04)
+    if (dir.y < -0.04 && transmittance > 0.10) {
+        float tAbyss = max((cameraPos.y + 120.0) / max(-dir.y, 0.04), 0.0);
+        float abyssFade = smoothstep(0.04, 0.22, -dir.y) * (1.0 - smoothstep(1400.0, 3200.0, tAbyss));
+        if (abyssFade > 0.005) {
+            vec2 aWorld = cameraPos.xz + dir.xz * min(tAbyss, 3200.0);
+            vec2 aDrift = vec2(mod(-timeSec * 0.0030, 512.0), mod(timeSec * 0.0020, 512.0));
+            vec2 aUv = aWorld * 0.00075 + aDrift;
+            float aNoise = sv_cloudNoise2D(aUv) * 0.65 + sv_cloudNoise2D(aUv * 2.2 + vec2(3.1, 7.4)) * 0.35;
+            float aMask = smoothstep(0.46, 0.84, aNoise) * 0.18 * abyssFade;
+            vec3 abyssCol = mix(vec3(0.055, 0.030, 0.115), vec3(0.14, 0.08, 0.24), aNoise);
+            scattered += transmittance * abyssCol * aMask;
+            transmittance *= (1.0 - aMask * 0.22);
+        }
+    }
+
+    // 4. Pixel-art relativistic Black Hole + polar jets + crepuscular rays composited behind End clouds
+    if (transmittance > 0.02) {
+        vec4 bh = sv_endBlackHole(dir, bhDir, bhRight, bhUp, timeSec);
+        scattered += transmittance * bh.rgb;
+        // Event horizon shadow absorbs background sky strictly inside its compact pixel silhouette
+        transmittance *= (1.0 - bh.a * 0.94);
+    }
+
+    return vec4(max(scattered, vec3(0.0)), clamp(transmittance, 0.0, 1.0));
+}
+
 // @hook(stage = "clouds", priority = 100)
 vec4 sv_clouds(in vec3 dir, in vec3 cameraPos, in VsSkyState sky) {
-    if (vsDimensionId() != 0) {
+    int dim = vsDimensionId();
+    if (dim == 1) {
+        return vec4(0.0, 0.0, 0.0, 1.0);
+    }
+    if (dim == 2 && vsHasBiomeTelemetry()) {
+        return sv_endClouds(dir, cameraPos, sky);
+    }
+    if (dim != 0) {
         return vec4(0.0, 0.0, 0.0, 1.0);
     }
 

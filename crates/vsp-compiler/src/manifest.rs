@@ -1722,7 +1722,10 @@ pub fn validate_pack_directory(pack_dir: &std::path::Path) -> PackValidationRepo
                     Some(shader_rel.to_owned()),
                     "Pass shader path escapes pack root or is absolute",
                 );
-            } else if !pack_dir.join(shader_rel).is_file() && !has_extends {
+            } else if !pack_dir.join(shader_rel).is_file()
+                && !pack_dir.join(format!("{shader_rel}.spv")).is_file()
+                && !has_extends
+            {
                 report.add_error(
                     Some(format!("passes.{pass_label}.{field}")),
                     Some(shader_rel.to_owned()),

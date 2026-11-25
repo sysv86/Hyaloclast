@@ -1,14 +1,28 @@
 #include <vulkanshaders/v1/common.vsl>
+#include <vulkanshaders/v1/end_source.vsl>
+
+// The hook linker strips #include payloads from injected hook modules, so keep a guarded
+// local copy of the shared helper for linked compute stages. The include guard prevents
+// a duplicate definition when this file is compiled as a standalone VSL unit.
+#ifndef VULKANSHADERS_V1_END_SOURCE_VSL
+vec3 vsEndSourceDir() {
+    return vec3(0.300526, 0.560983, -0.771351);
+}
+#endif
 
 // @hook(stage = "direct_light", priority = 100)
 // Sunlit Vanilla - Hue-faithful daylight with gentle warm sun highlights, clean cool sky fill,
 // and dual frost/foliage subsurface scattering.
 void sv_direct_light(in VsSurface s, in vec3 viewDir, in vec3 lightDir, inout vec3 brdf) {
-    float ndotlRaw = dot(s.normal, lightDir);
+    // The End: island geometry is lit by the same black-hole source as clouds and dust.
+    bool useEndSource = vsDimensionId() == 2 && vsHasBiomeTelemetry();
+    vec3 directLightDir = useEndSource ? vsEndSourceDir() : lightDir;
+
+    float ndotlRaw = dot(s.normal, directLightDir);
     float ndotl = max(ndotlRaw, 0.0);
 
     if (dot(brdf, brdf) <= 1e-8) {
-        vec3 Hsum = viewDir + lightDir;
+        vec3 Hsum = viewDir + directLightDir;
         vec3 H = dot(Hsum, Hsum) > 1e-8 ? normalize(Hsum) : s.normal;
         float ndoth = max(dot(s.normal, H), 0.0);
         float specPower = mix(88.0, 4.5, clamp(s.roughness * s.roughness, 0.02, 1.0));
@@ -16,10 +30,12 @@ void sv_direct_light(in VsSurface s, in vec3 viewDir, in vec3 lightDir, inout ve
         brdf = s.albedo * (ndotl * (1.0 - s.metallic) * (1.0 / 3.14159265)) + vec3(spec * ndotl);
     }
 
-    // Crisp warm sunlight highlights vs cool azure sky-shadow fill
+    // Crisp warm sunlight highlights vs cool azure sky-shadow fill;
+    // in The End the accretion source washes direct radiance soft lavender-violet.
     float sunWarmth = smoothstep(0.06, 0.72, ndotl);
     vec3 daylightTint = mix(vec3(0.90, 0.96, 1.07), vec3(1.07, 1.01, 0.93), sunWarmth);
-    brdf *= daylightTint;
+    vec3 directTint = useEndSource ? vec3(1.03, 0.94, 1.16) : daylightTint;
+    brdf *= directTint;
 
     // Gentle cool sky-fill micro-bounce along the terminator for readable block contours
     float terminatorBand = smoothstep(-0.36, 0.18, ndotlRaw) * (1.0 - smoothstep(0.18, 0.62, ndotlRaw));
@@ -28,7 +44,7 @@ void sv_direct_light(in VsSurface s, in vec3 viewDir, in vec3 lightDir, inout ve
 
     if (s.subsurface > 0.01) {
         // Dual frost/snow and foliage subsurface scattering
-        vec3 Hback = normalize(lightDir + s.normal * 0.34);
+        vec3 Hback = normalize(directLightDir + s.normal * 0.34);
         float backlit = pow(clamp(dot(viewDir, -Hback), 0.0, 1.0), 2.4) * 0.85;
         float wrap = max(0.0, (ndotlRaw + 0.48) / 1.48) * 0.26;
 

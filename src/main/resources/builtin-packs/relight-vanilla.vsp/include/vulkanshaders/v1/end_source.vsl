@@ -1,0 +1,10 @@
+#ifndef VULKANSHADERS_V1_END_SOURCE_VSL
+#define VULKANSHADERS_V1_END_SOURCE_VSL
+
+// Shared The End illumination frame: fixed black-hole / accretion-source direction
+// used for cloud and dust lighting, exposed here for geometric lighting as well.
+vec3 vsEndSourceDir() {
+    return vec3(0.300526, 0.560983, -0.771351);
+}
+
+#endif
