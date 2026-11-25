@@ -2,6 +2,7 @@ package dev.vulkanshaders.config
 
 import com.google.gson.Gson
 import com.google.gson.GsonBuilder
+import com.google.gson.JsonDeserializer
 import dev.vulkanshaders.VulkanShaders
 import net.fabricmc.loader.api.FabricLoader
 import java.nio.charset.StandardCharsets

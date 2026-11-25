@@ -18,7 +18,7 @@ import com.mojang.renderpearl.api.vertex.VertexFormat;
 import dev.vulkanshaders.VulkanShaders;
 import dev.vulkanshaders.backend.NativeCoreBridge;
 import dev.vulkanshaders.bridge.VulkanShadersTurboExtension;
-import dev.vulkanshaders.config.RenderTier;
+import dev.vulkanshaders.config.LightingMode;
 import dev.vulkanshaders.pipeline.GbufferPipelineRegistry;
 import dev.vulkanshaders.pipeline.GbufferTargetManager;
 import dev.vulkanshaders.pipeline.RayTracedWorldDraw;
@@ -195,7 +195,7 @@ public final class WorldFeatureRayTracingMixins {
             }
 
             boolean crumbling = prepared.pipeline() == RenderPipelines.CRUMBLING;
-            if (crumbling && VulkanShaders.INSTANCE.getConfig().getRenderTier() != RenderTier.TIER_3_PATH_TRACING) {
+            if (crumbling && VulkanShaders.INSTANCE.getConfig().getLightingMode() != LightingMode.PATH) {
                 return draw;
             }
             for (PreparedRenderType.Texture texture : prepared.textures()) {

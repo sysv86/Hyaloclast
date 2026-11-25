@@ -8,7 +8,7 @@ import com.mojang.renderpearl.backend.vulkan.VulkanGpuTexture
 import com.mojang.renderpearl.backend.vulkan.VulkanGpuTextureView
 import dev.vulkanshaders.VulkanShaders
 import dev.vulkanshaders.backend.NativeCoreBridge
-import dev.vulkanshaders.config.RenderTier
+import dev.vulkanshaders.config.LightingMode
 import dev.vulkanshaders.pipeline.GbufferPipelineRegistry
 import dev.vulkanshaders.pipeline.GbufferTargetManager
 import dev.vulkanshaders.pipeline.SectionMaterialPacking
@@ -336,7 +336,7 @@ object DistantHorizonsBridge {
      */
     @JvmStatic
     fun shouldCancelDhTerrainRaster(): Boolean =
-        VulkanShaders.shaderPackActive && VulkanShaders.config.renderTier == RenderTier.TIER_3_PATH_TRACING
+        VulkanShaders.shaderPackActive && VulkanShaders.config.renderTier == LightingMode.PATH
 
     @JvmStatic
     fun effectiveFarPlaneBlocks(vanillaDepthFar: Float): Float {

@@ -124,7 +124,7 @@ class HardwareAutoCalibratorTest {
         val manifest = sampleManifest()
         val result = HardwareAutoCalibrator.calibrate(probe, VulkanShadersConfig(), manifest)
 
-        assertEquals(RenderTier.TIER_3_PATH_TRACING, result.config.renderTier)
+        assertEquals(LightingMode.PATH, result.config.renderTier)
         assertEquals("ultra", result.recommendedPresetId)
         assertEquals(UpscalerMode.DLSS, result.config.upscalerMode)
         assertEquals(UpscalerQuality.QUALITY, result.config.upscalerQuality)
@@ -135,7 +135,7 @@ class HardwareAutoCalibratorTest {
         assertTrue(result.config.autoCalibrated)
 
         // Only values differing from defaults should be persisted in pack overrides
-        val overrides = result.config.activePackOverrides(manifest.id, RenderTier.TIER_3_PATH_TRACING)
+        val overrides = result.config.activePackOverrides(manifest.id, LightingMode.PATH)
         assertEquals("3.0", overrides["sun_intensity"])
         assertEquals("4", overrides["pt_bounces"])
         assertFalse("foliage_wind" in overrides, "Default-matching values must not be stored as overrides")
@@ -164,7 +164,7 @@ class HardwareAutoCalibratorTest {
         )
         val result = HardwareAutoCalibrator.calibrate(probe, VulkanShadersConfig(), sampleManifest())
 
-        assertEquals(RenderTier.TIER_3_PATH_TRACING, result.config.renderTier)
+        assertEquals(LightingMode.PATH, result.config.renderTier)
         assertEquals("high", result.recommendedPresetId)
         assertEquals(UpscalerMode.FSR3, result.config.upscalerMode)
         assertEquals(UpscalerQuality.BALANCED, result.config.upscalerQuality)
@@ -193,7 +193,7 @@ class HardwareAutoCalibratorTest {
         )
         val result = HardwareAutoCalibrator.calibrate(probe, VulkanShadersConfig(), sampleManifest())
 
-        assertEquals(RenderTier.TIER_3_PATH_TRACING, result.config.renderTier)
+        assertEquals(LightingMode.PATH, result.config.renderTier)
         assertEquals("high", result.recommendedPresetId)
         assertEquals(UpscalerMode.DLSS, result.config.upscalerMode)
         assertEquals(UpscalerQuality.QUALITY, result.config.upscalerQuality)
@@ -220,7 +220,7 @@ class HardwareAutoCalibratorTest {
         val manifest = sampleManifest()
         val result = HardwareAutoCalibrator.calibrate(probe, VulkanShadersConfig(), manifest)
 
-        assertEquals(RenderTier.TIER_2_RAY_QUERY, result.config.renderTier)
+        assertEquals(LightingMode.HYBRID, result.config.renderTier)
         assertEquals("medium", result.recommendedPresetId)
         assertEquals(UpscalerMode.NONE, result.config.upscalerMode)
         assertEquals(UpscalerQuality.NATIVE_AA, result.config.upscalerQuality)
@@ -230,7 +230,7 @@ class HardwareAutoCalibratorTest {
         assertTrue(result.config.autoCalibrated)
 
         // Tier-3-only setting `pt_bounces` must not be written for Tier 2
-        val overrides = result.config.activePackOverrides(manifest.id, RenderTier.TIER_2_RAY_QUERY)
+        val overrides = result.config.activePackOverrides(manifest.id, LightingMode.HYBRID)
         assertFalse("pt_bounces" in overrides, "Settings outside active tier range must not be stored")
     }
 
@@ -249,7 +249,7 @@ class HardwareAutoCalibratorTest {
             refreshRateHz = 60,
         )
         val resGtx = HardwareAutoCalibrator.calibrate(gtx1660, VulkanShadersConfig(), sampleManifest())
-        assertEquals(RenderTier.TIER_1_COMPUTE_GI, resGtx.config.renderTier)
+        assertEquals(LightingMode.COMPUTE, resGtx.config.renderTier)
         assertEquals("medium", resGtx.recommendedPresetId)
         assertEquals(2048, resGtx.config.shadowResolution)
         assertEquals(12, resGtx.config.shadowDistanceChunks)
@@ -269,7 +269,7 @@ class HardwareAutoCalibratorTest {
             refreshRateHz = 144,
         )
         val resRx = HardwareAutoCalibrator.calibrate(rx6600, VulkanShadersConfig(), sampleManifest())
-        assertEquals(RenderTier.TIER_1_COMPUTE_GI, resRx.config.renderTier)
+        assertEquals(LightingMode.COMPUTE, resRx.config.renderTier)
         assertEquals("medium", resRx.recommendedPresetId)
         assertEquals(UpscalerMode.NONE, resRx.config.upscalerMode)
     }
@@ -290,7 +290,7 @@ class HardwareAutoCalibratorTest {
         )
         val result = HardwareAutoCalibrator.calibrate(igpu, VulkanShadersConfig(), sampleManifest())
 
-        assertEquals(RenderTier.TIER_0_RASTER, result.config.renderTier)
+        assertEquals(LightingMode.CLASSIC, result.config.renderTier)
         assertEquals("low", result.recommendedPresetId)
         assertEquals(DenoiserMode.NONE, result.config.denoiserMode)
         assertEquals(FrameGenMode.NONE, result.config.frameGenMode)
@@ -315,7 +315,7 @@ class HardwareAutoCalibratorTest {
             refreshRateHz = 60,
         )
         val res4k = HardwareAutoCalibrator.calibrate(probe4k, VulkanShadersConfig(), sampleManifest())
-        assertEquals(RenderTier.TIER_2_RAY_QUERY, res4k.config.renderTier)
+        assertEquals(LightingMode.HYBRID, res4k.config.renderTier)
         assertEquals("low", res4k.recommendedPresetId)
         assertEquals(UpscalerQuality.NATIVE_AA, res4k.config.upscalerQuality)
 
@@ -335,9 +335,9 @@ class HardwareAutoCalibratorTest {
             refreshRateHz = 60,
             lastFrameDtMs = 28.5,
         )
-        val baseCfg = VulkanShadersConfig(renderTier = RenderTier.TIER_3_PATH_TRACING)
+        val baseCfg = VulkanShadersConfig(renderTier = LightingMode.PATH)
         val resHeavy = HardwareAutoCalibrator.calibrate(probeHeavy, baseCfg, sampleManifest())
-        assertEquals(RenderTier.TIER_3_PATH_TRACING, resHeavy.config.renderTier)
+        assertEquals(LightingMode.PATH, resHeavy.config.renderTier)
         assertNotEquals(UpscalerQuality.QUALITY, resHeavy.config.upscalerQuality)
         assertEquals(UpscalerQuality.BALANCED, resHeavy.config.upscalerQuality)
     }

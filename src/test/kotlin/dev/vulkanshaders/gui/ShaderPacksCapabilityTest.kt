@@ -3,7 +3,7 @@ package dev.vulkanshaders.gui
 import dev.vulkanshaders.backend.NativeCoreBridge
 import dev.vulkanshaders.config.DenoiserMode
 import dev.vulkanshaders.config.FrameGenMode
-import dev.vulkanshaders.config.RenderTier
+import dev.vulkanshaders.config.LightingMode
 import dev.vulkanshaders.config.UpscalerMode
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -14,30 +14,30 @@ import org.junit.jupiter.api.Test
 class ShaderPacksCapabilityTest {
     @Test
     fun `tiers 0 and 1 always available, RT tiers require device capabilities`() {
-        assertTrue(ShaderGraphicsScreen.tierAvailable(RenderTier.TIER_0_RASTER, 0))
-        assertTrue(ShaderGraphicsScreen.tierAvailable(RenderTier.TIER_1_COMPUTE_GI, 0))
-        assertFalse(ShaderGraphicsScreen.tierAvailable(RenderTier.TIER_2_RAY_QUERY, 0))
-        assertFalse(ShaderGraphicsScreen.tierAvailable(RenderTier.TIER_3_PATH_TRACING, NativeCoreBridge.CAP_RAY_QUERY))
+        assertTrue(ShaderGraphicsScreen.tierAvailable(LightingMode.CLASSIC, 0))
+        assertTrue(ShaderGraphicsScreen.tierAvailable(LightingMode.COMPUTE, 0))
+        assertFalse(ShaderGraphicsScreen.tierAvailable(LightingMode.HYBRID, 0))
+        assertFalse(ShaderGraphicsScreen.tierAvailable(LightingMode.PATH, NativeCoreBridge.CAP_RAY_QUERY))
         val allRtCaps = NativeCoreBridge.CAP_RAY_QUERY or
             NativeCoreBridge.CAP_RAY_TRACING_AS or
             NativeCoreBridge.CAP_RAY_TRACING_PIPELINE
         assertTrue(
             ShaderGraphicsScreen.tierAvailable(
-                RenderTier.TIER_3_PATH_TRACING,
+                LightingMode.PATH,
                 allRtCaps,
                 macOsMoltenVk = false,
             ),
         )
         assertFalse(
             ShaderGraphicsScreen.tierAvailable(
-                RenderTier.TIER_2_RAY_QUERY,
+                LightingMode.HYBRID,
                 allRtCaps,
                 macOsMoltenVk = true,
             ),
         )
         assertFalse(
             ShaderGraphicsScreen.tierAvailable(
-                RenderTier.TIER_3_PATH_TRACING,
+                LightingMode.PATH,
                 allRtCaps,
                 macOsMoltenVk = true,
             ),
@@ -61,13 +61,13 @@ class ShaderPacksCapabilityTest {
     fun `cycling skips unavailable modes`() {
         val caps = 0
         // Tier 1 -> Tier 0 -> Tier 1 (RT tiers skipped).
-        assertEquals(RenderTier.TIER_0_RASTER, nextTier(RenderTier.TIER_1_COMPUTE_GI, caps))
+        assertEquals(LightingMode.CLASSIC, nextTier(LightingMode.COMPUTE, caps))
         // TSR -> NONE -> TSR (vendor modes skipped).
         assertEquals(UpscalerMode.NONE, nextUpscaler(UpscalerMode.TSR, caps))
     }
 
-    private fun nextTier(current: RenderTier, caps: Int): RenderTier {
-        val enabled = RenderTier.entries.filter { ShaderGraphicsScreen.tierAvailable(it, caps) }
+    private fun nextTier(current: LightingMode, caps: Int): LightingMode {
+        val enabled = LightingMode.entries.filter { ShaderGraphicsScreen.tierAvailable(it, caps) }
         return enabled[(enabled.indexOf(current) + 1) % enabled.size]
     }
 

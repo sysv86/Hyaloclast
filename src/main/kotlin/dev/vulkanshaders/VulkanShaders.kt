@@ -8,7 +8,7 @@ import dev.vulkanshaders.bridge.StandaloneRenderPearlBridge
 import dev.vulkanshaders.bridge.VulkanShadersTurboExtension
 import dev.vulkanshaders.config.ConfigStore
 import dev.vulkanshaders.config.FrameGenMode
-import dev.vulkanshaders.config.RenderTier
+import dev.vulkanshaders.config.LightingMode
 import dev.vulkanshaders.config.RuntimePerformanceGuard
 import dev.vulkanshaders.config.VulkanShadersConfig
 import dev.vulkanshaders.diagnostics.HyaloclastDebugHud
@@ -87,9 +87,9 @@ object VulkanShaders : ClientModInitializer {
 
     // TEMPORARY headless switch hook: VS_TEST_TIER_SWITCH=T1_TO_T2 (or T3_TO_T2).
     private val testTierSwitchMode: String? = System.getenv("VS_TEST_TIER_SWITCH")
-    private val testTierSwitchSource: RenderTier? = when (testTierSwitchMode) {
-        "T1_TO_T2" -> RenderTier.TIER_1_COMPUTE_GI
-        "T3_TO_T2" -> RenderTier.TIER_3_PATH_TRACING
+    private val testTierSwitchSource: LightingMode? = when (testTierSwitchMode) {
+        "T1_TO_T2" -> LightingMode.COMPUTE
+        "T3_TO_T2" -> LightingMode.PATH
         else -> null
     }
     private var testTierSwitchCountdown: Int = if (testTierSwitchSource == null) -1 else 120
@@ -147,8 +147,8 @@ object VulkanShaders : ClientModInitializer {
         val prev = config
         // Entering TIER_2 rebuilds RT pipelines and recompiles the pack. Queue that work behind a
         // few successful world-graph frames so no in-flight frame waits on a stale semaphore.
-        val deferTier2 = newConfig.renderTier == RenderTier.TIER_2_RAY_QUERY &&
-            prev.renderTier != RenderTier.TIER_2_RAY_QUERY
+        val deferTier2 = newConfig.renderTier == LightingMode.HYBRID &&
+            prev.renderTier != LightingMode.HYBRID
         if (deferTier2) {
             pendingDeferredTier2Config = newConfig
             log.info("TIER_2 activation deferred: config persisted, rebuild queued for frame boundary")
@@ -226,7 +226,7 @@ object VulkanShaders : ClientModInitializer {
     @JvmStatic
     fun applyDeferredTier2(framesWaited: Int = 0) {
         val pending = pendingDeferredTier2Config ?: return
-        if (pending.renderTier != RenderTier.TIER_2_RAY_QUERY) {
+        if (pending.renderTier != LightingMode.HYBRID) {
             pendingDeferredTier2Config = null
             log.warn("Discarded stale deferred TIER_2 activation; current tier is {}", config.renderTier)
             return
@@ -349,8 +349,8 @@ object VulkanShaders : ClientModInitializer {
             if (--testTierSwitchCountdown <= 0) {
                 testTierSwitchCountdown = -1
                 if (config.renderTier == testSourceTier) {
-                    log.info("VS_TEST_TIER_SWITCH: requesting {} -> TIER_2_RAY_QUERY", testSourceTier)
-                    updateConfig(config.copy(renderTier = RenderTier.TIER_2_RAY_QUERY))
+                    log.info("VS_TEST_TIER_SWITCH: requesting {} -> HYBRID", testSourceTier)
+                    updateConfig(config.copy(renderTier = LightingMode.HYBRID))
                 } else {
                     log.warn(
                         "VS_TEST_TIER_SWITCH: expected {}, found {}; switch not triggered",

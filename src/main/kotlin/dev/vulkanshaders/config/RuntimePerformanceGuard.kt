@@ -10,7 +10,7 @@ import net.minecraft.network.chat.Component
 
 /**
  * Monitors frame/tick cadence and GPU frame times during live rendering, stepping down
- * [RenderTier] automatically when sustained overload or a multi-second render stall occurs.
+ * [LightingMode] automatically when sustained overload or a multi-second render stall occurs.
  */
 object RuntimePerformanceGuard {
     private const val WARMUP_TICKS = 20
@@ -32,12 +32,12 @@ object RuntimePerformanceGuard {
     }
 
     /**
-     * Returns the next lower [RenderTier] supported by [supportedTiers], or `null` when already
+     * Returns the next lower [LightingMode] supported by [supportedTiers], or `null` when already
      * at the lowest supported tier.
      */
     @JvmStatic
-    fun nextLowerTier(current: RenderTier, supportedTiers: List<Int>): RenderTier? {
-        val candidates = RenderTier.entries
+    fun nextLowerTier(current: LightingMode, supportedTiers: List<Int>): LightingMode? {
+        val candidates = LightingMode.entries
             .filter { it.tierIndex < current.tierIndex }
             .sortedByDescending { it.tierIndex }
         if (candidates.isEmpty()) return null
@@ -94,7 +94,7 @@ object RuntimePerformanceGuard {
         lastDowngradeAtMs = nowMs
 
         val reasonMs = avgGpuMs?.takeIf { it >= OVERLOAD_GPU_MS } ?: deltaMs
-        if (cfg.renderTier == RenderTier.TIER_3_PATH_TRACING) {
+        if (cfg.renderTier == LightingMode.PATH) {
             val activeOverrides = cfg.activePackOverrides(pack.manifest.id, cfg.renderTier)
             val currentBounces = activeOverrides["pt_max_bounces"]?.toIntOrNull()
                 ?: pack.manifest.settings.firstOrNull { it.key == "pt_max_bounces" }?.defaultValue?.toIntOrNull()
@@ -116,12 +116,12 @@ object RuntimePerformanceGuard {
         val lowerTier = nextLowerTier(cfg.renderTier, pack.manifest.supportedTiers)
         if (lowerTier != null) {
             VulkanShaders.updateConfig(cfg.copy(renderTier = lowerTier))
-            val msg = "GPU overload (${"%.0f".format(reasonMs)} ms/frame) — lowered render tier to ${lowerTier.name}."
+            val msg = "GPU overload (${"%.0f".format(reasonMs)} ms/frame) — lowered lighting mode to ${lowerTier.shortName}."
             HyaloclastErrorLog.recordError("PerfGuard", msg)
             notifyPlayer(mc, msg)
         } else if (criticalStall) {
             VulkanShaders.updateConfig(cfg.copy(enabled = false))
-            val msg = "Severe GPU stall (${"%.0f".format(reasonMs)} ms) at lowest tier — shaders disabled."
+            val msg = "Severe GPU stall (${"%.0f".format(reasonMs)} ms) at Classic mode — shaders disabled."
             HyaloclastErrorLog.recordError("PerfGuard", msg)
             notifyPlayer(mc, msg)
         }

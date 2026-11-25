@@ -15,7 +15,7 @@ class ConfigMigrationAndPresetsTest {
         val original = VulkanShadersConfig(
             enabled = true,
             selectedPackId = "hyaloclast-obsidian-showcase",
-            renderTier = RenderTier.TIER_3_PATH_TRACING,
+            renderTier = LightingMode.PATH,
             shadowResolution = 4096,
             shadowDistanceChunks = 24,
             upscalerMode = UpscalerMode.DLSS,
@@ -29,8 +29,8 @@ class ConfigMigrationAndPresetsTest {
             enableSer = false,
             packOverridesByTier = mapOf(
                 "hyaloclast-obsidian-showcase" to mapOf(
-                    RenderTier.TIER_2_RAY_QUERY.tierIndex to mapOf("sun_intensity" to "3.1"),
-                    RenderTier.TIER_3_PATH_TRACING.tierIndex to mapOf("sun_intensity" to "3.6", "pt_max_bounces" to "3"),
+                    LightingMode.HYBRID.tierIndex to mapOf("sun_intensity" to "3.1"),
+                    LightingMode.PATH.tierIndex to mapOf("sun_intensity" to "3.6", "pt_max_bounces" to "3"),
                 ),
             ),
             autoCalibrated = true,
@@ -43,7 +43,7 @@ class ConfigMigrationAndPresetsTest {
         assertEquals(UpscalerQuality.QUALITY, deserialized.effectiveUpscalerQuality)
         assertEquals(
             mapOf("sun_intensity" to "3.6", "pt_max_bounces" to "3"),
-            deserialized.activePackOverrides("hyaloclast-obsidian-showcase", RenderTier.TIER_3_PATH_TRACING),
+            deserialized.activePackOverrides("hyaloclast-obsidian-showcase", LightingMode.PATH),
         )
     }
 
@@ -51,7 +51,7 @@ class ConfigMigrationAndPresetsTest {
     fun `sanitizes legacy pack IDs, out-of-range numeric bounds, and non-finite HDR values`() {
         val malformed = VulkanShadersConfig(
             selectedPackId = "hyaloclast-default",
-            renderTier = RenderTier.TIER_1_COMPUTE_GI,
+            renderTier = LightingMode.COMPUTE,
             shadowResolution = 128,
             shadowDistanceChunks = 256,
             hdrPeakBrightnessNits = Float.NaN,
@@ -72,7 +72,7 @@ class ConfigMigrationAndPresetsTest {
         assertTrue(sanitized.packOverrides.isEmpty())
         assertEquals(
             mapOf("sun_intensity" to "2.9"),
-            sanitized.activePackOverrides("hyaloclast-sunlit-vanilla", RenderTier.TIER_1_COMPUTE_GI),
+            sanitized.activePackOverrides("hyaloclast-sunlit-vanilla", LightingMode.COMPUTE),
         )
         assertEquals(UpscalerQuality.NATIVE_AA, sanitized.effectiveUpscalerQuality)
     }
@@ -117,25 +117,25 @@ class ConfigMigrationAndPresetsTest {
         val ultraPreset = manifest.presets.first { it.id == "ultra" }
 
         var cfg = VulkanShadersConfig(selectedPackId = "preset-test-pack")
-        cfg = cfg.withPackOverrides("preset-test-pack", RenderTier.TIER_0_RASTER, lowPreset.values)
-        cfg = cfg.withPackOverrides("preset-test-pack", RenderTier.TIER_3_PATH_TRACING, ultraPreset.values)
+        cfg = cfg.withPackOverrides("preset-test-pack", LightingMode.CLASSIC, lowPreset.values)
+        cfg = cfg.withPackOverrides("preset-test-pack", LightingMode.PATH, ultraPreset.values)
 
         assertEquals(
             mapOf("sun_intensity" to "2.0", "enable_wind" to "false"),
-            cfg.activePackOverrides("preset-test-pack", RenderTier.TIER_0_RASTER),
+            cfg.activePackOverrides("preset-test-pack", LightingMode.CLASSIC),
         )
         assertEquals(
             mapOf("sun_intensity" to "3.8", "enable_wind" to "true"),
-            cfg.activePackOverrides("preset-test-pack", RenderTier.TIER_3_PATH_TRACING),
+            cfg.activePackOverrides("preset-test-pack", LightingMode.PATH),
         )
-        assertTrue(cfg.activePackOverrides("preset-test-pack", RenderTier.TIER_1_COMPUTE_GI).isEmpty())
+        assertTrue(cfg.activePackOverrides("preset-test-pack", LightingMode.COMPUTE).isEmpty())
 
         // Resetting Tier 0 overrides must preserve Tier 3 overrides
-        val resetTier0 = cfg.withPackOverrides("preset-test-pack", RenderTier.TIER_0_RASTER, emptyMap())
-        assertTrue(resetTier0.activePackOverrides("preset-test-pack", RenderTier.TIER_0_RASTER).isEmpty())
+        val resetTier0 = cfg.withPackOverrides("preset-test-pack", LightingMode.CLASSIC, emptyMap())
+        assertTrue(resetTier0.activePackOverrides("preset-test-pack", LightingMode.CLASSIC).isEmpty())
         assertEquals(
             mapOf("sun_intensity" to "3.8", "enable_wind" to "true"),
-            resetTier0.activePackOverrides("preset-test-pack", RenderTier.TIER_3_PATH_TRACING),
+            resetTier0.activePackOverrides("preset-test-pack", LightingMode.PATH),
         )
     }
 }

@@ -153,7 +153,7 @@ object HardwareAutoCalibrator {
             probe.arch.startsWith("nvidia", ignoreCase = true) ||
             probe.dlssSr
 
-        var chosenTier: RenderTier
+        var chosenTier: LightingMode
         var presetId: String
         var upscaler = UpscalerMode.NONE
         var upscalerQuality = UpscalerQuality.NATIVE_AA
@@ -165,7 +165,7 @@ object HardwareAutoCalibrator {
         when {
             // Enthusiast + RT Pipeline (e.g., RTX 4080/4090/5080/5090, >=16 GB VRAM)
             tierClass == "enthusiast" && probe.rtPipeline && usableVramMb >= 12_288L -> {
-                chosenTier = RenderTier.TIER_3_PATH_TRACING
+                chosenTier = LightingMode.PATH
                 upscaler = bestUpscaler
                 denoiser = bestRtDenoiser
                 val hasDlssUpscale = probe.dlssSr || probe.dlssRr
@@ -188,11 +188,11 @@ object HardwareAutoCalibrator {
             tierClass == "high" && probe.rtPipeline && usableVramMb >= 8_192L -> {
                 val nonNvidiaNoHardwareDenoiser = !isNvidia && !probe.nrd && !probe.dlssRr
                 if (nonNvidiaNoHardwareDenoiser && isAbove1440p) {
-                    chosenTier = RenderTier.TIER_2_RAY_QUERY
+                    chosenTier = LightingMode.HYBRID
                     presetId = "ultra"
                     denoiser = DenoiserMode.SVGF
                 } else {
-                    chosenTier = RenderTier.TIER_3_PATH_TRACING
+                    chosenTier = LightingMode.PATH
                     presetId = "high"
                     upscaler = bestUpscaler
                     upscalerQuality = if (is4kOrHigher) {
@@ -213,7 +213,7 @@ object HardwareAutoCalibrator {
 
             // Mid (or High/Enthusiast without RT Pipeline) + RayQuery (e.g., RTX 2060/3060/4060, RX 6700/7600, 8 GB)
             probe.rayQuery && tierClass != "low" && usableVramMb >= 4_096L -> {
-                chosenTier = RenderTier.TIER_2_RAY_QUERY
+                chosenTier = LightingMode.HYBRID
                 presetId = if (is4kOrHigher) "low" else "medium"
                 denoiser = DenoiserMode.SVGF
                 frameGen = FrameGenMode.NONE
@@ -223,8 +223,8 @@ object HardwareAutoCalibrator {
 
             // Mid without RT or Low discrete with >= 4 GB VRAM (6-8 GB class)
             tierClass == "mid" || (tierClass == "low" && usableVramMb >= 4096L) -> {
-                chosenTier = RenderTier.TIER_1_COMPUTE_GI
-                presetId = if (usableVramMb in 1L..6143L || isAbove1440p) "low" else "medium"
+                chosenTier = LightingMode.COMPUTE
+                presetId = if (tierClass == "mid" && !is4kOrHigher) "high" else if (usableVramMb in 1L..6143L || isAbove1440p) "medium" else "high"
                 denoiser = DenoiserMode.SVGF
                 frameGen = FrameGenMode.NONE
                 shadowRes = 2048
@@ -233,7 +233,7 @@ object HardwareAutoCalibrator {
 
             // Integrated / Very Low VRAM (< 4 GB)
             else -> {
-                chosenTier = RenderTier.TIER_0_RASTER
+                chosenTier = LightingMode.CLASSIC
                 presetId = "low"
                 denoiser = DenoiserMode.NONE
                 frameGen = FrameGenMode.NONE
@@ -248,10 +248,10 @@ object HardwareAutoCalibrator {
                 .filter { it <= chosenTier.tierIndex }
                 .maxOrNull()
                 ?: manifest.supportedTiers.min()
-            chosenTier = RenderTier.entries.firstOrNull { it.tierIndex == fallbackIdx } ?: chosenTier
+            chosenTier = LightingMode.entries.firstOrNull { it.tierIndex == fallbackIdx } ?: chosenTier
             when (chosenTier) {
-                RenderTier.TIER_0_RASTER -> denoiser = DenoiserMode.NONE
-                RenderTier.TIER_1_COMPUTE_GI -> if (denoiser == DenoiserMode.DLSS_RR || denoiser == DenoiserMode.NRD) {
+                LightingMode.CLASSIC -> denoiser = DenoiserMode.NONE
+                LightingMode.COMPUTE -> if (denoiser == DenoiserMode.DLSS_RR || denoiser == DenoiserMode.NRD) {
                     denoiser = DenoiserMode.SVGF
                 }
                 else -> {}
@@ -262,7 +262,7 @@ object HardwareAutoCalibrator {
         // exceeding 22 ms/frame (~45 FPS), step upscaler quality down one notch (or preset down).
         val measuredFrameMs = probe.averageGpuFrameTimeMs?.takeIf { it > 0.0 } ?: probe.lastFrameDtMs
         if (measuredFrameMs > HEAVY_FRAME_DT_MS && chosenTier == currentConfig.renderTier) {
-            if (chosenTier != RenderTier.TIER_3_PATH_TRACING) {
+            if (chosenTier != LightingMode.PATH) {
                 presetId = stepDownPreset(presetId)
             } else if (upscaler == UpscalerMode.NONE) {
                 upscaler = bestUpscaler
@@ -277,9 +277,14 @@ object HardwareAutoCalibrator {
             }
         }
 
-        if (chosenTier != RenderTier.TIER_3_PATH_TRACING) {
+        if (chosenTier == LightingMode.CLASSIC && !isAbove1440p) {
             upscaler = UpscalerMode.NONE
             upscalerQuality = UpscalerQuality.NATIVE_AA
+        } else if (chosenTier == LightingMode.COMPUTE && (isAbove1440p || usableVramMb in 1L..6143L)) {
+            if (upscaler == UpscalerMode.NONE && bestUpscaler != UpscalerMode.NONE) {
+                upscaler = bestUpscaler
+                upscalerQuality = UpscalerQuality.QUALITY
+            }
         }
 
         // Ensure shadow resolution stays within hardware bounds.
@@ -294,7 +299,7 @@ object HardwareAutoCalibrator {
             upscalerQuality = upscalerQuality,
             denoiserMode = denoiser,
             frameGenMode = frameGen,
-            enableOverlayPass = if (chosenTier == RenderTier.TIER_3_PATH_TRACING) true else currentConfig.enableOverlayPass,
+            enableOverlayPass = if (chosenTier == LightingMode.PATH) true else currentConfig.enableOverlayPass,
             autoCalibrated = true,
         )
 
@@ -438,7 +443,7 @@ object HardwareAutoCalibrator {
         }
 
     private fun buildSummary(
-        tier: RenderTier,
+        tier: LightingMode,
         presetLabel: String,
         upscaler: UpscalerMode,
         upscalerQuality: UpscalerQuality,
@@ -446,10 +451,10 @@ object HardwareAutoCalibrator {
         frameGen: FrameGenMode,
     ): String {
         val tierLabel = when (tier) {
-            RenderTier.TIER_0_RASTER -> "Tier 0"
-            RenderTier.TIER_1_COMPUTE_GI -> "Tier 1"
-            RenderTier.TIER_2_RAY_QUERY -> "Tier 2"
-            RenderTier.TIER_3_PATH_TRACING -> "Tier 3"
+            LightingMode.CLASSIC -> "Tier 0"
+            LightingMode.COMPUTE -> "Tier 1"
+            LightingMode.HYBRID -> "Tier 2"
+            LightingMode.PATH -> "Tier 3"
         }
         val parts = mutableListOf(tierLabel, presetLabel)
         if (upscaler != UpscalerMode.NONE) {

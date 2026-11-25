@@ -3,7 +3,7 @@ package dev.vulkanshaders.diagnostics
 import dev.vulkanshaders.VulkanShaders
 import dev.vulkanshaders.backend.NativeCoreBridge
 import dev.vulkanshaders.config.FrameGenMode
-import dev.vulkanshaders.config.RenderTier
+import dev.vulkanshaders.config.LightingMode
 import dev.vulkanshaders.config.UpscalerMode
 import dev.vulkanshaders.config.VulkanShadersConfig
 import dev.vulkanshaders.pack.ShaderPackManager
@@ -26,7 +26,7 @@ object HyaloclastDebugHud {
     data class DebugSnapshot(
         val shadersEnabled: Boolean,
         val activePackName: String?,
-        val renderTier: RenderTier,
+        val renderMode: LightingMode,
         val upscalerMode: UpscalerMode,
         val upscalerScalePercent: Int,
         val frameGenMode: FrameGenMode,
@@ -168,11 +168,11 @@ object HyaloclastDebugHud {
         return lines
     }
 
-    private fun formatTierShort(tier: RenderTier): String = when (tier) {
-        RenderTier.TIER_0_RASTER -> "Tier 0 (Raster)"
-        RenderTier.TIER_1_COMPUTE_GI -> "Tier 1 (Compute GI)"
-        RenderTier.TIER_2_RAY_QUERY -> "Tier 2 (Ray Query)"
-        RenderTier.TIER_3_PATH_TRACING -> "Tier 3 (Path Tracing)"
+    private fun formatTierShort(tier: LightingMode): String = when (tier) {
+        LightingMode.CLASSIC -> "Tier 0 (Raster)"
+        LightingMode.COMPUTE -> "Tier 1 (Compute GI)"
+        LightingMode.HYBRID -> "Tier 2 (Ray Query)"
+        LightingMode.PATH -> "Tier 3 (Path Tracing)"
     }
 
     private fun formatUpscaler(mode: UpscalerMode, scalePercent: Int): String = when (mode) {

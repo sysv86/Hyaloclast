@@ -3,7 +3,7 @@ package dev.vulkanshaders.state
 import dev.vulkanshaders.VulkanShaders
 import dev.vulkanshaders.backend.NativeCoreBridge
 import dev.vulkanshaders.bridge.DistantHorizonsBridge
-import dev.vulkanshaders.config.RenderTier
+import dev.vulkanshaders.config.LightingMode
 import dev.vulkanshaders.config.UpscalerMode
 import dev.vulkanshaders.pack.PackSettingDefinition
 import dev.vulkanshaders.pack.SettingType
@@ -392,7 +392,7 @@ object WorldStateCollector {
         val renderWidth = mainTarget.width
         val renderHeight = mainTarget.height
         val temporalActive = VulkanShaders.config.upscalerMode != UpscalerMode.NONE &&
-            VulkanShaders.config.renderTier != RenderTier.TIER_3_PATH_TRACING
+            VulkanShaders.config.renderTier != LightingMode.PATH
         updateJitter(renderWidth, renderHeight, temporalActive)
         NativeCoreBridge.setJitter(jitterX, jitterY)
 
@@ -434,7 +434,7 @@ object WorldStateCollector {
                 reportedSunAngle = sunAngle,
                 overworldClockTime = skyClockTime,
                 partialTick = if (skyClockAdvancing) partialTick else 0.0f,
-                preferClock = VulkanShaders.config.renderTier == RenderTier.TIER_3_PATH_TRACING,
+                preferClock = VulkanShaders.config.renderTier == LightingMode.PATH,
             )
         } else {
             sunAngle

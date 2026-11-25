@@ -16,7 +16,7 @@ import dev.vulkanturbo.core.TerrainRegionPipelines
 import dev.vulkanshaders.VulkanShaders
 import dev.vulkanshaders.backend.NativeCoreBridge
 import dev.vulkanshaders.config.FrameGenMode
-import dev.vulkanshaders.config.RenderTier
+import dev.vulkanshaders.config.LightingMode
 import dev.vulkanshaders.backend.VulkanDeviceContext
 import dev.vulkanshaders.diagnostics.HyaloclastErrorLog
 import dev.vulkanturbo.gui.VulkanErrorLogScreen
@@ -212,16 +212,16 @@ object VulkanShadersTurboExtension : TurboShadersExtension {
     fun shouldCaptureWorldFeatures(): Boolean {
         if (!VulkanShaders.shaderPackActive) return false
         val tier = VulkanShaders.config.renderTier
-        return tier == RenderTier.TIER_2_RAY_QUERY || tier == RenderTier.TIER_3_PATH_TRACING
+        return tier == LightingMode.HYBRID || tier == LightingMode.PATH
     }
 
     override fun shouldSkipWorldRasterization(): Boolean =
         VulkanShaders.shaderPackActive &&
-            VulkanShaders.config.renderTier == RenderTier.TIER_3_PATH_TRACING
+            VulkanShaders.config.renderTier == LightingMode.PATH
 
     override fun shouldSuppressEntityBlobShadows(): Boolean {
         if (!VulkanShaders.shaderPackActive) return false
-        return VulkanShaders.config.renderTier == RenderTier.TIER_2_RAY_QUERY
+        return VulkanShaders.config.renderTier == LightingMode.HYBRID
     }
 
     override fun resolveTerrainVertexFormat(layer: ChunkSectionLayer, defaultFormat: VertexFormat): VertexFormat =
@@ -612,7 +612,7 @@ object VulkanShadersTurboExtension : TurboShadersExtension {
         )
 
         val cfg = VulkanShaders.config
-        if (cfg.renderTier == RenderTier.TIER_2_RAY_QUERY || cfg.renderTier == RenderTier.TIER_3_PATH_TRACING) {
+        if (cfg.renderTier == LightingMode.HYBRID || cfg.renderTier == LightingMode.PATH) {
             NativeCoreBridge.recordFrameRtx(
                 cmdAddress = cmd.address(),
                 cameraX = WorldStateCollector.cameraPosX,
@@ -653,7 +653,7 @@ object VulkanShadersTurboExtension : TurboShadersExtension {
         var prevDhDepthLayout = VK_IMAGE_LAYOUT_UNDEFINED
         var dhBoundActive = false
 
-        if (DistantHorizonsBridge.dhRenderedThisFrame && cfg.renderTier != RenderTier.TIER_3_PATH_TRACING) {
+        if (DistantHorizonsBridge.dhRenderedThisFrame && cfg.renderTier != LightingMode.PATH) {
             val cTex = DistantHorizonsBridge.dhColorTexture?.takeIf { !it.isClosed }
             val cView = DistantHorizonsBridge.dhColorTextureView
             val dTex = DistantHorizonsBridge.dhDepthTexture?.takeIf { !it.isClosed }

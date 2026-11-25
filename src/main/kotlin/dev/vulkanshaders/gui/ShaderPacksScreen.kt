@@ -3,6 +3,9 @@ package dev.vulkanshaders.gui
 import com.mojang.blaze3d.Blaze3D
 import dev.vulkanshaders.VulkanShaders
 import dev.vulkanshaders.backend.NativeCoreBridge
+import dev.vulkanshaders.config.LightingMode
+import dev.vulkanshaders.state.WorldStateCollector
+import dev.vulkanshaders.backend.NativeCoreBridge
 import dev.vulkanshaders.bridge.StandaloneRenderPearlBridge
 import dev.vulkanshaders.diagnostics.HyaloclastErrorLog
 import dev.vulkanshaders.pack.LoadedShaderPack
@@ -96,6 +99,32 @@ class ShaderPacksScreen(
         val list = this.list ?: return
         val cfg = VulkanShaders.config
         val canEnable = canEnableShaders()
+        val caps = NativeCoreBridge.queryCapabilities()
+        val supportedModes = ShaderPackManager.activePack?.manifest?.supportedTiers
+        val modeAvailable = { mode: LightingMode ->
+            ShaderGraphicsScreen.tierAvailable(mode, caps) &&
+                (supportedModes == null || supportedModes.contains(mode.modeIndex))
+        }
+        val modeBtn = Button.builder(
+            Component.translatable("vulkanshaders.screen.mode")
+                .append(": ")
+                .append(Component.translatable(cfg.renderTier.translationKey)),
+        ) {
+            val enabledModes = LightingMode.entries.filter(modeAvailable)
+            if (enabledModes.isNotEmpty()) {
+                val idx = enabledModes.indexOf(cfg.renderTier)
+                val next = enabledModes[(idx + 1) % enabledModes.size]
+                if (VulkanShaders.updateConfig(VulkanShaders.config.copy(renderTier = next))) {
+                    WorldStateCollector.resetHistory()
+                    NativeCoreBridge.resetTemporalHistory()
+                    NativeCoreBridge.markHistoryReset()
+                }
+                refreshWidgets()
+            }
+        }.tooltip(
+            Tooltip.create(Component.translatable(ShaderGraphicsScreen.tierTooltipKey(cfg.renderTier))),
+        ).build().apply { active = canEnable }
+        list.addBig(modeBtn)
         val active = ShaderPackManager.activePack.takeIf { VulkanShaders.shaderPackActive }
 
         if (!canEnable) {

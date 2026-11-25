@@ -11,7 +11,7 @@ import com.mojang.renderpearl.api.textures.GpuTexture;
 import dev.vulkanshaders.VulkanShaders;
 import dev.vulkanshaders.backend.NativeCoreBridge;
 import dev.vulkanshaders.bridge.VulkanShadersTurboExtension;
-import dev.vulkanshaders.config.RenderTier;
+import dev.vulkanshaders.config.LightingMode;
 import dev.vulkanshaders.pipeline.GbufferTargetManager;
 import com.mojang.blaze3d.framegraph.FrameGraphBuilder;
 import net.minecraft.client.Minecraft;
@@ -40,7 +40,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  * 1. Set the projection parameters used for Tier 3 overlay depth.
  * 2. Stage 4-MRT G-Buffer color attachment views ({@code mainColor}, {@code gNormalRoughness},
  *    {@code gMaterialPbr}, {@code gVelocity}) right before the main world {@code RenderPass} opens.
- * 3. In Tier 3 Full Path Tracing ({@link RenderTier#TIER_3_PATH_TRACING}), skip vanilla world
+ * 3. In Tier 3 Full Path Tracing ({@link LightingMode#PATH}), skip vanilla world
  *    rasterization passes ({@code addSkyPass}, {@code executeSolid}, {@code executeClassicTransparency},
  *    {@code executeOit}) while keeping {@code SectionOcclusionGraph}, chunk compilation/uploads,
  *    and depth-reprojected gizmo/overlay passes active.
@@ -125,7 +125,7 @@ public abstract class LevelRendererMixin {
         }
 
         RenderTarget mainTarget = this.gameRenderer.mainRenderTarget();
-        if (VulkanShaders.INSTANCE.getConfig().getRenderTier() == RenderTier.TIER_3_PATH_TRACING) {
+        if (VulkanShaders.INSTANCE.getConfig().getLightingMode() == LightingMode.PATH) {
             this.vulkanshaders$keepOcclusionGraphFed();
             if (VulkanShaders.INSTANCE.getConfig().getEnableOverlayPass() && NativeCoreBridge.initialized && mainTarget != null) {
                 GpuTexture depthTex = mainTarget.getDepthTexture();
@@ -153,7 +153,7 @@ public abstract class LevelRendererMixin {
         if (!VulkanShaders.shaderPackActive) {
             return;
         }
-        if (VulkanShaders.INSTANCE.getConfig().getRenderTier() != RenderTier.TIER_3_PATH_TRACING) {
+        if (VulkanShaders.INSTANCE.getConfig().getLightingMode() != LightingMode.PATH) {
             GbufferTargetManager.prepareTerrainMrtPass();
         }
     }
@@ -166,7 +166,7 @@ public abstract class LevelRendererMixin {
         CallbackInfo ci
     ) {
         if (VulkanShaders.shaderPackActive
-            && VulkanShaders.INSTANCE.getConfig().getRenderTier() == RenderTier.TIER_3_PATH_TRACING) {
+            && VulkanShaders.INSTANCE.getConfig().getLightingMode() == LightingMode.PATH) {
             ci.cancel();
         }
     }
@@ -179,7 +179,7 @@ public abstract class LevelRendererMixin {
         CallbackInfo ci
     ) {
         if (VulkanShaders.shaderPackActive
-            && VulkanShaders.INSTANCE.getConfig().getRenderTier() == RenderTier.TIER_3_PATH_TRACING) {
+            && VulkanShaders.INSTANCE.getConfig().getLightingMode() == LightingMode.PATH) {
             ci.cancel();
         }
     }
@@ -192,7 +192,7 @@ public abstract class LevelRendererMixin {
         CallbackInfo ci
     ) {
         if (VulkanShaders.shaderPackActive
-            && VulkanShaders.INSTANCE.getConfig().getRenderTier() == RenderTier.TIER_3_PATH_TRACING) {
+            && VulkanShaders.INSTANCE.getConfig().getLightingMode() == LightingMode.PATH) {
             ci.cancel();
         }
     }
@@ -204,7 +204,7 @@ public abstract class LevelRendererMixin {
         CallbackInfo ci
     ) {
         if (VulkanShaders.shaderPackActive
-            && VulkanShaders.INSTANCE.getConfig().getRenderTier() == RenderTier.TIER_3_PATH_TRACING) {
+            && VulkanShaders.INSTANCE.getConfig().getLightingMode() == LightingMode.PATH) {
             ci.cancel();
         }
     }

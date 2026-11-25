@@ -4,7 +4,7 @@ import com.google.gson.GsonBuilder
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import dev.vulkanshaders.VulkanShaders
-import dev.vulkanshaders.config.RenderTier
+import dev.vulkanshaders.config.LightingMode
 import dev.vulkanshaders.pack.LoadedShaderPack
 import dev.vulkanshaders.pack.PackPresetDefinition
 import dev.vulkanshaders.pack.PackSettingDefinition
@@ -79,7 +79,7 @@ class PackSettingsScreen(
     private var statusBanner: Component? = null
     private var dirtyRuntimeOverrides: Boolean = false
 
-    private fun activeTier(): RenderTier = VulkanShaders.config.renderTier
+    private fun activeTier(): LightingMode = VulkanShaders.config.renderTier
 
     private fun visibleSettings(tierIndex: Int = activeTier().tierIndex): List<PackSettingDefinition> =
         manifest.settings.filter { it.appliesToTier(tierIndex) }

@@ -1,10 +1,28 @@
 package dev.vulkanshaders.config
 
-enum class RenderTier(val tierIndex: Int, val translationKey: String) {
-    TIER_0_RASTER(0, "vulkanshaders.screen.tier.tier_0_raster"),
-    TIER_1_COMPUTE_GI(1, "vulkanshaders.screen.tier.tier_1_compute_gi"),
-    TIER_2_RAY_QUERY(2, "vulkanshaders.screen.tier.tier_2_ray_query"),
-    TIER_3_PATH_TRACING(3, "vulkanshaders.screen.tier.tier_3_path_tracing"),
+enum class LightingMode(
+    val modeIndex: Int,
+    val shortName: String,
+    val translationKey: String,
+) {
+    CLASSIC(0, "Classic", "vulkanshaders.screen.mode.classic"),
+    COMPUTE(1, "Compute", "vulkanshaders.screen.mode.compute"),
+    HYBRID(2, "Hybrid", "vulkanshaders.screen.mode.hybrid"),
+    PATH(3, "Path", "vulkanshaders.screen.mode.path");
+
+    val tierIndex: Int get() = modeIndex
+
+    companion object {
+        fun fromIndex(index: Int): LightingMode? = entries.firstOrNull { it.modeIndex == index }
+
+        fun fromToken(token: String?): LightingMode? = when (token?.trim()?.lowercase()) {
+            "0", "classic", "raster", "tier_0_raster" -> CLASSIC
+            "1", "compute", "compute_gi", "tier_1_compute_gi" -> COMPUTE
+            "2", "hybrid", "ray_query", "tier_2_ray_query" -> HYBRID
+            "3", "path", "path_tracing", "tier_3_path_tracing" -> PATH
+            else -> null
+        }
+    }
 }
 
 enum class UpscalerMode {
@@ -39,7 +57,7 @@ enum class FrameGenMode {
 data class VulkanShadersConfig(
     val enabled: Boolean = true,
     val selectedPackId: String = "hyaloclast-sunlit-vanilla",
-    val renderTier: RenderTier = RenderTier.TIER_1_COMPUTE_GI,
+    val renderTier: LightingMode = LightingMode.COMPUTE,
     val shadowResolution: Int = 2048,
     val shadowDistanceChunks: Int = 12,
     val upscalerMode: UpscalerMode = UpscalerMode.NONE,
@@ -58,9 +76,9 @@ data class VulkanShadersConfig(
     val autoCalibrated: Boolean = false,
 ) {
     val effectiveUpscalerQuality: UpscalerQuality
-        get() = if (renderTier == RenderTier.TIER_3_PATH_TRACING) upscalerQuality else UpscalerQuality.NATIVE_AA
+        get() = if (upscalerMode != UpscalerMode.NONE) upscalerQuality else UpscalerQuality.NATIVE_AA
 
-    fun activePackOverrides(packId: String, tier: RenderTier = renderTier): Map<String, String> {
+    fun activePackOverrides(packId: String, tier: LightingMode = renderTier): Map<String, String> {
         val normalizedId = packId.trim()
         if (normalizedId.isEmpty()) return emptyMap()
         val byTier = packOverridesByTier[normalizedId]
@@ -72,7 +90,7 @@ data class VulkanShadersConfig(
 
     fun withPackOverrides(
         packId: String,
-        tier: RenderTier,
+        tier: LightingMode,
         overrides: Map<String, String>,
     ): VulkanShadersConfig {
         val normalizedId = packId.trim()

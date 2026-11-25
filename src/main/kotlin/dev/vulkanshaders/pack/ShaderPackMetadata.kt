@@ -365,6 +365,19 @@ data class ShaderPackManifest(
     }
 
     companion object {
+        private fun parseModeValue(value: VspTomlParser.Value?): Int? = when (value) {
+            is VspTomlParser.Value.Num -> value.value.toInt()
+            is VspTomlParser.Value.Str -> when (value.value.trim().lowercase()) {
+                "0", "classic", "raster", "tier_0_raster" -> 0
+                "1", "compute", "compute_gi", "tier_1_compute_gi" -> 1
+                "2", "hybrid", "ray_query", "tier_2_ray_query" -> 2
+                "3", "path", "path_tracing", "tier_3_path_tracing" -> 3
+                else -> null
+            }
+            else -> null
+        }
+
+
         const val FIRST_SPEC_CONSTANT_ID: Int = 100
 
         val VALID_HOOK_STAGES: Set<String> = setOf(
@@ -400,8 +413,9 @@ data class ShaderPackManifest(
             val description = str(pack["description"]) ?: ""
             val extendsPackId = str(pack["extends"])?.takeIf { it.isNotBlank() }
 
-            val tiers = (caps["tiers"] as? VspTomlParser.Value.Arr)?.items
-                ?.mapNotNull { (it as? VspTomlParser.Value.Num)?.value?.toInt() }
+            val tiers = ((caps["modes"] ?: caps["tiers"]) as? VspTomlParser.Value.Arr)?.items
+                ?.mapNotNull { parseModeValue(it) }
+                ?.distinct()
                 ?.takeIf { it.isNotEmpty() }
                 ?: listOf(0)
 
@@ -476,8 +490,8 @@ data class ShaderPackManifest(
                                 runtime = (fields["runtime"] as? VspTomlParser.Value.Bool)?.value ?: true,
                                 category = category,
                                 description = settingDescription,
-                                minTier = (fields["min_tier"] as? VspTomlParser.Value.Num)?.value?.toInt() ?: 0,
-                                maxTier = (fields["max_tier"] as? VspTomlParser.Value.Num)?.value?.toInt() ?: 3,
+                                minTier = parseModeValue(fields["min_mode"] ?: fields["min_tier"]) ?: 0,
+                                maxTier = parseModeValue(fields["max_mode"] ?: fields["max_tier"]) ?: 3,
                             ),
                         )
                     }
@@ -570,8 +584,8 @@ data class ShaderPackManifest(
                     id = passId,
                     kind = str(fields["kind"]) ?: "compute",
                     shader = shader,
-                    minTier = (fields["min_tier"] as? VspTomlParser.Value.Num)?.value?.toInt() ?: 0,
-                    maxTier = (fields["max_tier"] as? VspTomlParser.Value.Num)?.value?.toInt() ?: 3,
+                    minTier = parseModeValue(fields["min_mode"] ?: fields["min_tier"]) ?: 0,
+                    maxTier = parseModeValue(fields["max_mode"] ?: fields["max_tier"]) ?: 3,
                     reads = (fields["reads"] as? VspTomlParser.Value.Arr)?.items?.mapNotNull { str(it) }.orEmpty(),
                     writes = (fields["writes"] as? VspTomlParser.Value.Arr)?.items?.mapNotNull { str(it) }.orEmpty(),
                     before = str(fields["before"]),
@@ -605,8 +619,8 @@ data class ShaderPackManifest(
                     label = str(fields["label"]) ?: "",
                     description = presetDesc,
                     order = (fields["order"] as? VspTomlParser.Value.Num)?.value?.toInt() ?: 0,
-                    minTier = (fields["min_tier"] as? VspTomlParser.Value.Num)?.value?.toInt() ?: 0,
-                    maxTier = (fields["max_tier"] as? VspTomlParser.Value.Num)?.value?.toInt() ?: 3,
+                    minTier = parseModeValue(fields["min_mode"] ?: fields["min_tier"]) ?: 0,
+                    maxTier = parseModeValue(fields["max_mode"] ?: fields["max_tier"]) ?: 3,
                     values = mergedValues,
                 )
             }.sortedWith(compareBy<Pair<Int, PackPresetDefinition>>({ it.second.order }, { it.first }))

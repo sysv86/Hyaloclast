@@ -5,7 +5,7 @@ import dev.vulkanshaders.backend.NativeCoreBridge
 import dev.vulkanshaders.config.DenoiserMode
 import dev.vulkanshaders.config.FrameGenMode
 import dev.vulkanshaders.config.HardwareAutoCalibrator
-import dev.vulkanshaders.config.RenderTier
+import dev.vulkanshaders.config.LightingMode
 import dev.vulkanshaders.config.UpscalerMode
 import dev.vulkanshaders.config.UpscalerQuality
 import dev.vulkanshaders.pack.ShaderPackManager
@@ -48,11 +48,11 @@ class ShaderGraphicsScreen(
             return driver.contains("MoltenVK", ignoreCase = true)
         }
 
-        internal fun tierTooltipKey(tier: RenderTier): String = when (tier) {
-            RenderTier.TIER_0_RASTER -> "vulkanshaders.screen.tier.tooltip.tier_0_raster"
-            RenderTier.TIER_1_COMPUTE_GI -> "vulkanshaders.screen.tier.tooltip.tier_1_compute_gi"
-            RenderTier.TIER_2_RAY_QUERY -> "vulkanshaders.screen.tier.tooltip.tier_2_ray_query"
-            RenderTier.TIER_3_PATH_TRACING -> "vulkanshaders.screen.tier.tooltip.tier_3_path_tracing"
+        internal fun tierTooltipKey(tier: LightingMode): String = when (tier) {
+            LightingMode.CLASSIC -> "vulkanshaders.screen.mode.tooltip.classic"
+            LightingMode.COMPUTE -> "vulkanshaders.screen.mode.tooltip.compute"
+            LightingMode.HYBRID -> "vulkanshaders.screen.mode.tooltip.hybrid"
+            LightingMode.PATH -> "vulkanshaders.screen.mode.tooltip.path"
         }
 
         internal fun upscalerTooltipKey(mode: UpscalerMode): String = when (mode) {
@@ -93,18 +93,16 @@ class ShaderGraphicsScreen(
         }
 
         internal fun tierAvailable(
-            tier: RenderTier,
+            tier: LightingMode,
             caps: Int,
             macOsMoltenVk: Boolean = isMacOsOrMoltenVk(),
         ): Boolean = when (tier) {
-            RenderTier.TIER_0_RASTER, RenderTier.TIER_1_COMPUTE_GI -> true
-            RenderTier.TIER_2_RAY_QUERY ->
-                !macOsMoltenVk &&
-                    (caps and NativeCoreBridge.CAP_RAY_QUERY) != 0 &&
+            LightingMode.CLASSIC, LightingMode.COMPUTE -> true
+            LightingMode.HYBRID ->
+                (caps and NativeCoreBridge.CAP_RAY_QUERY) != 0 &&
                     (caps and NativeCoreBridge.CAP_RAY_TRACING_AS) != 0
-            RenderTier.TIER_3_PATH_TRACING ->
-                !macOsMoltenVk &&
-                    (caps and NativeCoreBridge.CAP_RAY_TRACING_PIPELINE) != 0 &&
+            LightingMode.PATH ->
+                (caps and NativeCoreBridge.CAP_RAY_TRACING_PIPELINE) != 0 &&
                     (caps and NativeCoreBridge.CAP_RAY_TRACING_AS) != 0
         }
 
@@ -181,14 +179,14 @@ class ShaderGraphicsScreen(
         val caps = NativeCoreBridge.queryCapabilities()
         val highEndGpu = NativeCoreBridge.isHighEndGpu()
         val macOsMoltenVk = isMacOsOrMoltenVk()
-        val hardwareRtAvailable = tierAvailable(RenderTier.TIER_2_RAY_QUERY, caps, macOsMoltenVk) ||
-            tierAvailable(RenderTier.TIER_3_PATH_TRACING, caps, macOsMoltenVk)
+        val hardwareRtAvailable = tierAvailable(LightingMode.HYBRID, caps, macOsMoltenVk) ||
+            tierAvailable(LightingMode.PATH, caps, macOsMoltenVk)
 
         val shadowResOptions = if (highEndGpu) SHADOW_RESOLUTIONS_HIGH_END else SHADOW_RESOLUTIONS
         val shadowDistOptions = if (highEndGpu) SHADOW_DISTANCE_CHUNKS_HIGH_END else SHADOW_DISTANCE_CHUNKS
 
         val supportedTiers = ShaderPackManager.activePack?.manifest?.supportedTiers
-        val tierOk = { tier: RenderTier ->
+        val tierOk = { tier: LightingMode ->
             tierAvailable(tier, caps, macOsMoltenVk) &&
                 (supportedTiers == null || supportedTiers.contains(tier.tierIndex))
         }
@@ -201,11 +199,11 @@ class ShaderGraphicsScreen(
             )
         }
         val tierButton = Button.builder(
-            Component.translatable("vulkanshaders.screen.tier")
+            Component.translatable("vulkanshaders.screen.mode")
                 .append(": ")
                 .append(Component.translatable(cfg.renderTier.translationKey)),
         ) {
-            val next = nextAvailable(cfg.renderTier, RenderTier.entries, tierOk)
+            val next = nextAvailable(cfg.renderTier, LightingMode.entries, tierOk)
             calibrationFeedback = null
             if (VulkanShaders.updateConfig(VulkanShaders.config.copy(renderTier = next))) {
                 resetTemporalBuffers()
@@ -234,12 +232,11 @@ class ShaderGraphicsScreen(
             ),
         ).build()
 
-        val upscalerQualityActive = cfg.upscalerMode != UpscalerMode.NONE &&
-            cfg.renderTier == RenderTier.TIER_3_PATH_TRACING
+        val upscalerQualityActive = cfg.upscalerMode != UpscalerMode.NONE
         val upscalerQualityTooltip = Component.translatable("vulkanshaders.screen.upscaler_quality.tooltip")
         if (!upscalerQualityActive) {
             upscalerQualityTooltip.append(Component.literal("\n")).append(
-                Component.translatable("vulkanshaders.screen.upscaler_quality.requires_pt")
+                Component.translatable("vulkanshaders.screen.upscaler_quality.requires_upscaler")
                     .withStyle(ChatFormatting.GRAY),
             )
         }
@@ -334,7 +331,7 @@ class ShaderGraphicsScreen(
             Tooltip.create(Component.translatable("vulkanshaders.screen.hdr.tooltip")),
         ).build()
 
-        val overlayDepthActive = cfg.renderTier == RenderTier.TIER_3_PATH_TRACING
+        val overlayDepthActive = cfg.renderTier == LightingMode.PATH
         val overlayDepthTooltip = Component.translatable("vulkanshaders.screen.overlay_depth.tooltip")
         if (!overlayDepthActive) {
             overlayDepthTooltip.append(Component.literal("\n")).append(
@@ -446,7 +443,7 @@ class ShaderGraphicsScreen(
                     manifest = ShaderPackManager.activePack?.manifest,
                 )
                 val calibratedConfig = if (macOsMoltenVk && result.config.renderTier.tierIndex >= 2) {
-                    result.config.copy(renderTier = RenderTier.TIER_1_COMPUTE_GI)
+                    result.config.copy(renderTier = LightingMode.COMPUTE)
                 } else {
                     result.config
                 }

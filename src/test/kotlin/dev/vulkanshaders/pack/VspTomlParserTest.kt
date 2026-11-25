@@ -1,7 +1,7 @@
 package dev.vulkanshaders.pack
 
 import dev.vulkanshaders.config.ConfigStore
-import dev.vulkanshaders.config.RenderTier
+import dev.vulkanshaders.config.LightingMode
 import dev.vulkanshaders.config.VulkanShadersConfig
 import dev.vulkanshaders.state.WorldStateCollector
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -398,29 +398,29 @@ class VspTomlParserTest {
     @Test
     fun `migrates legacy packOverrides into active tier and isolates overrides per tier`() {
         val legacy = VulkanShadersConfig(
-            renderTier = RenderTier.TIER_2_RAY_QUERY,
+            renderTier = LightingMode.HYBRID,
             packOverrides = mapOf("hyaloclast-default" to mapOf("sun_intensity" to "3.4")),
         )
         val sanitized = ConfigStore.sanitize(legacy)
         assertTrue(sanitized.packOverrides.isEmpty())
         assertEquals(
             mapOf("sun_intensity" to "3.4"),
-            sanitized.activePackOverrides("hyaloclast-default", RenderTier.TIER_2_RAY_QUERY),
+            sanitized.activePackOverrides("hyaloclast-default", LightingMode.HYBRID),
         )
-        assertTrue(sanitized.activePackOverrides("hyaloclast-default", RenderTier.TIER_0_RASTER).isEmpty())
+        assertTrue(sanitized.activePackOverrides("hyaloclast-default", LightingMode.CLASSIC).isEmpty())
 
         val updated = sanitized.withPackOverrides(
             "hyaloclast-default",
-            RenderTier.TIER_0_RASTER,
+            LightingMode.CLASSIC,
             mapOf("fog_density" to "0.0015"),
         )
         assertEquals(
             mapOf("fog_density" to "0.0015"),
-            updated.activePackOverrides("hyaloclast-default", RenderTier.TIER_0_RASTER),
+            updated.activePackOverrides("hyaloclast-default", LightingMode.CLASSIC),
         )
         assertEquals(
             mapOf("sun_intensity" to "3.4"),
-            updated.activePackOverrides("hyaloclast-default", RenderTier.TIER_2_RAY_QUERY),
+            updated.activePackOverrides("hyaloclast-default", LightingMode.HYBRID),
         )
     }
 
