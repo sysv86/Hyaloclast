@@ -158,6 +158,13 @@ bool traceVisibilityRay(vec3 origin, vec3 dir, float tMin, float tMax) {
     );
     while (rayQueryProceedEXT(rq)) {
         if (rayQueryGetIntersectionTypeEXT(rq, false) == gl_RayQueryCandidateIntersectionTriangleEXT) {
+            // First-person avatar geometry is camera-locked; letting it block visibility rays produces
+            // a shadow that follows the player and pulses through temporal reprojection.
+            uint candidateInstIdx = rayQueryGetIntersectionInstanceCustomIndexEXT(rq, false);
+            if (candidateInstIdx < uInstanceMeta.instances.length()
+                && (uInstanceMeta.instances[candidateInstIdx].materialFlags & 0x40u) != 0u) {
+                continue;
+            }
             if (evaluateCandidateAlpha(rq, SKIP_WATER, true)) {
                 rayQueryConfirmIntersectionEXT(rq);
             }
