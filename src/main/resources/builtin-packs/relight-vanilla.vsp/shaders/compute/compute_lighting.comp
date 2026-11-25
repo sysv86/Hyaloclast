@@ -152,11 +152,10 @@ float computeContactShadow(vec3 P, vec3 N, vec3 L, float dist, float jitter) {
         return 0.0;
     }
     const float CONTACT_MAX_DIST = 48.0;
-#ifdef VS_HIGH_END_GPU
-    const int STEPS = 14;
-#else
-    const int STEPS = 8;
-#endif
+    int giQual = int(clamp(VS_PARAM_GI_QUALITY + 0.5, 0.0, 3.0));
+    int STEPS = (VS_LIGHTING_MODE >= VS_MODE_COMPUTE)
+        ? ((giQual >= 3) ? 16 : ((giQual == 2) ? 14 : ((giQual == 1) ? 10 : 8)))
+        : 8;
     if (dist > CONTACT_MAX_DIST) {
         return 1.0;
     }
@@ -459,7 +458,7 @@ vec3 shadeGbufferSurface(
         specIbl = reflEnv * F * (gloss * gloss * 0.55 + s.metallic * 0.25) * iblVis * ssao;
     }
 
-    if (!isDhPixel && VS_ACTIVE_RENDER_TIER == 1) {
+    if (!isDhPixel && VS_LIGHTING_MODE == VS_MODE_COMPUTE) {
         vec3 ssgiBounce = sampleSsgiBilateral(uv, texelSize, centerDepth);
         float giScale = clamp(VS_PARAM_GI_BOUNCE_STRENGTH, 0.2, 2.0);
         ambient = ambient * 0.55 + (diffuseAlbedo / 3.14159265) * ssgiBounce * (1.15 * giScale) * ssao;

@@ -58,13 +58,16 @@ void sv_block_light(inout vec3 radiance, in uint lightKind, in float dist) {
 
     float baseCoreBoost = 1.22;
     float ptTempCoupling = 0.75;
-#ifdef VS_ACTIVE_RENDER_TIER
-#if VS_ACTIVE_RENDER_TIER >= 3
+#ifdef VS_LIGHTING_MODE
+#if VS_LIGHTING_MODE >= VS_MODE_PATH
     baseCoreBoost = 1.18;
     ptTempCoupling = 1.15;
-#elif VS_ACTIVE_RENDER_TIER >= 2
+#elif VS_LIGHTING_MODE >= VS_MODE_HYBRID
     baseCoreBoost = 1.20;
     ptTempCoupling = 0.95;
+#elif VS_LIGHTING_MODE >= VS_MODE_COMPUTE
+    baseCoreBoost = 1.21;
+    ptTempCoupling = 0.85;
 #endif
 #endif
 

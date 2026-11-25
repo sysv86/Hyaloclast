@@ -53,15 +53,12 @@ void main() {
     vec4 bn = vsSamplePackTexture_blue_noise(bnUv);
     uint rng = vsPcgHash(uint(px.x) * 1973u ^ uint(px.y) * 9277u ^ uint(vsWorld.frameIndex) * 26699u);
 
-#ifdef VS_HIGH_END_GPU
-    const int RAYS = 4;
-    const int STEPS = 16;
-    float distScale = clamp(length(P) * 0.16, 2.0, 28.0);
-#else
-    const int RAYS = 2;
-    const int STEPS = 8;
-    float distScale = clamp(length(P) * 0.12, 1.5, 16.0);
-#endif
+    // Preset-driven Compute GI quality (no hidden RTX-only nerf on GTX/RX/Arc/Apple Silicon)
+    int giQual = int(clamp(VS_PARAM_GI_QUALITY + 0.5, 0.0, 3.0));
+    int RAYS = (giQual >= 3) ? 6 : ((giQual == 2) ? 4 : ((giQual == 1) ? 3 : 2));
+    int STEPS = (giQual >= 3) ? 20 : ((giQual == 2) ? 16 : ((giQual == 1) ? 12 : 8));
+    float maxGiDist = (giQual >= 3) ? 34.0 : ((giQual == 2) ? 28.0 : ((giQual == 1) ? 22.0 : 16.0));
+    float distScale = clamp(length(P) * (0.12 + 0.02 * float(giQual)), 1.5, maxGiDist);
     float invProj23 = vsWorld.invProj[2][3];
     float invProj33 = vsWorld.invProj[3][3];
 

@@ -187,8 +187,8 @@ vec3 sv_cloudAuroraCurtains(
     float ign = fract(52.9829189 * fract(dot(dir.xz * 256.0, vec2(0.06711056, 0.00583715))));
 
     int stepCount = 8;
-#ifdef VS_ACTIVE_RENDER_TIER
-#if VS_ACTIVE_RENDER_TIER >= 2
+#ifdef VS_LIGHTING_MODE
+#if VS_LIGHTING_MODE >= VS_MODE_COMPUTE
     stepCount = 12;
 #endif
 #endif

@@ -82,7 +82,7 @@
     },
     "pt_max_bounces": {
       "label": "Path Tracing Max Bounces",
-      "description": "Maximum indirect ray bounce depth for Tier 3 path tracing. Higher values increase GPU cost."
+      "description": "Maximum indirect ray bounce depth for Path mode. Higher values increase GPU cost."
     },
     "enable_wind": {
       "label": "Foliage Wind",
@@ -95,6 +95,16 @@
     "lava_flow_speed": {
       "label": "Lava Flow Speed",
       "description": "Animation speed of convective thermal pulses and incandescent shimmer on lava."
+    },
+    "gi_quality": {
+      "label": "Compute GI Quality",
+      "description": "Ray count, march steps, and contact-shadow precision for Compute mode on non-RT GPUs.",
+      "options": {
+        "low": "Low",
+        "medium": "Medium",
+        "high": "High",
+        "ultra": "Ultra"
+      }
     }
   },
   "presets": {

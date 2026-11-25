@@ -18,7 +18,7 @@ layout(set = 1, binding = 2, std140) uniform SharcConfigUBO {
     SharcConfig cfg;
 } uSharc;
 
-#ifdef VS_HIGH_END_GPU
+#if defined(VS_HIGH_END_GPU) || (defined(VS_LIGHTING_MODE) && VS_LIGHTING_MODE >= VS_MODE_COMPUTE)
 const float VS_FOG_MAX_DIST = 224.0;
 #else
 const float VS_FOG_MAX_DIST = 144.0;

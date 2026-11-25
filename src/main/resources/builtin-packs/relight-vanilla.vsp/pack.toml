@@ -6,7 +6,7 @@ author = "VulkanShaders (Hyaloclast)"
 description = "ReLight Vanilla core shaders with an additional native VSL 2.0 SPIR-V lighting unit."
 
 [capabilities]
-tiers = [0, 1, 2, 3]
+modes = ["classic", "compute", "hybrid", "path"]
 pbr_labpbr = true
 hdr_output = true
 
@@ -34,8 +34,8 @@ scale = 0.125
 id = "volumetric_fog_pass"
 kind = "compute"
 shader = "shaders/compute/volumetric_fog.comp"
-min_tier = 0
-max_tier = 3
+min_mode = "classic"
+max_mode = "path"
 replaces = "volumetric_fog_pass"
 reads = ["shadow_csm", "volumetric_fog_history"]
 writes = ["volumetric_fog"]
@@ -45,8 +45,8 @@ scale = 0.125
 id = "vsl_tiled_lighting_pass"
 kind = "compute"
 shader = "vsl-units/vsl_tiled_lighting"
-min_tier = 0
-max_tier = 3
+min_mode = "classic"
+max_mode = "path"
 reads = ["linear_depth", "emissive_lights"]
 writes = ["tiled_lighting_out"]
 scale = 0.125
@@ -83,8 +83,8 @@ description = "Reuse first-bounce diffuse samples over time to reduce path-trace
 type = "bool"
 default = false
 runtime = true
-min_tier = 3
-max_tier = 3
+min_mode = "path"
+max_mode = "path"
 
 [settings.sun_intensity]
 label = "Sun Intensity"
@@ -150,6 +150,17 @@ max = 2.0
 step = 0.05
 runtime = true
 
+[settings.gi_quality]
+label = "Compute GI Quality"
+category = "Lighting"
+description = "Ray count, march steps, and contact-shadow precision for Compute mode on non-RT GPUs."
+type = "enum"
+default = "high"
+options = ["low", "medium", "high", "ultra"]
+runtime = true
+min_mode = "compute"
+max_mode = "compute"
+
 [settings.gi_bounce_strength]
 label = "Path-Traced GI Bounce"
 category = "Lighting"
@@ -160,8 +171,8 @@ min = 0.2
 max = 2.0
 step = 0.05
 runtime = true
-min_tier = 1
-max_tier = 3
+min_mode = "compute"
+max_mode = "path"
 
 [settings.lava_glow]
 label = "Lava Glow"
@@ -210,15 +221,15 @@ runtime = true
 [settings.pt_max_bounces]
 label = "Path Tracing Max Bounces"
 category = "Performance"
-description = "Maximum indirect ray bounce depth for Tier 3 path tracing. Higher values increase GPU cost."
+description = "Maximum indirect ray bounce depth for Path mode. Higher values increase GPU cost."
 type = "int"
 default = 2
 min = 1
 max = 8
 step = 1
 runtime = false
-min_tier = 3
-max_tier = 3
+min_mode = "path"
+max_mode = "path"
 
 [settings.enable_wind]
 label = "Foliage Wind"
@@ -246,6 +257,7 @@ water_wave_strength = 0.2
 tone_mapping = "pbr_neutral"
 torch_intensity = 1.05
 godrays_intensity = 0.25
+gi_quality = "low"
 gi_bounce_strength = 0.65
 wetness_strength = 0.35
 pom_depth = 0.0
@@ -264,6 +276,7 @@ water_wave_strength = 0.25
 tone_mapping = "pbr_neutral"
 torch_intensity = 1.1
 godrays_intensity = 0.45
+gi_quality = "medium"
 gi_bounce_strength = 0.85
 wetness_strength = 0.5
 pom_depth = 0.0
@@ -282,6 +295,7 @@ water_wave_strength = 0.28
 tone_mapping = "pbr_neutral"
 torch_intensity = 1.15
 godrays_intensity = 0.55
+gi_quality = "high"
 gi_bounce_strength = 0.95
 wetness_strength = 0.60
 pom_depth = 0.0
@@ -300,6 +314,7 @@ water_wave_strength = 0.35
 tone_mapping = "pbr_neutral"
 torch_intensity = 1.2
 godrays_intensity = 0.80
+gi_quality = "ultra"
 gi_bounce_strength = 1.15
 wetness_strength = 0.75
 pom_depth = 0.03

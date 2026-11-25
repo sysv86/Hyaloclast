@@ -359,8 +359,8 @@ void sv_water_surface(inout VsSurface s, in vec3 worldPos, in float waveHeight) 
                           waveTime, 5.139, sigmaFilter, macroCalm, groupEnv, 1.0 + 0.68 * sea, amp,
                           h, grad, unresolvedVar);
 
-#ifdef VS_ACTIVE_RENDER_TIER
-#if VS_ACTIVE_RENDER_TIER >= 2
+#ifdef VS_LIGHTING_MODE
+#if VS_LIGHTING_MODE >= VS_MODE_COMPUTE
         // Octaves 4-5 (Tier 2+): Sub-block wind ripples for sharp ray-traced reflection micro-facets
         vec2 pFine = p + grad * (0.035 * macroCalm);
         sv_waterAccumWave(pFine, vec2( 0.121869,  0.992546), 9.85, 3.933, 0.050, 0.07 * steepScale,
@@ -370,7 +370,7 @@ void sv_water_surface(inout VsSurface s, in vec3 worldPos, in float waveHeight) 
                           waveTime, 2.565, sigmaFilter, macroCalm, groupEnv, 1.0 + 0.85 * sea, amp,
                           h, grad, unresolvedVar);
 #endif
-#if VS_ACTIVE_RENDER_TIER >= 3
+#if VS_LIGHTING_MODE >= VS_MODE_PATH
         // Octaves 6-7 (Tier 3 PT): Close-range micro-ripples (< ~20m) for path-traced refractions & glints
         sv_waterAccumWave(pFine, vec2(-0.422618,  0.906308), 23.40, 6.073, 0.0175, 0.0,
                           waveTime, 4.278, sigmaFilter, macroCalm, groupEnv, 1.0 + 0.88 * sea, amp,
@@ -407,8 +407,8 @@ void sv_water_surface(inout VsSurface s, in vec3 worldPos, in float waveHeight) 
                 rWorld += sv_waterRot2(r2.xy, 0.60, -0.80) * 0.76;
                 rainSplashFoam += r2.z * 0.72;
 
-#ifdef VS_ACTIVE_RENDER_TIER
-#if VS_ACTIVE_RENDER_TIER >= 2
+#ifdef VS_LIGHTING_MODE
+#if VS_LIGHTING_MODE >= VS_MODE_COMPUTE
                 float fineRainFilter = exp(-0.5 * (21.0 * sigmaFilter) * (21.0 * sigmaFilter));
                 if (fineRainFilter > 0.02) {
                     vec2 pR3 = sv_waterRot2(p * 2.38 + vec2(9.2, 2.6), 0.96, -0.28);
@@ -495,10 +495,10 @@ void sv_water_surface(inout VsSurface s, in vec3 worldPos, in float waveHeight) 
         float baseRough = 0.010;
         float sssTierBoost = 1.0;
 #ifdef VS_ACTIVE_RENDER_TIER
-#if VS_ACTIVE_RENDER_TIER >= 3
+#if VS_LIGHTING_MODE >= VS_MODE_PATH
         baseRough = 0.006;
         sssTierBoost = 1.25;
-#elif VS_ACTIVE_RENDER_TIER >= 2
+#elif VS_LIGHTING_MODE >= VS_MODE_HYBRID
         baseRough = 0.008;
         sssTierBoost = 1.10;
 #endif
