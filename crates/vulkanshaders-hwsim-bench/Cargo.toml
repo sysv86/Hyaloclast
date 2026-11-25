@@ -1,0 +1,22 @@
+[package]
+name = "vulkanshaders-hwsim-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Hardware-free Vulkan ICD simulator, AMD FSR 4.1.2 / FFX SDK 2.4 contract verifier, cross-ABI layout auditor, SPIR-V capability scanner, and deterministic benchmark harness"
+
+[dependencies]
+vulkanshaders-core = { path = "../vulkanshaders-core" }
+ash = { version = "0.38", default-features = false, features = ["debug"] }
+bytemuck.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+blake3.workspace = true
+bitflags.workspace = true
+thiserror.workspace = true
+tracing-subscriber.workspace = true
+parking_lot.workspace = true

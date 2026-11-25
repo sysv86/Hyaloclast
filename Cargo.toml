@@ -5,6 +5,7 @@ members = [
     "crates/vulkanshaders-core",
     "crates/vsp-cli",
     "crates/vulkanshaders-sdk-bench",
+    "crates/vulkanshaders-hwsim-bench",
 ]
 
 [workspace.package]
