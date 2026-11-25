@@ -137,7 +137,7 @@ class ShaderErrorLogScreen(
         rawLine.contains("[ShaderCompile]") || rawLine.contains("[DeviceLost]") -> COLOR_DIAGNOSTIC
         rawLine.contains("[ERROR]") -> COLOR_ERROR
         rawLine.contains("[WARN]") -> COLOR_WARN
-        rawLine.contains("[INFO]") -> COLOR_NORMAL
+        rawLine.contains("[INFO]") -> COLOR_INFO
         rawLine.startsWith("    ") -> if (previousColor == COLOR_ERROR || previousColor == COLOR_DIAGNOSTIC) COLOR_ERROR_DETAIL else COLOR_DETAIL
         rawLine.startsWith("===") || rawLine.startsWith("--") -> COLOR_HEADER
         else -> COLOR_NORMAL
@@ -177,6 +177,7 @@ class ShaderErrorLogScreen(
         private const val COLOR_ERROR: Int = 0xFFFF5555.toInt()
         private const val COLOR_ERROR_DETAIL: Int = 0xFFE8A0A0.toInt()
         private const val COLOR_WARN: Int = 0xFFFFFF55.toInt()
+        private const val COLOR_INFO: Int = 0xFF9EE6FF.toInt()
         private const val COLOR_HEADER: Int = 0xFFCCCCCC.toInt()
         private const val COLOR_NORMAL: Int = 0xFFE6E6E6.toInt()
         private const val COLOR_DETAIL: Int = 0xFFB8B8B8.toInt()
