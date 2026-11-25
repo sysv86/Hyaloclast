@@ -139,7 +139,7 @@ internal object PackLocalization {
         var current: LoadedShaderPack? = pack
         while (current != null && visited.add(current.manifest.id)) {
             chain.add(current.rootPath)
-            val parentId = current.manifest.extendsPack?.trim()?.takeIf(String::isNotEmpty)
+            val parentId = current.manifest.extendsPackId?.trim()?.takeIf(String::isNotEmpty)
             current = parentId?.let(byId::get)
         }
         chain.reverse()

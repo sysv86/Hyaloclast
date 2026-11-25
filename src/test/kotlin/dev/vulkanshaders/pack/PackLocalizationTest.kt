@@ -165,6 +165,6 @@ class PackLocalizationTest {
         ),
         resources = emptyList(),
         hooks = emptyMap(),
-        extendsPack = extendsPack,
+        extendsPackId = extendsPack,
     )
 }

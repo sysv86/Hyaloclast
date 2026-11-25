@@ -87,7 +87,7 @@ void sv_surface(inout VsSurface s, in vec3 worldPos, in uint flags, in uint boun
         // Keeps the authentic vanilla Minecraft lava texture intact in s.albedo and extracts its
         // molten veins vs. cooling crust directly from the vanilla texel luminance & chromaticity.
         vec3 vanillaTex = clamp(s.albedo, vec3(0.0), vec3(1.0));
-        float texLuma = vsLuminance(vanillaTex);
+        float texLuma = dot(vanillaTex, vec3(0.2126, 0.7152, 0.0722));
         float warmth = clamp((vanillaTex.r * 0.55 + vanillaTex.g * 0.95) - vanillaTex.b * 0.65, 0.0, 1.0);
 
         // Separate bright yellow-orange molten channels from darker cooled crust inside the vanilla sprite
@@ -113,7 +113,8 @@ void sv_surface(inout VsSurface s, in vec3 worldPos, in uint flags, in uint boun
         ) / eps;
         vec3 tangentGrad = grad - s.normal * dot(grad, s.normal);
         float reliefAmp = 0.042 * (0.30 + 0.70 * vanillaMelt);
-        s.normal = vsSafeNormalize(s.normal - tangentGrad * reliefAmp, s.normal);
+        vec3 perturbedN = s.normal - tangentGrad * reliefAmp;
+        s.normal = (dot(perturbedN, perturbedN) > 1e-8) ? normalize(perturbedN) : s.normal;
 
         // Enrich vanilla lava colors with physical silicate blackbody warmth without erasing pixel art:
         // darker crust deepens slightly into rich volcanic basalt-crimson for silhouette contrast,

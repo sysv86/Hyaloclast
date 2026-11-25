@@ -9,6 +9,7 @@ import dev.vulkanshaders.pack.LoadedShaderPack
 import dev.vulkanshaders.pack.PackPresetDefinition
 import dev.vulkanshaders.pack.PackSettingDefinition
 import dev.vulkanshaders.pack.PackLocalization
+import dev.vulkanshaders.pack.ShaderPackManifest
 import dev.vulkanshaders.pack.SettingType
 import dev.vulkanshaders.pack.ShaderPackManager
 import dev.vulkanshaders.pipeline.GbufferPipelineRegistry
