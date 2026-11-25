@@ -1,10 +1,12 @@
 #include <vulkanshaders/v1/common.vsl>
 
-// Sunlit Vanilla - Sculpted 16-block voxel-blocky volumetric clouds with softly beveled edges,
-// 2-tap Beer-Powder multi-scattering, warm golden-hour silver lining, moonlit night shading,
-// and an independently horizon-faded high-altitude cirrus veil at y = 540.
+// ReLight Vanilla - Physically based sculpted 16-block vanilla voxel clouds with convective morphing,
+// weather-driven condensation altitude and cumulonimbus towers, Rayleigh + Ozone golden-hour optics,
+// 3-order Wrenninge multi-scattering, continuous twilight handoff, high-altitude cirrus at y = 540,
+// and clear-night geomagnetic Aurora Borealis curtains composited behind clouds.
 
 float sv_cloudHash21(vec2 p) {
+    p = mod(p, 512.0);
     p = fract(p * vec2(123.34, 456.21));
     p += dot(p, p + 45.32);
     return fract(p.x * p.y);
@@ -21,48 +23,195 @@ float sv_cloudNoise2D(vec2 p) {
     return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
 }
 
+// Henyey-Greenstein phase function using denom * sqrt(denom) instead of pow(denom, 1.5)
 float sv_cloudHgPhase(float cosTheta, float g) {
     float g2 = g * g;
     float denom = max(1.0 + g2 - 2.0 * g * cosTheta, 1e-4);
-    return (1.0 - g2) / (12.56637061 * pow(denom, 1.5));
+    return (1.0 - g2) / (12.56637061 * denom * sqrt(denom));
 }
 
+// Physical solar transmittance through Rayleigh (lambda^-4) + Ozone Chappuis absorption vs sun elevation
+vec3 sv_cloudSolarTransmittance(float sunY) {
+    float elev = max(sunY, 0.0);
+    float airMass = 1.0 / (sqrt(elev * elev + 0.0085) + 0.032);
+    float twilightLimb = max(-sunY, 0.0) * 32.0;
+    float optMass = min(airMass + twilightLimb, 18.0);
+    vec3 betaRayleigh = vec3(0.052, 0.132, 0.305);
+    vec3 betaOzone = vec3(0.026, 0.038, 0.003);
+    return exp(-(betaRayleigh + betaOzone) * (optMass - 0.92));
+}
+
+// Sculpted 2-tier 16-block vanilla voxel cloud density with slow constant-rate convective animation
 float sv_sampleVoxelCloudDensity(
     vec3 worldPos,
     VsSkyState sky,
     float cloudBottom,
     float cloudTop,
     float biomeCloudScale,
-    float stormFactor
+    float stormFactor,
+    float thunderFactor
 ) {
+    const float TAU = 6.28318530718;
     float h = clamp((worldPos.y - cloudBottom) / max(cloudTop - cloudBottom, 1.0), 0.0, 1.0);
     if (h <= 0.0 || h >= 1.0) {
         return 0.0;
     }
 
-    // Smooth wind drift quantized to 16-block vanilla voxel cells
+    // Constant base wind velocity prevents cloud teleporting when rain/thunder changes dynamically
     vec2 drift = vec2(sky.gameTimeSec * 3.1, sky.gameTimeSec * 0.55);
     vec2 xz = (worldPos.xz + drift) / 16.0;
     vec2 cell = floor(xz);
     vec2 local = fract(xz);
 
-    float macro = sv_cloudNoise2D(cell * 0.14) * 0.68 + sv_cloudNoise2D(cell * 0.31 + vec2(17.3, 9.1)) * 0.32;
-    float baseCoverage = mix(0.45 * biomeCloudScale, 0.80, stormFactor);
-    float threshold = 1.0 - clamp(baseCoverage, 0.22, 0.84);
+    // Slow convective billowing per 16-block cumulus cell (constant frequency, weather-scaled depth)
+    float cellPhase = mod(cell.x * 0.37 - cell.y * 0.29, TAU);
+    float morphTime = mod(sky.gameTimeSec * 0.055, TAU);
+    float morph = sin(cellPhase + morphTime) * (0.042 + 0.036 * stormFactor);
+
+    float macro = sv_cloudNoise2D(cell * 0.14) * 0.66
+                + sv_cloudNoise2D(cell * 0.31 + vec2(17.3, 9.1)) * 0.34
+                + morph;
+    float baseCoverage = mix(0.44 * biomeCloudScale, 0.82, stormFactor);
+    float threshold = 1.0 - clamp(baseCoverage, 0.22, 0.86);
 
     float occupied = smoothstep(threshold - 0.04, threshold + 0.06, macro);
     if (occupied <= 0.001) {
         return 0.0;
     }
 
-    // Soft bevel inside each 16-block voxel cell for sculpted edges without harsh aliasing
+    // Soft bevel inside each 16-block voxel cell keeps crisp vanilla silhouettes without edge aliasing
     vec2 edgeDist = min(local, 1.0 - local);
-    float bevel = smoothstep(0.0, 0.13, min(edgeDist.x, edgeDist.y));
+    float bevel = smoothstep(0.0, 0.12, min(edgeDist.x, edgeDist.y));
     float cellBlend = mix(0.74, 1.0, bevel);
 
-    float tierHeight = mix(0.56, 1.0, smoothstep(threshold + 0.04, threshold + 0.22, macro));
-    float verticalProfile = smoothstep(0.0, 0.10, h) * smoothstep(tierHeight, max(tierHeight - 0.18, 0.12), h);
-    return clamp(occupied * cellBlend * verticalProfile * 1.45, 0.0, 1.0);
+    // 2-tier sculpted vanilla cumulus: flat condensation deck + stepped 8-block inset crown turrets
+    float baseLift = smoothstep(0.0, 0.10, h);
+    float lowTop = 0.44 + 0.14 * stormFactor;
+    float lowCap = 1.0 - smoothstep(lowTop - 0.10, lowTop, h);
+
+    float coreMask = smoothstep(threshold + 0.05, threshold + 0.24, macro);
+    float crownTop = mix(0.62, 0.98, clamp(coreMask + thunderFactor * 0.22, 0.0, 1.0));
+    float crownFadeStart = max(crownTop - 0.16, 0.24);
+    float crownCap = 1.0 - smoothstep(crownFadeStart, max(crownTop, crownFadeStart + 0.02), h);
+
+    vec2 subLocal = fract(xz * 2.0);
+    vec2 subEdge = min(subLocal, 1.0 - subLocal);
+    float subBevel = smoothstep(0.0, 0.15, min(subEdge.x, subEdge.y));
+    float turretProfile = crownCap * coreMask * mix(0.80, 1.0, subBevel);
+
+    float verticalProfile = baseLift * max(lowCap, turretProfile);
+    float densityScale = mix(1.42, 1.62, stormFactor);
+    return clamp(occupied * cellBlend * verticalProfile * densityScale, 0.0, 1.0);
+}
+
+// Localized intra-cloud sheet-lightning glow inside dense cumulonimbus cores during thunderstorms
+float sv_cloudStormLightning(vec3 worldPos, float timeSec, float thunderFactor) {
+    if (thunderFactor <= 0.15) {
+        return 0.0;
+    }
+    vec2 stormCell = floor(worldPos.xz * 0.011);
+    float cellSeed = sv_cloudHash21(stormCell);
+    float cycle = timeSec * 0.38 + cellSeed * 11.0;
+    float slot = mod(floor(cycle), 256.0);
+    float localT = fract(cycle);
+    float flashPick = sv_cloudHash21(stormCell + vec2(slot * 7.13, 3.71));
+    float flashGate = smoothstep(0.90 - 0.06 * thunderFactor, 0.98, flashPick);
+    if (flashGate <= 0.001) {
+        return 0.0;
+    }
+    // Smooth double-peak lightning discharge pulse (avoids harsh 1-frame TAA strobe)
+    float p1 = exp(-abs(localT - 0.14) * 14.0);
+    float p2 = exp(-abs(localT - 0.28) * 18.0) * 0.65;
+    float pulse = (p1 + p2) * smoothstep(0.0, 0.04, localT);
+    return pulse * flashGate * smoothstep(0.15, 1.0, thunderFactor);
+}
+
+// Clear-night geomagnetic Aurora Borealis curtains with O(1S) 557.7nm green, N2+ cyan, and O(1D) 630nm crimson
+vec3 sv_cloudAuroraCurtains(
+    vec3 dir,
+    float timeSec,
+    float nightFactor,
+    float stormFactor,
+    vec3 moonDir
+) {
+    const float TAU = 6.28318530718;
+    if (nightFactor <= 0.005 || stormFactor >= 0.85 || dir.y <= 0.05 || dir.y >= 0.78) {
+        return vec3(0.0);
+    }
+
+    float clearSky = 1.0 - smoothstep(0.08, 0.80, stormFactor);
+    float elevFade = smoothstep(0.05, 0.16, dir.y) * (1.0 - smoothstep(0.50, 0.78, dir.y));
+    float northArc = smoothstep(-0.25, 0.45, -dir.z);
+
+    // Keep moon disk crisp by softly attenuating aurora right across the lunar disc
+    float moonDot = clamp(dot(dir, moonDir), 0.0, 1.0);
+    float m2 = moonDot * moonDot;
+    float m4 = m2 * m2;
+    float moonKeepout = 1.0 - 0.72 * (m4 * m4);
+
+    // Slow natural geomagnetic substorm breathing (~170s cycle)
+    float substorm = 0.60 + 0.40 * sin(mod(timeSec * 0.037, TAU));
+    float mask = nightFactor * clearSky * elevFade * (0.15 + 0.85 * northArc) * moonKeepout * substorm;
+    if (mask <= 0.002) {
+        return vec3(0.0);
+    }
+
+    float tFold = mod(timeSec * 0.062, TAU);
+    float tRay = mod(timeSec * 0.26, TAU);
+    float rayDrift = mod(timeSec * 0.08, 512.0);
+    float invY = 1.0 / max(dir.y, 0.09);
+
+    vec3 acc = vec3(0.0);
+
+    // Perspective-stacked upper-atmosphere altitude strata (105km green base -> 245km crimson-violet crown)
+    int sliceCount = 3;
+#ifdef VS_ACTIVE_RENDER_TIER
+#if VS_ACTIVE_RENDER_TIER >= 2
+    sliceCount = 4;
+#endif
+#endif
+
+    for (int s = 0; s < 4; ++s) {
+        if (s >= sliceCount) {
+            break;
+        }
+        float hAlt = 1.0;
+        float sliceWeight = 0.48;
+        vec3 lineCol = vec3(0.09, 0.96, 0.42);
+        if (s == 1) {
+            hAlt = 1.24;
+            sliceWeight = 0.36;
+            lineCol = vec3(0.08, 0.80, 0.62);
+        } else if (s == 2) {
+            hAlt = 1.54;
+            sliceWeight = 0.26;
+            lineCol = (sliceCount == 3) ? vec3(0.46, 0.20, 0.56) : vec3(0.16, 0.44, 0.76);
+        } else if (s == 3) {
+            hAlt = 1.92;
+            sliceWeight = 0.18;
+            lineCol = vec3(0.58, 0.13, 0.48);
+        }
+
+        float px = dir.x * invY * hAlt;
+        float pz = dir.z * invY * hAlt;
+        float ovalZ = pz + 0.09 * px * px;
+
+        float f1 = sin(mod(px * 0.68, TAU) + tFold) * 0.55
+                 + sin(mod(px * 1.42, TAU) - tFold * 1.35) * 0.24;
+        float d1 = (ovalZ + 2.15 - f1) * 1.35;
+        float r1 = exp(-d1 * d1);
+
+        float f2 = sin(mod(px * 0.52 + 1.8, TAU) - tFold * 0.82) * 0.65;
+        float d2 = (ovalZ + 3.65 - f2) * 1.05;
+        float r2 = exp(-d2 * d2) * 0.75;
+
+        float curtain = max(r1, r2);
+        float rayNoise = sv_cloudNoise2D(vec2(px * 3.4 + rayDrift, ovalZ * 0.85));
+        float striation = 0.45 + 0.55 * sin(mod(px * 8.2 + rayNoise * 4.2, TAU) + tRay);
+        acc += lineCol * (curtain * (0.30 + 0.70 * rayNoise) * striation * sliceWeight);
+    }
+
+    return acc * (mask * 0.38);
 }
 
 // @hook(stage = "clouds", priority = 100)
@@ -71,31 +220,59 @@ vec4 sv_clouds(in vec3 dir, in vec3 cameraPos, in VsSkyState sky) {
         return vec4(0.0, 0.0, 0.0, 1.0);
     }
 
-    float stormFactor = clamp(sky.rain * 0.82 + sky.thunder * 0.35, 0.0, 1.0);
-    const float cloudBottom = 252.0;
-    const float cloudTop = 288.0;
+    float rain = clamp(sky.rain, 0.0, 1.0);
+    float thunder = clamp(sky.thunder, 0.0, 1.0);
+    float stormFactor = clamp(rain * 0.80 + thunder * 0.38, 0.0, 1.0);
 
-    vec3 sunDir = normalize(sky.sunDir + vec3(0.0, 1e-5, 0.0));
-    vec3 moonDir = normalize(-sunDir);
-    float sunWeight = smoothstep(-0.08, 0.08, sunDir.y);
-    float moonWeight = smoothstep(-0.08, 0.08, moonDir.y);
-    vec3 lightDir = (sunWeight >= moonWeight) ? sunDir : moonDir;
+    // Weather-driven atmospheric cloud deck: rain lowers LCL and thickens layer; storms grow cumulonimbus tops
+    float cloudBottom = mix(256.0, 228.0, stormFactor);
+    float cloudTop = mix(292.0, 308.0, stormFactor) + thunder * 16.0;
 
-    float dayFactor = smoothstep(-0.10, 0.20, sunDir.y);
-    float sunsetFactor = smoothstep(-0.16, 0.02, sunDir.y) * (1.0 - smoothstep(0.06, 0.30, sunDir.y));
+    vec3 sunDir = vsSafeNormalize(sky.sunDir, vec3(0.0, 1.0, 0.0));
+    vec3 moonDir = -sunDir;
 
-    vec3 dayDirect = mix(vec3(1.18, 1.13, 1.04), vec3(1.42, 0.60, 0.24), sunsetFactor * 0.94);
-    vec3 moonDirect = vec3(0.15, 0.23, 0.42);
-    vec3 directColor = (dayDirect * sunWeight + moonDirect * moonWeight) * (1.0 - stormFactor * 0.56);
+    // Continuous zero-pop twilight handoff at sunDir.y = -0.10:
+    // sunDirectWeight reaches exact 0.0 before moonDirectWeight begins rising
+    float sunDirectWeight = smoothstep(-0.10, 0.05, sunDir.y);
+    float moonDirectWeight = smoothstep(0.10, 0.24, moonDir.y);
+    bool useSunLight = (sunDir.y >= -0.10);
+    vec3 lightDir = useSunLight ? sunDir : moonDir;
 
-    vec3 skyAmbient = mix(vec3(0.022, 0.036, 0.074), vec3(0.38, 0.54, 0.78), dayFactor);
-    vec3 sunsetBase = vec3(0.86, 0.40, 0.24);
-    skyAmbient = mix(skyAmbient, sunsetBase, sunsetFactor * 0.50 * (1.0 - stormFactor * 0.65));
-    skyAmbient = mix(skyAmbient, vec3(0.24, 0.28, 0.34) * mix(0.18, 1.0, dayFactor), stormFactor * 0.74);
+    float dayFactor = smoothstep(-0.08, 0.22, sunDir.y);
+    float twilightFactor = smoothstep(-0.16, 0.01, sunDir.y) * (1.0 - smoothstep(0.05, 0.28, sunDir.y));
+    float nightFactor = 1.0 - smoothstep(-0.22, -0.06, sunDir.y);
 
-    float cosTheta = dot(dir, lightDir);
-    float silverLining = sv_cloudHgPhase(cosTheta, 0.76) * 0.80 + sv_cloudHgPhase(cosTheta, -0.18) * 0.20;
-    float forwardScatter = 0.50 + (0.72 + 0.64 * sunsetFactor) * clamp(silverLining, 0.0, 2.3);
+    vec3 sunTrans = sv_cloudSolarTransmittance(sunDir.y);
+    vec3 sunDirect = sunTrans * vec3(1.14, 1.05, 0.88) * sunDirectWeight * (1.0 + 0.42 * twilightFactor);
+    vec3 moonDirect = vec3(0.11, 0.16, 0.27) * moonDirectWeight;
+    vec3 directColor = (useSunLight ? sunDirect : moonDirect) * (1.0 - stormFactor * 0.66);
+
+    // Hemisphere-aware sky ambient: clean blue-grey day, warm sun-side + violet-indigo shadow at sunset, dim night
+    float cosSun = dot(dir, sunDir);
+    float sunHemi = clamp(0.5 + 0.5 * cosSun, 0.0, 1.0);
+    float sunHemi2 = sunHemi * sunHemi;
+
+    vec3 ambTop = mix(vec3(0.020, 0.032, 0.062), vec3(0.33, 0.42, 0.56), dayFactor);
+    vec3 ambBase = mix(vec3(0.011, 0.018, 0.038), vec3(0.23, 0.30, 0.42), dayFactor);
+
+    vec3 twiAmbTop = mix(vec3(0.15, 0.13, 0.34), vec3(0.74, 0.32, 0.19), sunHemi2);
+    vec3 twiAmbBase = mix(vec3(0.09, 0.08, 0.24), vec3(0.48, 0.19, 0.18), sunHemi2);
+    float twiMix = twilightFactor * (1.0 - stormFactor * 0.75);
+    ambTop = mix(ambTop, twiAmbTop, twiMix * 0.72);
+    ambBase = mix(ambBase, twiAmbBase, twiMix * 0.85);
+
+    float stormLumScale = mix(0.15, 1.0, dayFactor);
+    ambTop = mix(ambTop, vec3(0.30, 0.33, 0.38) * stormLumScale, stormFactor * 0.80);
+    ambBase = mix(ambBase, vec3(0.10, 0.12, 0.17) * stormLumScale, stormFactor * 0.90);
+
+    // 3-order Wrenninge multi-scattering phase terms (precomputed once per ray)
+    float cosTheta = useSunLight ? cosSun : -cosSun;
+    float p0 = sv_cloudHgPhase(cosTheta, 0.78) * 0.68 + sv_cloudHgPhase(cosTheta, -0.22) * 0.32;
+    float p1 = sv_cloudHgPhase(cosTheta, 0.38) * 0.72 + 0.07957747 * 0.28;
+    float phaseOrder0 = 0.44 + clamp(p0 * 3.2, 0.0, 1.85);
+    float phaseOrder1 = 0.50 + clamp(p1 * 2.2, 0.0, 0.90);
+    float deepBleed = mix(0.18, 0.09, twiMix);
+    float powderAngle = clamp(0.60 - 0.50 * cosTheta, 0.0, 1.0);
 
     float voxelTrans = 1.0;
     vec3 voxelScattered = vec3(0.0);
@@ -125,31 +302,54 @@ vec4 sv_clouds(in vec3 dir, in vec3 cameraPos, in VsSkyState sky) {
 
     if (hitVoxelBand) {
         tEnter = max(tEnter, 0.0);
-        tExit = min(tExit, 2100.0);
+        tExit = min(tExit, 2200.0);
         if (tExit > tEnter) {
             const int STEPS = 8;
             float stepSize = (tExit - tEnter) / float(STEPS);
             float biomeCloudScale = vsBiomeCloudScale();
-            float extinction = mix(0.060, 0.074, stormFactor);
-            float jitter = fract(52.9829189 * fract(dot(dir.xz * 256.0 + float(vsWorld.frameIndex & 63) * vec2(13.0, 29.0), vec2(0.06711056, 0.00583715))));
+            float extinction = mix(0.058, 0.086, stormFactor);
+
+            // Golden-ratio temporal IGN jitter for smooth TAA/SVGF convergence
+            float frameMod = mod(float(vsWorld.frameIndex), 64.0);
+            float ign = fract(52.9829189 * fract(dot(dir.xz * 256.0, vec2(0.06711056, 0.00583715))));
+            float jitter = fract(ign + frameMod * 0.61803399);
+
+            float invBandHeight = 1.0 / max(cloudTop - cloudBottom, 1.0);
 
             for (int i = 0; i < STEPS; ++i) {
-                if (voxelTrans < 0.03) break;
+                if (voxelTrans < 0.03) {
+                    break;
+                }
                 float t = tEnter + (float(i) + jitter) * stepSize;
                 vec3 pos = cameraPos + dir * t;
-                float density = sv_sampleVoxelCloudDensity(pos, sky, cloudBottom, cloudTop, biomeCloudScale, stormFactor);
+                float density = sv_sampleVoxelCloudDensity(
+                    pos, sky, cloudBottom, cloudTop, biomeCloudScale, stormFactor, thunder
+                );
                 if (density > 0.003) {
-                    // 2-tap Beer-Powder soft multi-scattering along active sun/moon light direction
-                    float d1 = sv_sampleVoxelCloudDensity(pos + lightDir * 16.0, sky, cloudBottom, cloudTop, biomeCloudScale, stormFactor);
-                    float d2 = sv_sampleVoxelCloudDensity(pos + lightDir * 38.0, sky, cloudBottom, cloudTop, biomeCloudScale, stormFactor);
+                    // 2-tap optical depth along active light direction (same 8x3 budget as baseline)
+                    float d1 = sv_sampleVoxelCloudDensity(
+                        pos + lightDir * 16.0, sky, cloudBottom, cloudTop, biomeCloudScale, stormFactor, thunder
+                    );
+                    float d2 = sv_sampleVoxelCloudDensity(
+                        pos + lightDir * 38.0, sky, cloudBottom, cloudTop, biomeCloudScale, stormFactor, thunder
+                    );
                     float opticalDepth = (d1 * 16.0 + d2 * 22.0) * extinction;
-                    float multiScatter = max(exp(-opticalDepth), exp(-opticalDepth * 0.28) * 0.48 + exp(-opticalDepth * 0.09) * 0.16);
-                    float powder = 1.0 - exp(-opticalDepth * 2.1);
-                    float lightEnergy = multiScatter * mix(1.0, 0.68 + 1.28 * powder, clamp(0.55 - 0.45 * cosTheta, 0.0, 1.0));
 
-                    float hNorm = clamp((pos.y - cloudBottom) / max(cloudTop - cloudBottom, 1.0), 0.0, 1.0);
-                    vec3 litCol = skyAmbient * mix(0.68, 1.12, hNorm)
-                                + directColor * lightEnergy * mix(0.56, 1.14, hNorm) * forwardScatter;
+                    float multiScatter = exp(-opticalDepth) * phaseOrder0
+                                       + 0.42 * exp(-opticalDepth * 0.32) * phaseOrder1
+                                       + deepBleed * exp(-opticalDepth * 0.10);
+                    float powder = 1.0 - exp(-opticalDepth * 2.0);
+                    float powderMod = mix(1.0, 0.72 + 0.56 * powder, powderAngle);
+
+                    float hNorm = clamp((pos.y - cloudBottom) * invBandHeight, 0.0, 1.0);
+                    vec3 ambCol = mix(ambBase, ambTop, hNorm);
+                    vec3 litCol = ambCol + directColor * (multiScatter * powderMod * mix(0.40, 1.06, hNorm));
+
+                    // Localized intra-cloud sheet-lightning glow inside thick storm cells
+                    if (thunder > 0.15 && density > 0.30) {
+                        float flash = sv_cloudStormLightning(pos, sky.gameTimeSec, thunder);
+                        litCol += vec3(0.70, 0.82, 1.05) * (flash * density * 0.85);
+                    }
 
                     float stepTrans = exp(-density * extinction * stepSize);
                     voxelScattered += voxelTrans * litCol * (1.0 - stepTrans);
@@ -159,30 +359,45 @@ vec4 sv_clouds(in vec3 dir, in vec3 cameraPos, in VsSkyState sky) {
         }
     }
 
-    // Apply horizon fade specifically to the voxel cloud band so cirrus fades independently.
+    // Horizon fade dedicated to the voxel band (keeps distant horizon clean without dimming cirrus)
     float voxelHorizonFade = hitVoxelBand
-        ? smoothstep(0.015, 0.14, abs(dir.y)) * (1.0 - smoothstep(950.0, 2100.0, tEnter))
+        ? smoothstep(0.015, 0.14, abs(dir.y)) * (1.0 - smoothstep(950.0, 2200.0, tEnter))
         : 0.0;
     vec3 scattered = voxelScattered * voxelHorizonFade;
     float transmittance = mix(1.0, voxelTrans, voxelHorizonFade);
 
-    // Lightweight high-altitude cirrus veil at y = 540 (decoupled from voxel tEnter)
-    if (dir.y > 0.04 && cameraPos.y < 535.0 && transmittance > 0.06) {
+    // High-altitude cirrus veil at y = 540 with independent horizon fade and alpine twilight afterglow
+    if (dir.y > 0.04 && cameraPos.y < 535.0 && transmittance > 0.05) {
         float tCirrus = (540.0 - cameraPos.y) / max(dir.y, 0.04);
         float cirrusHorizonFade = smoothstep(0.04, 0.18, dir.y) * (1.0 - smoothstep(2600.0, 4400.0, tCirrus));
         if (cirrusHorizonFade > 0.005) {
             vec2 cWorld = cameraPos.xz + dir.xz * min(tCirrus, 4400.0);
-            vec2 cUv = cWorld * vec2(0.00062, 0.00155) + vec2(sky.gameTimeSec * 0.0055, sky.gameTimeSec * 0.0018);
+            vec2 cDrift = vec2(mod(sky.gameTimeSec * 0.0055, 512.0), mod(sky.gameTimeSec * 0.0018, 512.0));
+            vec2 cUv = cWorld * vec2(0.00058, 0.00150) + cDrift;
             float warp = sv_cloudNoise2D(cUv * 1.40);
-            vec2 cWarped = cUv + vec2(warp * 0.48, -warp * 0.30);
-            float cFilament = sv_cloudNoise2D(cWarped) * 0.62 + sv_cloudNoise2D(cWarped * 2.4 + vec2(4.1, 2.3)) * 0.38;
+            vec2 cWarped = cUv + vec2(warp * 0.52, -warp * 0.32);
+            float cFilament = sv_cloudNoise2D(cWarped) * 0.62
+                            + sv_cloudNoise2D(cWarped * 2.4 + vec2(4.1, 2.3)) * 0.38;
             float cirrusMask = smoothstep(0.54, 0.88, cFilament);
-            float cirrusAlpha = cirrusMask * 0.22 * cirrusHorizonFade * (1.0 - stormFactor * 0.65);
+            float cirrusAlpha = cirrusMask * 0.24 * cirrusHorizonFade * (1.0 - stormFactor * 0.72);
 
-            vec3 cirrusTint = mix(skyAmbient * 1.22, directColor * (0.85 + 0.42 * clamp(silverLining, 0.0, 2.0)), 0.70);
+            // High-altitude ice crystals catch sunlight slightly longer at dusk/dawn (real alpine afterglow)
+            float cirrusSunW = smoothstep(-0.14, 0.02, sunDir.y);
+            float cirrusSunHalo = 0.78 + 0.48 * clamp(sv_cloudHgPhase(cosSun, 0.68) * 2.4, 0.0, 1.8);
+            float cirrusMoonHalo = 0.82 + 0.36 * clamp(sv_cloudHgPhase(-cosSun, 0.55) * 2.0, 0.0, 1.4);
+            vec3 cirrusSun = sv_cloudSolarTransmittance(sunDir.y + 0.035) * vec3(1.18, 1.10, 0.96) * (cirrusSunW * cirrusSunHalo);
+            vec3 cirrusDirect = (cirrusSun + moonDirect * cirrusMoonHalo) * (1.0 - stormFactor * 0.60);
+            vec3 cirrusTint = mix(ambTop * 1.18, cirrusDirect, 0.68);
+
             scattered += transmittance * cirrusTint * cirrusAlpha;
-            transmittance *= (1.0 - cirrusAlpha * 0.45);
+            transmittance *= (1.0 - cirrusAlpha * 0.42);
         }
+    }
+
+    // Clear-night geomagnetic Aurora Borealis composited strictly behind clouds (transmittance unchanged)
+    if (nightFactor > 0.005 && transmittance > 0.03) {
+        vec3 aurora = sv_cloudAuroraCurtains(dir, sky.gameTimeSec, nightFactor, stormFactor, moonDir);
+        scattered += transmittance * aurora;
     }
 
     return vec4(max(scattered, vec3(0.0)), clamp(transmittance, 0.0, 1.0));
