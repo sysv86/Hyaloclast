@@ -664,18 +664,28 @@ void main() {
     }
 
     vec3 heldRadiance = vec3(0.0);
+    vec3 dynamicHalo = vec3(0.0);
     vec3 restirPointRad = vec3(0.0);
     vec3 opticalLightGlint = vec3(0.0);
     uint lightCount = isDhPixel ? 0u : min(uEmissiveLights.header.x, 512u);
     uint firstWorldLight = 0u;
+    float rqFogDens = clamp(VS_PARAM_FOG_DENSITY, 0.0, 0.03);
+    float rqTorchScale = clamp(VS_PARAM_TORCH_INTENSITY, 0.3, 2.5);
     for (uint hi = 0u; hi < min(lightCount, 2u); ++hi) {
         if (!vsIsHeldLight(uEmissiveLights.lights[hi])) break;
         VsEmissiveLight held = uEmissiveLights.lights[hi];
         heldRadiance += isWater
-            ? min(directLocalLight(held, vsWaterGlintSurface(s), geomN, P, V) * 0.45, vec3(0.55))
+            ? min(directLocalLight(held, vsWaterGlintSurface(s), geomN, P, V) * 0.48, vec3(0.58))
             : directLocalLight(held, s, geomN, P, V);
+        dynamicHalo += vsDynamicLightHalo(held, vec3(0.0), -V, distToCam, rqFogDens, vsWorld.rain) * rqTorchScale;
         firstWorldLight = hi + 1u;
     }
+    uint haloCap = min(lightCount - firstWorldLight, 8u);
+    for (uint hwi = 0u; hwi < haloCap; ++hwi) {
+        VsEmissiveLight wl = uEmissiveLights.lights[firstWorldLight + hwi];
+        dynamicHalo += vsDynamicLightHalo(wl, vec3(0.0), -V, distToCam, rqFogDens, vsWorld.rain) * rqTorchScale;
+    }
+    heldRadiance += min(dynamicHalo, vec3(0.45));
     uint worldLights = lightCount - firstWorldLight;
     if (isWater || isGlass) {
         // Select top-2 strongest attenuated nearby world lights before tracing shadow rays.

@@ -1,31 +1,45 @@
 #include <vulkanshaders/v1/common.vsl>
 
 // @hook(stage = "fog", priority = 100)
-// Keeps the built-in fog tint consistent after the shared froxel volume has been composited.
+// ReLight Vanilla - Physically balanced atmospheric fog with solar/lunar Mie forward scatter,
+// thunderstorm sheet-lightning atmospheric glow, Nether ember haze, and End accretion godrays.
 void sv_fog(in float dist, in vec3 dir, inout vec3 scatter, inout vec3 transmittance) {
+    int dim = vsDimensionId();
     vec3 sunDir = dot(vsWorld.sunDir, vsWorld.sunDir) > 1e-6
         ? normalize(vsWorld.sunDir)
         : vec3(0.0, 1.0, 0.0);
     float daylight = smoothstep(-0.10, 0.22, sunDir.y);
+    float rain = clamp(vsWorld.rain, 0.0, 1.0);
+    float thunder = clamp(vsWorld.thunder, 0.0, 1.0);
+
     float sunWarmth = pow(clamp(dot(dir, sunDir) * 0.5 + 0.5, 0.0, 1.0), 2.8)
-        * daylight * (1.0 - vsWorld.rain * 0.75);
-    scatter *= mix(vec3(0.84, 0.87, 0.90), vec3(0.98, 0.90, 0.80), sunWarmth * 0.45);
+        * daylight * (1.0 - rain * 0.75);
+    scatter *= mix(vec3(0.84, 0.87, 0.90), vec3(0.99, 0.91, 0.80), sunWarmth * 0.48);
     transmittance = mix(vec3(1.0), transmittance, 0.98);
 
-    // The Nether: ember-lit volcanic haze. There is no world position at this stage, so all
-    // variation is temporal or horizon-weighted; nothing here can swim with the camera.
-    if (vsDimensionId() == 1) {
-        // Bounded time keeps the pulse phase stable over long sessions.
-        float t = mod(vsWorld.gameTimeSec, 1024.0);
-        float emberPulse = 0.5 + 0.5 * sin(t * 1.05);      // ~6 s breathing
-        float churn = 0.5 + 0.5 * sin(t * 0.31 + 2.1);     // slower secondary swell
+    // Overworld subtle Mie mist glow & synchronized thunderstorm atmospheric sheet flash
+    if (dim == 0) {
+        float distMask = smoothstep(16.0, 140.0, dist);
+        if (thunder > 0.12 && distMask > 0.01) {
+            float t = mod(vsWorld.gameTimeSec, 512.0);
+            float cycle = fract(t * 0.38);
+            float flash1 = exp(-abs(cycle - 0.14) * 16.0);
+            float flash2 = exp(-abs(cycle - 0.28) * 20.0) * 0.55;
+            float stormPulse = (flash1 + flash2) * smoothstep(0.12, 0.85, thunder);
+            float skyBias = smoothstep(-0.15, 0.45, dir.y);
+            scatter += vec3(0.16, 0.22, 0.34) * (stormPulse * distMask * (0.40 + 0.60 * skyBias) * 0.22);
+        }
+    }
 
-        // Push the ambient scatter toward ember orange/red without crushing its brightness.
+    // The Nether: ember-lit volcanic haze
+    if (dim == 1) {
+        float t = mod(vsWorld.gameTimeSec, 1024.0);
+        float emberPulse = 0.5 + 0.5 * sin(t * 1.05);
+        float churn = 0.5 + 0.5 * sin(t * 0.31 + 2.1);
+
         vec3 warmShift = vec3(1.40 + 0.12 * emberPulse, 0.68, 0.48);
         scatter *= mix(vec3(1.0), warmShift, 0.90);
 
-        // Horizon-weighted ember glow. The distance ramp keeps it on the far haze, so nearby
-        // geometry keeps its own shading instead of receiving a flat orange wash.
         float horizonWeight = exp(-abs(dir.y) * 3.6);
         float distRamp = smoothstep(8.0, 110.0, dist);
         vec3 emberGlow = vec3(0.16, 0.045, 0.015)
@@ -33,12 +47,8 @@ void sv_fog(in float dist, in vec3 dir, inout vec3 scatter, inout vec3 transmitt
         scatter += emberGlow * horizonWeight * distRamp;
     }
 
-    // The End: additive sky-plane godrays from the fixed black-hole accretion source.
-    // This stage has no depth or TLAS access, so obsidian spires cannot occlude the fan;
-    // ray-traced visibility would need a separate pass.
-    // Only add the fan to distant/background samples. Near geometry (including obsidian RT
-    // reflections) has a short `dist` and must not receive this sky-only effect.
-    if (vsDimensionId() == 2 && vsHasBiomeTelemetry() && dist > 180.0) {
+    // The End: additive sky-plane godrays from the fixed black-hole accretion source
+    if (dim == 2 && vsHasBiomeTelemetry() && dist > 180.0) {
         const vec3 endSource = vec3(0.300526, 0.560983, -0.771351);
         float cosSource = clamp(dot(dir, endSource), -1.0, 1.0);
         if (cosSource > 0.55) {
@@ -48,7 +58,6 @@ void sv_fog(in float dist, in vec3 dir, inout vec3 scatter, inout vec3 transmitt
             float radius = length(plane);
             float azimuth = atan(plane.y, plane.x);
 
-            // Mod-wrapped time keeps shaft phases bounded over long sessions.
             float t = mod(vsWorld.gameTimeSec, 256.0);
             float shimmer = 0.82 + 0.18 * sin(t * 0.21);
             float shafts = 0.52

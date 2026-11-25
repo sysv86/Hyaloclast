@@ -11,8 +11,8 @@ vec3 vsEndSourceDir() {
 #endif
 
 // @hook(stage = "direct_light", priority = 100)
-// Sunlit Vanilla - Hue-faithful daylight with gentle warm sun highlights, clean cool sky fill,
-// and dual frost/foliage subsurface scattering.
+// ReLight Vanilla - Hue-faithful daylight with energy-conserving rough-surface multi-scattering
+// compensation, crisp warm sun highlights, cool sky-fill terminator bounce, rain wet-sheen, and dual SSS.
 void sv_direct_light(in VsSurface s, in vec3 viewDir, in vec3 lightDir, inout vec3 brdf) {
     // The End: island geometry is lit by the same black-hole source as clouds and dust.
     bool useEndSource = vsDimensionId() == 2 && vsHasBiomeTelemetry();
@@ -20,6 +20,7 @@ void sv_direct_light(in VsSurface s, in vec3 viewDir, in vec3 lightDir, inout ve
 
     float ndotlRaw = dot(s.normal, directLightDir);
     float ndotl = max(ndotlRaw, 0.0);
+    float ndotv = max(dot(s.normal, viewDir), 1e-4);
 
     if (dot(brdf, brdf) <= 1e-8) {
         vec3 Hsum = viewDir + directLightDir;
@@ -30,6 +31,12 @@ void sv_direct_light(in VsSurface s, in vec3 viewDir, in vec3 lightDir, inout ve
         brdf = s.albedo * (ndotl * (1.0 - s.metallic) * (1.0 / 3.14159265)) + vec3(spec * ndotl);
     }
 
+    // Energy-conserving rough-surface multi-scattering compensation (Kulla-Conty style approximation)
+    // Restores subtle lost grazing luminance on rough stone, sand, wood, and brushed metals
+    float r2 = s.roughness * s.roughness;
+    float multiScatterGain = 1.0 + r2 * (0.14 * (1.0 - s.metallic) + 0.24 * s.metallic) * (1.0 - 0.5 * ndotv);
+    brdf *= multiScatterGain;
+
     // Crisp warm sunlight highlights vs cool azure sky-shadow fill;
     // in The End the accretion source washes direct radiance soft lavender-violet.
     float sunWarmth = smoothstep(0.06, 0.72, ndotl);
@@ -39,14 +46,13 @@ void sv_direct_light(in VsSurface s, in vec3 viewDir, in vec3 lightDir, inout ve
 
     // Gentle cool sky-fill micro-bounce along the terminator for readable block contours
     float terminatorBand = smoothstep(-0.36, 0.18, ndotlRaw) * (1.0 - smoothstep(0.18, 0.62, ndotlRaw));
-    vec3 skyFillBounce = vec3(0.82, 0.92, 1.08);
-    brdf += s.albedo * skyFillBounce * (terminatorBand * 0.030 * (1.0 - s.metallic));
+    vec3 skyFillBounce = useEndSource ? vec3(0.68, 0.58, 0.92) : vec3(0.82, 0.92, 1.08);
+    brdf += s.albedo * skyFillBounce * (terminatorBand * 0.032 * (1.0 - s.metallic));
 
     if (s.subsurface > 0.01) {
-        // Dual frost/snow and foliage subsurface scattering
+        // Dual frost/snow/ice and foliage subsurface scattering
         vec3 Hback = normalize(directLightDir + s.normal * 0.34);
-        // Conservative foliage backlight gain: the tint already boosts saturated greens.
-        float backlit = pow(clamp(dot(viewDir, -Hback), 0.0, 1.0), 2.4) * 0.45;
+        float backlit = pow(clamp(dot(viewDir, -Hback), 0.0, 1.0), 2.4) * 0.46;
         float wrap = max(0.0, (ndotlRaw + 0.48) / 1.48) * 0.26;
 
         float maxCh = max(max(s.albedo.r, s.albedo.g), s.albedo.b);
@@ -55,7 +61,7 @@ void sv_direct_light(in VsSurface s, in vec3 viewDir, in vec3 lightDir, inout ve
         float greenDominance = smoothstep(0.04, 0.28, s.albedo.g - max(s.albedo.r, s.albedo.b));
         float frostMask = smoothstep(0.55, 0.85, maxCh) * (1.0 - smoothstep(0.06, 0.28, chroma));
 
-        vec3 frostScatter = vec3(0.88, 0.98, 1.14);
+        vec3 frostScatter = vec3(0.88, 0.98, 1.15);
         vec3 neutralScatter = mix(vec3(0.98, 1.00, 1.03), frostScatter, frostMask);
         vec3 foliageScatter = vec3(1.14, 1.22, 0.72);
         vec3 sssTint = mix(neutralScatter, foliageScatter, greenDominance);

@@ -470,17 +470,24 @@ vec3 shadeGbufferSurface(
     // vanilla block/held fallbacks with intensity coupling and its soft knee.
     float torchParam = clamp(VS_PARAM_TORCH_INTENSITY, 0.3, 2.5);
     vec3 dynamicLights = vec3(0.0);
-    uint totalSceneLights = isDhPixel ? 0u : min(uEmissiveLights.lightCount, 64u);
+    vec3 dynamicHalo = vec3(0.0);
+    uint totalSceneLights = isDhPixel ? 0u : min(uEmissiveLights.lightCount, 128u);
     uint tileLightCount = isDhPixel ? 0u : sTileLightCount;
     if (tileLightCount > 0u) {
         VsSurface lightSurf = isWater ? vsWaterGlintSurface(s) : s;
+        vec3 rayDirCam = -V;
+        float distCam = length(P);
+        float fogDens = clamp(VS_PARAM_FOG_DENSITY, 0.0, 0.03);
         for (uint li = 0u; li < tileLightCount; ++li) {
             VsEmissiveLight light = uEmissiveLights.lights[sTileLights[li]];
             vec3 rad = vsEmissiveRadiance(light, lightSurf, P, V, uSharc.cfg.cameraPosition.xyz) * torchParam;
             if (isWater) {
-                rad = min(rad * 0.35, vec3(0.32));
+                rad = min(rad * 0.42, vec3(0.45));
             }
             dynamicLights += rad;
+            if (li < 12u) {
+                dynamicHalo += vsDynamicLightHalo(light, vec3(0.0), rayDirCam, distCam, fogDens, vsWorld.rain) * torchParam;
+            }
         }
     }
 
@@ -515,7 +522,7 @@ vec3 shadeGbufferSurface(
     vec3 torchLight = dynamicLights + blockFallback + heldFallback;
     vec3 emissiveGlow = s.albedo * s.emission * 2.1;
 
-    vec3 colorHdr = direct + ambient + specIbl + torchLight + emissiveGlow;
+    vec3 colorHdr = direct + ambient + specIbl + torchLight + emissiveGlow + min(dynamicHalo, vec3(0.55));
 
     if (isWater) {
         vec3 R = reflect(-V, s.normal);
@@ -534,8 +541,8 @@ vec3 shadeGbufferSurface(
         vec3 H = normalize(V + L);
         float glintExp = mix(320.0, 48.0, clamp(s.roughness * 8.0, 0.0, 1.0));
         float glint = pow(max(dot(s.normal, H), 0.0), glintExp) * shadowTerm * skyVis;
-        // dynamicLights is already included through torchLight in waterBody; add only the glint.
-        colorHdr += directColor * glint * 3.0;
+        // dynamicLights is already included through torchLight in waterBody; add glint, water emission, and mist halo.
+        colorHdr += directColor * glint * 3.0 + emissiveGlow + min(dynamicHalo, vec3(0.40));
     }
 
     return colorHdr;

@@ -2,7 +2,7 @@
 
 // Sea-state index combining rainfall and thunderstorm squall energy
 float sv_waterSeaState(float rain, float thunder) {
-    return clamp(rain * 0.72 + thunder * 0.48, 0.0, 1.2);
+    return clamp(rain * 0.72 + thunder * 0.54, 0.0, 1.25);
 }
 
 // Two-mode incommensurate wave-group modulation (golden-ratio frequency pair)
@@ -11,13 +11,13 @@ float sv_waveGroupBreath(float timeSec, float seaState) {
     const float TAU = 6.28318530718;
     float p1 = mod(timeSec * 0.31, TAU);
     float p2 = mod(timeSec * 0.5016, TAU) + 1.17;
-    float modDepth = 0.055 + 0.045 * seaState;
+    float modDepth = 0.055 + 0.055 * seaState;
     return 1.0 + modDepth * (0.65 * sin(p1) + 0.35 * sin(p2));
 }
 
 // @hook(stage = "water_waves", priority = 100)
 // ReLight Vanilla - Physically coupled sea-state wave displacement parameters.
-// Grows amplitude and phase speed during storms while slightly lengthening dominant swells.
+// Grows amplitude and phase speed during rain & thunderstorms while lengthening dominant swells.
 void sv_water_waves(inout float strength, inout float speed, inout float scale) {
     float rain = clamp(vsWorld.rain, 0.0, 1.0);
     float thunder = clamp(vsWorld.thunder, 0.0, 1.0);
@@ -25,7 +25,7 @@ void sv_water_waves(inout float strength, inout float speed, inout float scale) 
     float breath = sv_waveGroupBreath(vsWorld.gameTimeSec, seaState);
     float userStrength = clamp(VS_PARAM_WATER_WAVE_STRENGTH, 0.0, 1.0);
 
-    strength = userStrength * (0.92 + rain * 0.36 + thunder * 0.24) * breath;
-    speed = 1.42 + rain * 0.58 + thunder * 0.34;
-    scale = 2.12 - 0.34 * clamp(seaState, 0.0, 1.0);
+    strength = userStrength * (0.94 + rain * 0.38 + thunder * 0.28) * breath;
+    speed = 1.44 + rain * 0.62 + thunder * 0.38;
+    scale = 2.12 - 0.36 * clamp(seaState, 0.0, 1.0);
 }

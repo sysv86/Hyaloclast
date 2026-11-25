@@ -127,7 +127,19 @@ float sv_cloudStormLightning(vec3 worldPos, float timeSec, float thunderFactor) 
     return pulse * flashGate * smoothstep(0.15, 1.0, thunderFactor);
 }
 
-// Clear-night geomagnetic Aurora Borealis curtains with O(1S) 557.7nm green, N2+ cyan, and O(1D) 630nm crimson
+// Volumetric ray-marched geomagnetic Aurora Borealis curtains (95km -> 260km altitude march).
+// Models field-aligned vertical drapery with magnetic-zenith inclination shear, multi-arc
+// Alfvén-wave folding, bright vertical ray pillars, and authentic upper-atmosphere spectroscopy:
+//   - Lower sharp edge (~95-110km):  N2+ 1NG violet-magenta / crimson fringe (427.8nm / 670nm)
+//   - Primary bright core (~110-165km): O(1S) emerald-green (557.7nm) -> N2+ cyan-turquoise
+//   - Upper diffuse veil (~175-260km):  O(1D) deep ruby-violet (630.0nm)
+float sv_auroraFbm(vec2 p) {
+    float v = sv_cloudNoise2D(p) * 0.56;
+    v += sv_cloudNoise2D(p * 2.13 + vec2(17.1, 31.7)) * 0.29;
+    v += sv_cloudNoise2D(p * 4.41 + vec2(43.2, 11.9)) * 0.15;
+    return v;
+}
+
 vec3 sv_cloudAuroraCurtains(
     vec3 dir,
     float timeSec,
@@ -136,83 +148,117 @@ vec3 sv_cloudAuroraCurtains(
     vec3 moonDir
 ) {
     const float TAU = 6.28318530718;
-    if (nightFactor <= 0.005 || stormFactor >= 0.85 || dir.y <= 0.05 || dir.y >= 0.78) {
+    if (nightFactor <= 0.005 || stormFactor >= 0.82 || dir.y <= 0.04) {
         return vec3(0.0);
     }
 
-    float clearSky = 1.0 - smoothstep(0.08, 0.80, stormFactor);
-    float elevFade = smoothstep(0.05, 0.16, dir.y) * (1.0 - smoothstep(0.50, 0.78, dir.y));
-    float northArc = smoothstep(-0.25, 0.45, -dir.z);
+    float clearSky = 1.0 - smoothstep(0.06, 0.78, stormFactor);
+    // Allow curtains to arch gracefully high overhead while fading smoothly near the horizon
+    float elevFade = smoothstep(0.04, 0.16, dir.y) * (1.0 - smoothstep(0.84, 0.995, dir.y));
+
+    // Biome responsiveness: dramatic in cold/taiga/snowy biomes, graceful ethereal presence in temperate nights
+    float bTemp = vsBiomeTemperature();
+    float coldBoost = 1.0 - smoothstep(0.08, 0.42, bTemp);
+    float biomePresence = mix(0.68, 1.32, coldBoost);
+
+    // Subtle preference for the northern sky while still allowing overhead coronal arches
+    float northArc = 0.42 + 0.58 * smoothstep(-0.45, 0.45, -dir.z);
 
     // Keep moon disk crisp by softly attenuating aurora right across the lunar disc
     float moonDot = clamp(dot(dir, moonDir), 0.0, 1.0);
     float m2 = moonDot * moonDot;
     float m4 = m2 * m2;
-    float moonKeepout = 1.0 - 0.72 * (m4 * m4);
+    float moonKeepout = 1.0 - 0.78 * (m4 * m4);
 
-    // Slow natural geomagnetic substorm breathing (~170s cycle)
-    float substorm = 0.60 + 0.40 * sin(mod(timeSec * 0.037, TAU));
-    float mask = nightFactor * clearSky * elevFade * (0.15 + 0.85 * northArc) * moonKeepout * substorm;
+    // Natural geomagnetic substorm activity cycle (~140s swell + gentle harmonic)
+    float substorm = 0.72 + 0.28 * sin(mod(timeSec * 0.045, TAU))
+                   + 0.10 * sin(mod(timeSec * 0.113, TAU) + 1.2);
+    float mask = nightFactor * clearSky * elevFade * northArc * moonKeepout * substorm * biomePresence;
     if (mask <= 0.002) {
         return vec3(0.0);
     }
 
-    float tFold = mod(timeSec * 0.062, TAU);
-    float tRay = mod(timeSec * 0.26, TAU);
-    float rayDrift = mod(timeSec * 0.08, 512.0);
-    float invY = 1.0 / max(dir.y, 0.09);
+    float tFold = mod(timeSec * 0.055, TAU);
+    float tWave = mod(timeSec * 0.22, TAU);
+    float rayDrift = mod(timeSec * 0.095, 512.0);
+    float invY = 1.0 / max(dir.y, 0.085);
 
-    vec3 acc = vec3(0.0);
+    // Static view-locked IGN dithering along altitude march eliminates horizontal slice banding
+    float ign = fract(52.9829189 * fract(dot(dir.xz * 256.0, vec2(0.06711056, 0.00583715))));
 
-    // Perspective-stacked upper-atmosphere altitude strata (105km green base -> 245km crimson-violet crown)
-    int sliceCount = 3;
+    int stepCount = 8;
 #ifdef VS_ACTIVE_RENDER_TIER
 #if VS_ACTIVE_RENDER_TIER >= 2
-    sliceCount = 4;
+    stepCount = 12;
 #endif
 #endif
 
-    for (int s = 0; s < 4; ++s) {
-        if (s >= sliceCount) {
+    vec3 acc = vec3(0.0);
+    float invSteps = 1.0 / float(stepCount);
+
+    for (int s = 0; s < 12; ++s) {
+        if (s >= stepCount) {
             break;
         }
-        float hAlt = 1.0;
-        float sliceWeight = 0.48;
-        vec3 lineCol = vec3(0.09, 0.96, 0.42);
-        if (s == 1) {
-            hAlt = 1.24;
-            sliceWeight = 0.36;
-            lineCol = vec3(0.08, 0.80, 0.62);
-        } else if (s == 2) {
-            hAlt = 1.54;
-            sliceWeight = 0.26;
-            lineCol = (sliceCount == 3) ? vec3(0.46, 0.20, 0.56) : vec3(0.16, 0.44, 0.76);
-        } else if (s == 3) {
-            hAlt = 1.92;
-            sliceWeight = 0.18;
-            lineCol = vec3(0.58, 0.13, 0.48);
-        }
+        float hFrac = (float(s) + 0.18 + 0.64 * ign) * invSteps;
+        // Exponential altitude mapping (95km base -> 260km crown)
+        float hAlt = 1.0 + hFrac * 1.45 + hFrac * hFrac * 0.65;
 
-        float px = dir.x * invY * hAlt;
-        float pz = dir.z * invY * hAlt;
-        float ovalZ = pz + 0.09 * px * px;
+        // Magnetic-field inclination shear tilts curtains organically toward the magnetic zenith
+        vec2 p = dir.xz * invY * hAlt + vec2(0.14, -0.32) * hFrac;
+        float px = p.x;
+        float pz = p.y;
 
-        float f1 = sin(mod(px * 0.68, TAU) + tFold) * 0.55
-                 + sin(mod(px * 1.42, TAU) - tFold * 1.35) * 0.24;
-        float d1 = (ovalZ + 2.15 - f1) * 1.35;
+        // Curved geomagnetic oval coordinates with domain-warped Alfvén-wave folding
+        float ovalZ = pz + 0.065 * px * px;
+        float warp = (sv_auroraFbm(vec2(px * 0.24 + rayDrift * 0.18, ovalZ * 0.22 - rayDrift * 0.10)) - 0.5) * 1.35;
+
+        // Arc 1: Primary bright folded auroral curtain
+        float fold1 = sin(mod(px * 0.62, TAU) + tFold) * 0.58
+                    + sin(mod(px * 1.38, TAU) - tFold * 1.35) * 0.26
+                    + warp * 0.65;
+        float d1 = (ovalZ + 1.85 - fold1) * 1.55;
         float r1 = exp(-d1 * d1);
 
-        float f2 = sin(mod(px * 0.52 + 1.8, TAU) - tFold * 0.82) * 0.65;
-        float d2 = (ovalZ + 3.65 - f2) * 1.05;
-        float r2 = exp(-d2 * d2) * 0.75;
+        // Arc 2: Secondary sweeping outer ribbon
+        float fold2 = sin(mod(px * 0.48 + 1.9, TAU) - tFold * 0.78) * 0.72
+                    - warp * 0.52;
+        float d2 = (ovalZ + 3.25 - fold2) * 1.15;
+        float r2 = exp(-d2 * d2) * 0.82;
 
-        float curtain = max(r1, r2);
-        float rayNoise = sv_cloudNoise2D(vec2(px * 3.4 + rayDrift, ovalZ * 0.85));
-        float striation = 0.45 + 0.55 * sin(mod(px * 8.2 + rayNoise * 4.2, TAU) + tRay);
-        acc += lineCol * (curtain * (0.30 + 0.70 * rayNoise) * striation * sliceWeight);
+        // Arc 3: High-latitude coronal veil
+        float fold3 = sin(mod(px * 0.85 - 1.1, TAU) + tFold * 0.92) * 0.44
+                    + warp * 0.45;
+        float d3 = (ovalZ + 0.65 - fold3) * 1.35;
+        float r3 = exp(-d3 * d3) * 0.62;
+
+        float curtain = max(max(r1, r2), r3);
+        if (curtain <= 0.004) {
+            continue;
+        }
+
+        // Field-aligned vertical ray pillars & traveling Alfvén shimmer
+        float pillarNoise = sv_auroraFbm(vec2(px * 2.6 + rayDrift * 0.42, ovalZ * 0.55 - warp * 0.35));
+        float fineRays = 0.42 + 0.58 * sin(mod(px * 9.8 + pillarNoise * 5.8, TAU) + tWave);
+        float brightPillars = pow(clamp(pillarNoise * 1.15, 0.0, 1.0), 1.65) * (0.45 + 0.55 * fineRays);
+
+        // Vertical emission profile: sharp luminous lower border (~105km), long tapering upper tail (~260km)
+        float verticalProfile = smoothstep(0.0, 0.14, hFrac) * exp(-hFrac * 1.75);
+
+        // True upper-atmosphere spectroscopic color gradient by altitude
+        vec3 colLowerEdge = vec3(0.76, 0.14, 0.62); // N2+ 1NG magenta-violet fringe
+        vec3 colGreen     = vec3(0.09, 1.00, 0.46); // O(1S) 557.7nm emerald green
+        vec3 colCyan      = vec3(0.08, 0.84, 0.86); // N2+ cyan-turquoise transition
+        vec3 colCrimson   = vec3(0.62, 0.13, 0.50); // O(1D) 630.0nm ruby-violet crown
+
+        vec3 spectral = mix(colLowerEdge, colGreen, smoothstep(0.03, 0.17, hFrac));
+        spectral = mix(spectral, colCyan, smoothstep(0.24, 0.54, hFrac) * (0.55 + 0.45 * pillarNoise));
+        spectral = mix(spectral, colCrimson, smoothstep(0.56, 0.92, hFrac));
+
+        acc += spectral * (curtain * (0.28 + 1.15 * brightPillars) * verticalProfile * invSteps);
     }
 
-    return acc * (mask * 0.38);
+    return acc * (mask * 2.45);
 }
 
 // Keplerian differential accretion filament pattern: angular speed Omega(r) ~ r^(-3/2)
@@ -675,6 +721,11 @@ vec4 sv_clouds(in vec3 dir, in vec3 cameraPos, in VsSkyState sky) {
                     float hNorm = clamp((pos.y - cloudBottom) * invBandHeight, 0.0, 1.0);
                     vec3 ambCol = mix(ambBase, ambTop, hNorm);
                     vec3 litCol = ambCol + directColor * (multiScatter * powderMod * mix(0.40, 1.06, hNorm));
+                    // Subtle geomagnetic emerald-teal aurora bounce illuminating cloud undersides on clear nights
+                    if (nightFactor > 0.05 && stormFactor < 0.65) {
+                        float auroraBounce = nightFactor * (1.0 - stormFactor * 1.35) * (1.0 - hNorm) * 0.032;
+                        litCol += vec3(0.10, 0.78, 0.56) * max(auroraBounce, 0.0);
+                    }
 
                     // Localized intra-cloud sheet-lightning glow inside thick storm cells
                     if (thunder > 0.15 && density > 0.30) {

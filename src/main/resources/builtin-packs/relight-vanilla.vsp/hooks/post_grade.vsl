@@ -49,16 +49,27 @@ vec3 sv_pbr_neutral(vec3 color) {
     float newPeak = 1.0 - d * d / (peak + d - startCompression);
     color *= newPeak / peak;
     float g = 1.0 - 1.0 / (desaturation * (peak - newPeak) + 1.0);
-    // Subtle warm highlight rolloff to keep sunlit stone, clouds, and torches inviting.
     vec3 warmPeak = vec3(newPeak) * vec3(1.018, 1.004, 0.982);
     return clamp(mix(color, warmPeak, g), 0.0, 1.0);
 }
 
 // @hook(stage = "post_grade", priority = 100)
-// Sunlit Vanilla - Pleasant, balanced grade with clean shadow readability, subtle warm
-// highlight rolloff, vibrant-yet-faithful vanilla foliage/sky saturation, and minimal vignette.
+// ReLight Vanilla - Pleasant, balanced grade with subtle Purkinje scotopic rod-vision shift in
+// deep moonlight shadows, clean highlight rolloff, vibrant-yet-faithful vanilla saturation, and minimal vignette.
 void sv_post_grade(inout vec3 hdrColor, in vec2 uv, in VsPostContext post) {
     hdrColor = max(hdrColor * post.exposure * 1.03, vec3(0.0));
+
+    // Subtle Purkinje scotopic shift in very dark Overworld night/cave shadows:
+    // human rods peak at ~507nm (cool cyan-blue) while warm firelight/lava stays vivid & untouched.
+    if (vsDimensionId() == 0) {
+        float preLuma = dot(hdrColor, vec3(0.2126, 0.7152, 0.0722));
+        float warmth = clamp((hdrColor.r - hdrColor.b) / max(preLuma + 0.04, 0.04), 0.0, 1.0);
+        float nightMask = 1.0 - smoothstep(-0.08, 0.12, vsWorld.sunDir.y);
+        float scotopic = (1.0 - smoothstep(0.008, 0.085, preLuma)) * (1.0 - warmth * 0.85) * (0.35 + 0.65 * nightMask);
+        float rodLuma = dot(hdrColor, vec3(0.08, 0.56, 0.36));
+        vec3 rodTint = vec3(0.76, 0.94, 1.18) * rodLuma;
+        hdrColor = mix(hdrColor, rodTint, clamp(scotopic * 0.24, 0.0, 0.26));
+    }
 
     if (post.toneMapMode == 1u) {
         hdrColor = sv_aces(hdrColor);
