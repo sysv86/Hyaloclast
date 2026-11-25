@@ -1455,13 +1455,17 @@ impl ZeroCopyBlasManager {
         current_wind_keys.clear();
         self.wind_scheduler.current_active_keys = current_wind_keys;
 
+        // `game_time_sec` and `rain_level` carry the integrated wind phase and the combined
+        // rain/thunder storm supplied by the FFI caller; forward both unchanged.
+        let wind_phase = game_time_sec;
+        let storm = rain_level;
         if let Ok(Some(wind_pc)) = self.wind_scheduler.upload_frame_jobs(
             ctx,
             retire_queue,
             frame_slot,
-            game_time_sec,
+            wind_phase,
             1.0,
-            1.0 + rain_level,
+            storm,
         ) && let Some(pipe_mgr) = pipelines
         {
             pipe_mgr.dispatch_wind_displace(

@@ -1048,8 +1048,15 @@ pub unsafe extern "C" fn vs_core_record_frame_rtx(
     let cmd = vk::CommandBuffer::from_raw(cmd_raw);
     let slot = engine.frame_slot();
     let world = engine.world_ubo.read();
-    let time_sec = world.game_time_sec;
-    let rain = world.rain;
+    // Feed the wind scheduler the same time source and storm signal as the raster hook so
+    // BLAS displacement matches the G-buffer silhouette. If the producer omitted the
+    // integrated phase (legacy 528-byte UBO), fall back to the legacy game clock.
+    // The raster hook only sees `gameTimeSec` through its reduced VsHookWorld, so the wind
+    // compute path must use the same clock to keep G-buffer and BLAS foliage silhouettes in sync.
+    let wind_phase = world.game_time_sec;
+    let rain = world.rain.clamp(0.0, 1.0);
+    let thunder = world.thunder.clamp(0.0, 1.0);
+    let storm = (rain * 0.72 + thunder * 0.55).clamp(0.0, 1.25);
     drop(world);
     let vp_size = engine.render_graph.lock().internal_target_size;
     let ctx = engine.ctx.read();
@@ -1077,8 +1084,8 @@ pub unsafe extern "C" fn vs_core_record_frame_rtx(
         [prev_cam_x, prev_cam_y, prev_cam_z],
         frame_index.max(0) as u32,
         max_blas_builds.max(1) as usize,
-        time_sec,
-        rain,
+        wind_phase,
+        storm,
     ) {
         Ok(addr) => addr,
         Err(err) => {
