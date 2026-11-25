@@ -21,8 +21,8 @@ void sv_fog(in float dist, in vec3 dir, inout vec3 scatter, inout vec3 transmitt
         float churn = 0.5 + 0.5 * sin(t * 0.31 + 2.1);     // slower secondary swell
 
         // Push the ambient scatter toward ember orange/red without crushing its brightness.
-        vec3 warmShift = vec3(1.10 + 0.10 * emberPulse, 0.86, 0.74);
-        scatter *= mix(vec3(1.0), warmShift, 0.85);
+        vec3 warmShift = vec3(1.40 + 0.12 * emberPulse, 0.68, 0.48);
+        scatter *= mix(vec3(1.0), warmShift, 0.90);
 
         // Horizon-weighted ember glow. The distance ramp keeps it on the far haze, so nearby
         // geometry keeps its own shading instead of receiving a flat orange wash.

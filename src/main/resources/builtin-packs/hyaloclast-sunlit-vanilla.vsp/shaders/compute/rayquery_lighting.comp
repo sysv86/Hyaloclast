@@ -134,6 +134,9 @@ bool evaluateCandidateAlpha(rayQueryEXT rq, uint waterMode, bool skipGlass) {
 
     float alpha = textureLod(uBindlessTextures[nonuniformEXT(meta.bindlessAlbedoSlot)], hitUv, 0.0).a * hitColor.a;
     uint materialId = (matFlags0 >> 3u) & 15u;
+    if (materialId == 9u) {
+        return true;
+    }
     bool isGlass = (materialId == 7u) || (meta.layerOrdinal == 2u && alpha < 0.95);
     if (isGlass) {
         if (skipGlass) {
@@ -224,7 +227,7 @@ vec3 traceSunTransmittance(vec3 origin, vec3 dir, float tMin, float tMax) {
             vec4 texel = textureLod(uBindlessTextures[nonuniformEXT(meta.bindlessAlbedoSlot)], hitUv, 0.0) * hitColor;
             float alpha = texel.a;
             uint materialId = (matFlags0 >> 3u) & 15u;
-            bool isGlass = (materialId == 7u) || (meta.layerOrdinal == 2u && alpha < 0.95);
+            bool isGlass = (materialId == 7u) || (materialId != 9u && meta.layerOrdinal == 2u && alpha < 0.95);
             if (isGlass) {
                 if (alpha > 0.02) {
                     vec3 glassTint = pow(max(texel.rgb, vec3(0.0)), vec3(2.2));

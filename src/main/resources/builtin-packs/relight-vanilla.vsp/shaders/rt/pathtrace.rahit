@@ -87,7 +87,8 @@ void main() {
     vec4 texel = textureLod(uBindlessTextures[nonuniformEXT(meta.bindlessAlbedoSlot)], hitUv, 0.0) * hitColor;
     float alpha = texel.a;
     uint materialId = (mf0 >> 3u) & 15u;
-    bool isGlass = (materialId == 7u) || (meta.layerOrdinal == 2u && !isWater && alpha > 0.02 && alpha < 0.98);
+    bool isLava = materialId == 9u;
+    bool isGlass = (materialId == 7u) || (!isLava && meta.layerOrdinal == 2u && !isWater && alpha > 0.02 && alpha < 0.98);
     if (isGlass) {
         // Shadow rays (bit 1 = 2u) and skipGlass rays (bit 7 = 128u) pass through glass.
         // Tinted sun shadow rays (bit 1 = 2u | bit 16 = 65536u) accumulate stained-glass transmission color.
@@ -102,7 +103,8 @@ void main() {
         return;
     }
 
-    if (alpha < (meta.layerOrdinal == 5u ? 0.01 : 0.5)) {
+    // Lava is opaque by definition; never let a filtered sprite alpha punch a hole through it.
+    if (!isLava && alpha < (meta.layerOrdinal == 5u ? 0.01 : 0.5)) {
         ignoreIntersectionEXT;
     }
 }

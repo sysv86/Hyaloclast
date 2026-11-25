@@ -91,7 +91,7 @@ void main() {
                 uint albedoSlot = meta.bindlessAlbedoSlot;
                 texel = textureLod(uBindlessTextures[nonuniformEXT(albedoSlot)], hitUv, 0.0) * hitColor;
             }
-            hitAlpha = texel.a;
+            hitAlpha = ((flags >> 3u) & 15u) == 9u ? 1.0 : texel.a;
             uint materialId = (flags >> 3u) & 15u;
             isGlass = !water && !isDhLod && ((materialId == 7u) || (meta.layerOrdinal == 2u && texel.a > 0.02 && texel.a < 0.98));
 
