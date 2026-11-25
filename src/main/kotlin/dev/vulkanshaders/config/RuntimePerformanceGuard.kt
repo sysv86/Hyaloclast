@@ -5,10 +5,8 @@ import dev.vulkanshaders.backend.NativeCoreBridge
 import dev.vulkanshaders.diagnostics.HyaloclastErrorLog
 import dev.vulkanshaders.gui.ShaderNotices
 import dev.vulkanshaders.pack.ShaderPackManager
-import net.minecraft.ChatFormatting
 import net.minecraft.client.Minecraft
 import net.minecraft.network.chat.Component
-import net.minecraft.network.chat.Style
 
 /**
  * Monitors frame/tick cadence and GPU frame times during live rendering, stepping down
@@ -116,8 +114,7 @@ object RuntimePerformanceGuard {
             Component.literal(message),
         )
         runCatching {
-            val chat = VulkanShaders.buildGradientBrandComponent()
-                .append(Component.literal(": $message").withStyle(Style.EMPTY.withColor(ChatFormatting.YELLOW)))
+            val chat = VulkanShaders.buildGradientMessage(": $message")
             mc.gui.hud.getChat().addClientSystemMessage(chat)
         }
     }

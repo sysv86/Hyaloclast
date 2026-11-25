@@ -4,7 +4,6 @@ import com.mojang.blaze3d.platform.InputConstants
 import dev.vulkanshaders.VulkanShaders
 import dev.vulkanshaders.bridge.StandaloneRenderPearlBridge
 import dev.vulkanshaders.diagnostics.HyaloclastErrorLog
-import net.minecraft.ChatFormatting
 import net.minecraft.client.Minecraft
 import net.minecraft.client.gui.components.toasts.SystemToast
 import net.minecraft.client.gui.components.toasts.Toast
@@ -101,9 +100,7 @@ internal object ShaderNotices {
         val mc = runCatching { Minecraft.getInstance() }.getOrNull() ?: return
         val chatAction = {
             if (mc.player != null && mc.level != null) {
-                val chatMsg = VulkanShaders.buildGradientBrandComponent()
-                    .append(Component.literal(": ").withStyle(ChatFormatting.RED))
-                    .append(message.copy().withStyle(ChatFormatting.RED))
+                val chatMsg = VulkanShaders.buildGradientMessage(message)
                 runCatching { mc.gui.hud.getChat().addClientSystemMessage(chatMsg) }
             }
         }

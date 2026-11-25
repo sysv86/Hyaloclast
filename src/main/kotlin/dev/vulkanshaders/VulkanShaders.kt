@@ -25,7 +25,6 @@ import dev.vulkanshaders.state.WorldStateCollector
 import dev.vulkanshaders.texture.TextureRegistry
 import net.fabricmc.api.ClientModInitializer
 import net.fabricmc.loader.api.FabricLoader
-import net.minecraft.ChatFormatting
 import net.minecraft.client.Minecraft
 import net.minecraft.client.multiplayer.ClientLevel
 import net.minecraft.network.chat.Component
@@ -46,12 +45,30 @@ object VulkanShaders : ClientModInitializer {
     const val CODENAME: String = "IGNIS"
 
     private const val BRAND_NAME: String = "Hyaloclast"
-    private const val GRADIENT_START_R = 0x00
-    private const val GRADIENT_START_G = 0xE5
-    private const val GRADIENT_START_B = 0xFF
-    private const val GRADIENT_END_R = 0x7B
-    private const val GRADIENT_END_G = 0x61
-    private const val GRADIENT_END_B = 0xFF
+
+    // Sampled from docs/icons/hyaloclast.svg face-grad — the banner at the top of README.md:
+    // #FFF2A6 -> #FFCE47 -> #FF9624 -> #EA5E12 -> #BD3808.
+    private val BRAND_GRADIENT = intArrayOf(0xFFF2A6, 0xFFCE47, 0xFF9624, 0xEA5E12, 0xBD3808)
+    private const val BRAND_BODY_COLOR: Int = 0xFF9624
+
+    private fun gradientRgb(t: Float): Int {
+        val last = BRAND_GRADIENT.size - 1
+        val pos = t.coerceIn(0f, 1f) * last
+        val idx = pos.toInt().coerceAtMost(last - 1)
+        val f = pos - idx
+        val a = BRAND_GRADIENT[idx]
+        val b = BRAND_GRADIENT[idx + 1]
+        val ar = (a shr 16) and 0xFF
+        val ag = (a shr 8) and 0xFF
+        val ab = a and 0xFF
+        val br = (b shr 16) and 0xFF
+        val bg = (b shr 8) and 0xFF
+        val bb = b and 0xFF
+        val r = (ar + (br - ar) * f).toInt()
+        val g = (ag + (bg - ag) * f).toInt()
+        val bl = (ab + (bb - ab) * f).toInt()
+        return (r shl 16) or (g shl 8) or bl
+    }
     private const val TELEMETRY_POLL_INTERVAL_TICKS: Int = 10
 
     val log: Logger = LoggerFactory.getLogger(MOD_ID)
@@ -390,8 +407,7 @@ object VulkanShaders : ClientModInitializer {
             ShaderPackManager.activePack == null -> ": No shader pack active."
             else -> ": Pack '$packName' loaded (${config.renderTier.name})."
         }
-        val msg = buildGradientBrandComponent()
-            .append(Component.literal(body).withStyle(Style.EMPTY.withColor(ChatFormatting.WHITE).withBold(false)))
+        val msg = buildGradientMessage(body)
         mc.gui.hud.getChat().addClientSystemMessage(msg)
     }
 
@@ -488,16 +504,20 @@ object VulkanShaders : ClientModInitializer {
         val last = (BRAND_NAME.length - 1).coerceAtLeast(1)
         for (i in BRAND_NAME.indices) {
             val t = i.toFloat() / last.toFloat()
-            val r = (GRADIENT_START_R + (GRADIENT_END_R - GRADIENT_START_R) * t).toInt()
-            val g = (GRADIENT_START_G + (GRADIENT_END_G - GRADIENT_START_G) * t).toInt()
-            val b = (GRADIENT_START_B + (GRADIENT_END_B - GRADIENT_START_B) * t).toInt()
-            val rgb = (r shl 16) or (g shl 8) or b
             root.append(
                 Component.literal(BRAND_NAME.substring(i, i + 1)).withStyle(
-                    Style.EMPTY.withColor(TextColor.fromRgb(rgb)).withBold(true),
+                    Style.EMPTY.withColor(TextColor.fromRgb(gradientRgb(t))).withBold(true),
                 ),
             )
         }
         return root
     }
+
+    /** Full chat line: banner-gradient brand plus body tinted with a color from the same banner. */
+    internal fun buildGradientMessage(body: String): MutableComponent =
+        buildGradientBrandComponent()
+            .append(Component.literal(body).withStyle(Style.EMPTY.withColor(TextColor.fromRgb(BRAND_BODY_COLOR)).withBold(false)))
+
+    internal fun buildGradientMessage(body: Component): MutableComponent =
+        buildGradientMessage(": ${body.string}")
 }
