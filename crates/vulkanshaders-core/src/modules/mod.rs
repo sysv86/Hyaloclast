@@ -32,7 +32,7 @@ type PendingDescriptorWrite<'a> = (
 );
 type ShadowLayerGroup = (bool, u32, u64, u64, [i32; 3], u32, u32);
 
-/// Exact 544-byte `std140` uniform buffer matching `WorldStateCollector.kt` and `common.vsl`:
+/// Exact 560-byte `std140` uniform buffer matching `WorldStateCollector.kt` and `common.vsl`:
 /// - `0..63`:   `cur_view_proj` (`mat4`)
 /// - `64..127`: `prev_view_proj` (`mat4`)
 /// - `128..191`: `inv_proj` (`mat4`)
@@ -46,9 +46,11 @@ type ShadowLayerGroup = (bool, u32, u64, u64, [i32; 3], u32, u32);
 /// - `528..535`: `pack_params_bda` (`u64` address of the VSL live pack-parameter buffer)
 /// - `536..539`: `wind_phase` (`f32`, CPU-integrated `sum(dt * windSpeed)` from the game clock)
 /// - `540..543`: alignment padding (the `std140` block is rounded to a 16-byte multiple)
+/// - `544..559`: `lightning_strike_pos_time` (`vec4`; xyz = world impact pos, w = strike
+///   `game_time_sec`, or -1 when no strike is active)
 ///
 /// The first 528 bytes are byte-for-byte the v1 WorldUBO ABI; v1 shaders may keep declaring the
-/// original 528-byte block. Only the producer (`WorldStateCollector.kt`) must supply 544 bytes.
+/// original 528-byte block. Only the producer (`WorldStateCollector.kt`) must supply 560 bytes.
 #[repr(C, align(16))]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct WorldUboData {
@@ -74,22 +76,35 @@ pub struct WorldUboData {
     /// phase discontinuity (unlike `gameTimeSec * windSpeed`).
     pub wind_phase: f32,
     pub pack_params_bda_pad: [u8; 4],
+    /// Latest lightning strike telemetry written by `WorldStateCollector.kt`.
+    /// xyz = world impact position, w = strike `game_time_sec` (-1 when none).
+    pub lightning_strike_pos_time: [f32; 4],
 }
 
-const _: () = assert!(std::mem::size_of::<WorldUboData>() == 544);
+const _: () = assert!(std::mem::size_of::<WorldUboData>() == 560);
 const _: () = assert!(std::mem::offset_of!(WorldUboData, pack_params) == 320);
 const _: () = assert!(std::mem::offset_of!(WorldUboData, held_light_position) == 512);
 const _: () = assert!(std::mem::offset_of!(WorldUboData, pack_params_bda) == 528);
 const _: () = assert!(std::mem::offset_of!(WorldUboData, wind_phase) == 536);
+const _: () = assert!(std::mem::offset_of!(WorldUboData, lightning_strike_pos_time) == 544);
 
 /// Fixed capacity of the VSL pack-parameter BDA buffer. Reflected offsets are pack-schema
 /// relative and comfortably fit this size; allocating once avoids mid-frame buffer churn.
 pub const VSL_PACK_PARAM_BUFFER_BYTES: usize = 4096;
 /// Byte size of the world UBO bound at set 0 / binding 0 for native and VSL stages alike.
 /// VSL's `WORLD_UBO_LAYOUT` mirrors this block, including `pack_params_bda` at offset 528, so the
-/// bound buffer must cover all 544 bytes. This replaces the retired 16-byte BDA carrier.
+/// bound buffer must cover all 560 bytes. This replaces the retired 16-byte BDA carrier.
 pub const WORLD_UBO_BUFFER_BYTES: usize = std::mem::size_of::<WorldUboData>();
-const _: () = assert!(WORLD_UBO_BUFFER_BYTES >= 544);
+const _: () = assert!(WORLD_UBO_BUFFER_BYTES >= 560);
+
+/// Number of persistent water wake events in the CPU/GPU ring buffer.
+pub const WATER_RIPPLE_COUNT: usize = 64;
+/// Byte size of one `VsWaterRippleEvent` (`vec4 posTime; vec4 velRadius;`).
+pub const WATER_RIPPLE_EVENT_BYTES: usize = 32;
+/// Byte size of the std430 `WaterInteractionSSBO`: a 16-byte `uvec4` header followed by
+/// `WATER_RIPPLE_COUNT` events. Always 16-byte aligned for std430 storage-buffer binding.
+pub const WATER_INTERACTION_SSBO_BYTES: usize = 16 + WATER_RIPPLE_COUNT * WATER_RIPPLE_EVENT_BYTES;
+const _: () = assert!(WATER_INTERACTION_SSBO_BYTES % 16 == 0);
 
 impl Default for WorldUboData {
     fn default() -> Self {
@@ -483,6 +498,9 @@ pub struct RayTracingPipelineBundle {
 #[derive(Default)]
 pub struct GpuPipelineManager {
     pub world_ubo_ring: [Option<GpuBufferAllocation>; 3],
+    /// Triple-buffered host-visible std430 SSBO with the 64 latest water wake events, bound at
+    /// set 1 / binding 5 for pipelines whose reflection declares the water interaction block.
+    pub water_ripple_ring: [Option<GpuBufferAllocation>; 3],
     /// Valid zeroed SHaRC UBOs for raster passes that still declare set 1 / binding 2.
     pub sharc_fallback_ubo_ring: [Option<GpuBufferAllocation>; 3],
     pub descriptor_pool: vk::DescriptorPool,
@@ -817,6 +835,67 @@ impl GpuPipelineManager {
             .as_ref()
             .map(|b| b.buffer)
             .unwrap_or(vk::Buffer::null())
+    }
+
+    /// Uploads the CPU water wake ring into the std430 SSBO bound at set 1 / binding 5.
+    /// Only pipelines that actually declare that binding receive the descriptor write, so packs
+    /// without a water interaction hook keep their original set 1 layouts untouched.
+    pub fn upload_water_ripples(
+        &mut self,
+        ctx: &VulkanContext,
+        frame_slot: usize,
+        bytes: &[u8],
+    ) -> Result<(), vk::Result> {
+        let slot = frame_slot % 3;
+        if self.water_ripple_ring[slot].is_none() {
+            self.water_ripple_ring[slot] = Some(GpuBufferAllocation::allocate_host_visible_bda(
+                ctx,
+                WATER_INTERACTION_SSBO_BYTES as vk::DeviceSize,
+                vk::BufferUsageFlags::STORAGE_BUFFER,
+            )?);
+        }
+        let buf = self.water_ripple_ring[slot].as_mut().unwrap();
+        let len = bytes.len().min(WATER_INTERACTION_SSBO_BYTES);
+        buf.write_bytes(0, &bytes[..len]);
+        let buffer = buf.buffer;
+
+        let info = [vk::DescriptorBufferInfo {
+            buffer,
+            offset: 0,
+            range: vk::WHOLE_SIZE,
+        }];
+        unsafe {
+            let mut writes = Vec::new();
+            for bundle in self.compute_pipelines.values() {
+                if bundle.descriptor_sets_set1[slot] != vk::DescriptorSet::null()
+                    && bundle.reflection.bindings.iter().any(|b| b.set == 1 && b.binding == 5)
+                {
+                    writes.push(
+                        vk::WriteDescriptorSet::default()
+                            .dst_set(bundle.descriptor_sets_set1[slot])
+                            .dst_binding(5)
+                            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                            .buffer_info(&info),
+                    );
+                }
+            }
+            if let Some(rt) = &self.rt_pipeline
+                && rt.descriptor_sets_set1[slot] != vk::DescriptorSet::null()
+                && rt.reflection.bindings.iter().any(|b| b.set == 1 && b.binding == 5)
+            {
+                writes.push(
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(rt.descriptor_sets_set1[slot])
+                        .dst_binding(5)
+                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                        .buffer_info(&info),
+                );
+            }
+            if !writes.is_empty() {
+                ctx.device.update_descriptor_sets(&writes, &[]);
+            }
+        }
+        Ok(())
     }
 
     /// Updates compile-time `VkSpecializationInfo` overrides (`(constant_id, raw_u32_bits)`) and
@@ -4796,6 +4875,7 @@ impl GpuPipelineManager {
         self.retire_active_pipelines(ctx, retire_queue);
         let dev = ctx.device.clone();
         let ring = std::mem::take(&mut self.world_ubo_ring);
+        let water_ring = std::mem::take(&mut self.water_ripple_ring);
         let sharc_fb_ring = std::mem::take(&mut self.sharc_fallback_ubo_ring);
         let csm_ubo_slots = std::mem::take(&mut self.csm_ubo_slots);
         let csm_ind_slots = std::mem::take(&mut self.csm_indirect_slots);
@@ -4849,6 +4929,9 @@ impl GpuPipelineManager {
 
         retire_queue.retire_later(move || unsafe {
             for mut b in ring.into_iter().flatten() {
+                b.destroy(&dev);
+            }
+            for mut b in water_ring.into_iter().flatten() {
                 b.destroy(&dev);
             }
             if let Some(mut b) = csm_quad_ibo {
@@ -5323,16 +5406,18 @@ mod world_ubo_layout_tests {
 
     #[test]
     fn world_ubo_keeps_v1_offsets_and_appends_pack_params_bda() {
-        assert_eq!(std::mem::size_of::<WorldUboData>(), 544);
+        assert_eq!(std::mem::size_of::<WorldUboData>(), 560);
         assert_eq!(std::mem::offset_of!(WorldUboData, cur_view_proj), 0);
         assert_eq!(std::mem::offset_of!(WorldUboData, pack_params), 320);
         assert_eq!(std::mem::offset_of!(WorldUboData, held_light_position), 512);
         assert_eq!(std::mem::offset_of!(WorldUboData, pack_params_bda), 528);
         assert_eq!(std::mem::offset_of!(WorldUboData, wind_phase), 536);
         assert_eq!(std::mem::offset_of!(WorldUboData, pack_params_bda_pad), 540);
+        assert_eq!(std::mem::offset_of!(WorldUboData, lightning_strike_pos_time), 544);
         let ubo = WorldUboData::default();
         assert_eq!(ubo.pack_params_bda, 0);
         assert_eq!(ubo.wind_phase, 0.0);
+        assert_eq!(ubo.lightning_strike_pos_time, [0.0; 4]);
     }
 
     #[test]
@@ -5341,12 +5426,20 @@ mod world_ubo_layout_tests {
     }
 
     #[test]
-    fn vsl_world_binding_uses_full_544_byte_world_ubo() {
+    fn vsl_world_binding_uses_full_560_byte_world_ubo() {
         // VSL stages bind the world UBO at set 0 / binding 0, the same buffer native stages use.
         // The separate 16-byte BDA carrier was retired: the pack-parameter address now lives at
         // offset 528 of this buffer, so the bound allocation must cover the full WORLD_UBO_LAYOUT.
-        assert!(WORLD_UBO_BUFFER_BYTES >= 544);
+        assert!(WORLD_UBO_BUFFER_BYTES >= 560);
         assert_eq!(WORLD_UBO_BUFFER_BYTES, std::mem::size_of::<WorldUboData>());
         assert!(WORLD_UBO_BUFFER_BYTES > std::mem::offset_of!(WorldUboData, pack_params_bda) + 8);
+    }
+
+    #[test]
+    fn water_interaction_ssbo_is_bounded_and_16_byte_aligned() {
+        assert_eq!(WATER_RIPPLE_COUNT, 64);
+        assert_eq!(WATER_RIPPLE_EVENT_BYTES, 32);
+        assert_eq!(WATER_INTERACTION_SSBO_BYTES, 2064);
+        assert_eq!(WATER_INTERACTION_SSBO_BYTES % 16, 0);
     }
 }

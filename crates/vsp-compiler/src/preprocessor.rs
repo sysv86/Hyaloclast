@@ -796,6 +796,11 @@ impl VslPreprocessor {
             "#define VS_ACTIVE_RENDER_TIER {0}\n#define VS_LIGHTING_MODE {0}\n#define VS_MODE_CLASSIC 0\n#define VS_MODE_COMPUTE 1\n#define VS_MODE_HYBRID 2\n#define VS_MODE_PATH 3\n",
             tier.as_u32()
         ));
+        // Keep the engine telemetry capability macros consistent across all shader stages.
+        out.push_str("#define VS_HAS_LIGHTNING_STRIKE_UBO 1\n");
+        out.push_str("#define VS_HAS_WATER_INTERACTION_BUFFER 1\n");
+        out.push_str("#define VS_HAS_WATER_SKY_EXPOSURE 1\n");
+        out.push_str("#ifndef VS_WATER_SKY_LIGHT_DECLARED\n#define VS_WATER_SKY_LIGHT_DECLARED 1\nfloat vsWaterSkyLight;\n#endif\n");
 
         let has_motion_ubo = Self::contains_identifier(expanded_source, "vsMotion")
             || Self::contains_identifier(expanded_source, "VsMotion");
@@ -1968,6 +1973,16 @@ impl VslPreprocessor {
             "#define VS_ACTIVE_RENDER_TIER {0}\n#define VS_LIGHTING_MODE {0}\n#define VS_MODE_CLASSIC 0\n#define VS_MODE_COMPUTE 1\n#define VS_MODE_HYBRID 2\n#define VS_MODE_PATH 3\n",
             tier.as_u32()
         ));
+        // Engine telemetry available to all compute / ray-tracing stages: exact lightning
+        // coordinates in WorldUBO, the persistent water interaction SSBO, and the stage-local
+        // sky-exposure value written immediately before the water_surface hook dispatch.
+        out.push_str("#define VS_HAS_LIGHTNING_STRIKE_UBO 1\n");
+        out.push_str("#define VS_HAS_WATER_INTERACTION_BUFFER 1\n");
+        out.push_str("#define VS_HAS_WATER_SKY_EXPOSURE 1\n");
+        // Hook bodies are linked as separate functions, so the water_surface hook cannot see a
+        // local declared in main(). The shader call sites assign this stage-scope value before
+        // dispatching the hook; declare it here so the guarded hook branch compiles.
+        out.push_str("#ifndef VS_WATER_SKY_LIGHT_DECLARED\n#define VS_WATER_SKY_LIGHT_DECLARED 1\nfloat vsWaterSkyLight;\n#endif\n");
 
         let has_world_ubo = expanded_source.contains("vsWorld");
         if has_world_ubo || expanded_source.contains("VS_PARAM_") {
@@ -2279,7 +2294,7 @@ impl VslPreprocessor {
     }
 
     /// Built-in standard headers `<vulkanshaders/v1/common.vsl>`, `<vulkanshaders/v1/lighting.vsl>`,
-    /// and `<vulkanshaders/v1/restir.vsl>` matching the exact 528-byte `std140` `WorldUBO` layout.
+    /// and `<vulkanshaders/v1/restir.vsl>` matching the exact 560-byte `std140` `WorldUBO` layout.
     pub fn builtin_header(path: &str) -> Option<&'static str> {
         match path {
             "vulkanshaders/v1/common.vsl" => Some(BUILTIN_COMMON_VSL),
@@ -2336,7 +2351,7 @@ struct VsPostContext {
     uint toneMapMode;
 };
 
-// Exact 528-byte std140 layout matching WorldStateCollector.kt and vulkanshaders-core WorldUboData:
+// Exact 560-byte std140 layout matching WorldStateCollector.kt and vulkanshaders-core WorldUboData:
 //   0..63   : curViewProj (mat4)
 //  64..127  : prevViewProj (mat4)
 // 128..191  : invProj (mat4)
@@ -2347,6 +2362,9 @@ struct VsPostContext {
 // 304..319  : thunder (float) + eyeInFluid (int) + depthFar (float) + heldLight (float)
 // 320..511  : packParams[12] (vec4[12] = 48 floats)
 // 512..527  : heldLightPosition (vec4)
+// 528..535  : packParamsBda (uvec2 little-endian view of the 64-bit VSL parameter BDA)
+// 536..543  : windPhase (float) + padding
+// 544..559  : lightningStrikePosTime (vec4: xyz impact pos, w strike gameTimeSec or -1)
 layout(std140, set = 0, binding = 0) uniform WorldUBO {
     mat4 curViewProj;
     mat4 prevViewProj;
@@ -2364,6 +2382,10 @@ layout(std140, set = 0, binding = 0) uniform WorldUBO {
     float heldLight;
     vec4 packParams[12];
     vec4 heldLightPosition;
+    uvec2 packParamsBda;
+    float windPhase;
+    uint windPhasePad;
+    vec4 lightningStrikePosTime;
 } vsWorld;
 
 #endif

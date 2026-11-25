@@ -53,8 +53,10 @@ import kotlin.math.sin
  */
 object WorldStateCollector {
     // 528-byte v1 WorldUBO payload + 8-byte VSL packParams BDA (528..535) + 4-byte integrated
-    // wind phase (536..539) + 4-byte std140 padding (540..543).
-    const val WORLD_UBO_BYTES: Int = 544
+    // wind phase (536..539) + 4-byte std140 padding (540..543) + 16-byte lightning strike
+    // vec4 (544..559).
+    const val WORLD_UBO_BYTES: Int = 560
+    private const val LIGHTNING_STRIKE_OFFSET_BYTES: Int = 544
     private const val WIND_PHASE_OFFSET_BYTES: Int = 536
     private const val WIND_TICK_SECONDS: Double = 0.05
     private const val MAX_WIND_FRAME_TICKS: Double = 5.0
@@ -85,9 +87,29 @@ object WorldStateCollector {
     private const val MAX_BLOCK_LIGHTS: Int = MAX_EMISSIVE_LIGHTS - 2 // Reserve slots for dual-wield held lights
     private const val MAX_CACHED_SECTIONS: Int = 4096
     const val EMISSIVE_LIGHT_DESC_BYTES: Int = 48
-    private val uboBuffer: ByteBuffer = MemoryUtil.memCalloc(WORLD_UBO_BYTES)
+
+    // Persistent water interaction ring: std430 uvec4 header (x = activeCount) followed by 64
+    // VsWaterRippleEvent entries (vec4 posTime, vec4 velRadius). Appended to the UBO host buffer
+    // so the existing updateWorldUbo FFI can carry both payloads without a new native bridge.
+    private const val WATER_RIPPLE_COUNT: Int = 64
+    private const val WATER_RIPPLE_EVENT_BYTES: Int = 32
+    private const val WATER_RIPPLE_SSBO_BYTES: Int = 16 + WATER_RIPPLE_COUNT * WATER_RIPPLE_EVENT_BYTES
+    private const val WATER_WAKE_SPEED_SQ: Double = 1e-4
+    private val waterRippleData = FloatArray(WATER_RIPPLE_COUNT * 8)
+    private var waterRippleHead: Int = 0
+    private var waterRippleCount: Int = 0
+    private val waterEntryState = java.util.WeakHashMap<Entity, Boolean>()
+
+    private val uboBuffer: ByteBuffer = MemoryUtil.memCalloc(WORLD_UBO_BYTES + WATER_RIPPLE_SSBO_BYTES)
     private val emissiveLightBuffer: ByteBuffer = MemoryUtil.memCalloc(MAX_EMISSIVE_LIGHTS * EMISSIVE_LIGHT_DESC_BYTES)
     private val blockLightProfileCache = IdentityHashMap<Block, BlockLightProfile>(128)
+
+    // Latest observed lightning strike; held for LIGHTNING_HOLD_SECONDS then reported as expired.
+    private var lightningPosX: Float = 0.0f
+    private var lightningPosY: Float = 0.0f
+    private var lightningPosZ: Float = 0.0f
+    private var lightningTimeSec: Float = -1.0f
+    private const val LIGHTNING_HOLD_SECONDS: Float = 4.0f
 
     private class SectionLightCache(
         val sectionRef: WeakReference<LevelChunkSection>,
@@ -559,7 +581,7 @@ object WorldStateCollector {
             heldLightKind = primaryLightKind,
             windPhase = windPhase.toFloat(),
         )
-        NativeCoreBridge.updateWorldUbo(uniformBufferAddress(), WORLD_UBO_BYTES)
+        NativeCoreBridge.updateWorldUbo(uniformBufferAddress(), uboBuffer.capacity())
         collectAndSubmitEmissiveLights(
             level = level,
             localPlayer = player,
@@ -1061,10 +1083,57 @@ object WorldStateCollector {
         uboBuffer.putFloat(524, heldLightKind.coerceIn(0, 9).toFloat())
 
         // 528..535: VSL pack-parameter BDA. Native core overwrites this with the live
-        // device address each frame; the placeholder keeps the 544-byte upload deterministic.
+        // device address each frame; the placeholder keeps the 560-byte upload deterministic.
         uboBuffer.putLong(528, 0L)
         // 536..539: integrated wind phase (radians). 540..543 stay std140 padding.
         uboBuffer.putFloat(WIND_PHASE_OFFSET_BYTES, windPhase)
+
+        // 544..559: latest lightning strike. w = -1 when no strike or when the 4 s hold expired.
+        val strikeAge = gameTimeSec - lightningTimeSec
+        val activeStrikeTime = if (lightningTimeSec >= 0.0f && strikeAge >= 0.0f && strikeAge <= LIGHTNING_HOLD_SECONDS) {
+            lightningTimeSec
+        } else {
+            -1.0f
+        }
+        uboBuffer.putFloat(LIGHTNING_STRIKE_OFFSET_BYTES, lightningPosX)
+        uboBuffer.putFloat(LIGHTNING_STRIKE_OFFSET_BYTES + 4, lightningPosY)
+        uboBuffer.putFloat(LIGHTNING_STRIKE_OFFSET_BYTES + 8, lightningPosZ)
+        uboBuffer.putFloat(LIGHTNING_STRIKE_OFFSET_BYTES + 12, activeStrikeTime)
+
+        // Appended std430 payload: header.x = activeCount, then events oldest -> newest.
+        uboBuffer.putInt(WORLD_UBO_BYTES, waterRippleCount)
+        val oldest = (waterRippleHead - waterRippleCount + WATER_RIPPLE_COUNT) % WATER_RIPPLE_COUNT
+        for (i in 0 until waterRippleCount) {
+            val src = ((oldest + i) % WATER_RIPPLE_COUNT) * 8
+            val dst = WORLD_UBO_BYTES + 16 + i * WATER_RIPPLE_EVENT_BYTES
+            for (j in 0 until 8) {
+                uboBuffer.putFloat(dst + j * 4, waterRippleData[src + j])
+            }
+        }
+    }
+
+    /** Appends one water wake event to the bounded 64-entry CPU ring buffer. */
+    private fun pushWaterRipple(
+        x: Float,
+        y: Float,
+        z: Float,
+        time: Float,
+        vx: Float,
+        vz: Float,
+        strength: Float,
+        maxRadius: Float,
+    ) {
+        val base = waterRippleHead * 8
+        waterRippleData[base] = x
+        waterRippleData[base + 1] = y
+        waterRippleData[base + 2] = z
+        waterRippleData[base + 3] = time
+        waterRippleData[base + 4] = vx
+        waterRippleData[base + 5] = strength
+        waterRippleData[base + 6] = vz
+        waterRippleData[base + 7] = maxRadius
+        waterRippleHead = (waterRippleHead + 1) % WATER_RIPPLE_COUNT
+        if (waterRippleCount < WATER_RIPPLE_COUNT) waterRippleCount++
     }
 
     internal fun updateMatrices(
@@ -1547,8 +1616,44 @@ object WorldStateCollector {
         if (startIndex >= maxIndex) return startIndex
         val maxDistSq = (LIGHT_SCAN_RADIUS + 8.0) * (LIGHT_SCAN_RADIUS + 8.0)
         var idx = startIndex
+        val gameTimeSec = ((level.gameTime % 72000L).toFloat() + partialTick) / 20.0f
 
         for (entity in level.entitiesForRendering()) {
+            // Water wake telemetry is independent of the emissive light budget. A moving entity
+            // emits a persistent wake; entering the water emits a stronger one-shot splash burst.
+            val inWater = entity.isInWater
+            val wasInWater = waterEntryState.put(entity, inWater) == true
+            if (inWater) {
+                val motion = entity.deltaMovement
+                val speedSq = motion.horizontalDistanceSqr()
+                if (speedSq > WATER_WAKE_SPEED_SQ) {
+                    val pos = entity.getPosition(partialTick)
+                    pushWaterRipple(
+                        x = pos.x.toFloat(),
+                        y = pos.y.toFloat(),
+                        z = pos.z.toFloat(),
+                        time = gameTimeSec,
+                        vx = (motion.x * 20.0).toFloat(),
+                        vz = (motion.z * 20.0).toFloat(),
+                        strength = 0.85f,
+                        maxRadius = 3.0f,
+                    )
+                }
+                if (!wasInWater) {
+                    val pos = entity.getPosition(partialTick)
+                    pushWaterRipple(
+                        x = pos.x.toFloat(),
+                        y = pos.y.toFloat(),
+                        z = pos.z.toFloat(),
+                        time = gameTimeSec,
+                        vx = 0.0f,
+                        vz = 0.0f,
+                        strength = 2.0f,
+                        maxRadius = 5.5f,
+                    )
+                }
+            }
+
             if (idx >= maxIndex) break
 
             val type = entity.type
@@ -1715,7 +1820,14 @@ object WorldStateCollector {
                     EntityTypes.DRAGON_FIREBALL -> packLinearLight(idx++, wx, midY, wz, 13.0f, COLOR_ENTITY_DRAGON_FIREBALL, 9.0f, THIN_EMITTER_FLAG or FLICKER_FLAG)
                     EntityTypes.TNT -> packLinearLight(idx++, wx, midY, wz, 10.0f, COLOR_ENTITY_TNT, 6.5f, THIN_EMITTER_FLAG or FLICKER_FLAG)
                     EntityTypes.END_CRYSTAL -> packLinearLight(idx++, wx, (pos.y + 1.0).toFloat(), wz, 14.0f, COLOR_ENTITY_END_CRYSTAL, 9.5f, THIN_EMITTER_FLAG or FLICKER_FLAG)
-                    EntityTypes.LIGHTNING_BOLT -> packLinearLight(idx++, wx, (pos.y + 4.0).toFloat(), wz, 28.0f, COLOR_ENTITY_LIGHTNING, 22.0f, THIN_EMITTER_FLAG)
+                    EntityTypes.LIGHTNING_BOLT -> {
+                        // Exact impact telemetry for water_surface.vsl's shockwave branch.
+                        lightningPosX = wx
+                        lightningPosY = pos.y.toFloat()
+                        lightningPosZ = wz
+                        lightningTimeSec = gameTimeSec
+                        packLinearLight(idx++, wx, (pos.y + 4.0).toFloat(), wz, 28.0f, COLOR_ENTITY_LIGHTNING, 22.0f, THIN_EMITTER_FLAG)
+                    }
                     EntityTypes.EXPERIENCE_ORB -> packLinearLight(idx++, wx, midY, wz, 5.5f, COLOR_ENTITY_EXPERIENCE_ORB, 3.2f, THIN_EMITTER_FLAG)
                 }
             }

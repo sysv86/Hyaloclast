@@ -1,5 +1,19 @@
 #include <vulkanshaders/v1/common.vsl>
 
+// Engine-provided multi-entity water interaction ring buffer (mobs, boats, items, player trail).
+// The hook linker emits this declaration verbatim: the struct name is Vs-prefixed and the
+// layout-qualified buffer line is ignored by its top-level symbol collector.
+#ifdef VS_HAS_WATER_INTERACTION_BUFFER
+struct VsWaterRippleEvent {
+    vec4 posTime;
+    vec4 velRadius;
+};
+layout(set = 1, binding = 5, std430) buffer WaterInteractionSSBO {
+    uvec4 header;
+    VsWaterRippleEvent events[64];
+} uWaterRipples;
+#endif
+
 float sv_waterHash21(vec2 p) {
     p = mod(p, 256.0);
     p = fract(p * vec2(123.34, 456.21));
@@ -181,10 +195,57 @@ vec3 sv_waterPlayerInteraction(
         }
     }
 
-    // PLACEHOLDER HOOK: Persistent multi-entity / mob / boat / item water wake ring buffer.
-    // Not yet populated by WorldStateCollector.kt; see PLACEHOLDERS_HANDOFF.md (#1).
+    // Multi-entity / mob / boat / item water wake ring buffer supplied by the engine.
+    // Each event is a decaying expanding ring plus a short velocity-aligned wake; amplitude is
+    // clamped and faded by camera distance so the accumulated contribution stays bounded.
 #ifdef VS_HAS_WATER_INTERACTION_BUFFER
-    // Future engine binding will iterate uWaterRipples.events[] for mobs, boats, items, and multi-frame player trail.
+    uint rippleCount = min(uWaterRipples.header.x, 64u);
+    for (uint i = 0u; i < rippleCount; ++i) {
+        VsWaterRippleEvent ripple = uWaterRipples.events[i];
+        vec3 ripplePos = ripple.posTime.xyz;
+        float rippleAge = clamp(vsWorld.gameTimeSec - ripple.posTime.w, 0.0, 4.0);
+        vec2 rippleDelta = worldPos.xz - ripplePos.xz;
+        float rippleR = length(rippleDelta);
+        float rippleCamDist = length(ripplePos.xz - camPos.xz);
+        if (rippleAge >= 4.0 || rippleCamDist > 24.0 || rippleR > 12.0) {
+            continue;
+        }
+
+        float rippleStrength = clamp(ripple.velRadius.w, 0.0, 1.5);
+        vec2 rippleVelXZ = ripple.velRadius.xz;
+        float rippleVelMag = length(rippleVelXZ);
+        float ringRadius = rippleStrength * 0.35 + rippleAge * (1.1 + 0.30 * min(rippleVelMag, 4.0));
+        float ring = rippleR - ringRadius;
+        float rippleDy = worldPos.y - ripplePos.y;
+        float rippleHeightFade = exp(-rippleDy * rippleDy * 0.55);
+        float rippleCamFade = 1.0 - smoothstep(12.0, 24.0, rippleCamDist);
+        float rippleLife = (1.0 - 0.25 * rippleAge) * exp(-rippleAge * 1.6);
+        float ringEnv = exp(-ring * ring * 3.2) * rippleLife * inversesqrt(rippleR + 0.5)
+                      * rippleHeightFade * rippleCamFade * filterAtten;
+        float rippleAmp = clamp(rippleStrength * ringEnv, 0.0, 1.0);
+
+        vec2 rippleDir = (rippleR > 1e-4) ? (rippleDelta / rippleR) : vec2(0.0);
+        slope += rippleDir * (sin(ring * 7.0) * rippleAmp * 0.30);
+        foam += ringEnv * (0.45 + 0.55 * max(sin(ring * 7.0), 0.0)) * 0.16;
+
+        if (rippleVelMag > 0.15) {
+            vec2 rippleFwd = rippleVelXZ / max(rippleVelMag, 1e-4);
+            vec2 rippleRight = sv_waterRot2(rippleFwd, 0.0, 1.0);
+            float behind = -dot(rippleDelta, rippleFwd);
+            if (behind > 0.10 && behind < 5.0) {
+                float lateral = abs(dot(rippleDelta, rippleRight));
+                float armDist = abs(lateral - behind * 0.34 - 0.18);
+                float wakeEnv = exp(-armDist * armDist * 9.5) * exp(-behind * 0.45)
+                              * smoothstep(0.10, 0.45, behind) * (1.0 - 0.25 * rippleAge)
+                              * rippleStrength * rippleHeightFade * rippleCamFade * filterAtten;
+                float wakePhase = armDist * 15.0 + behind * 4.5 - mod(vsWorld.gameTimeSec * 7.0, TAU);
+                vec2 wakeDir = normalize(rippleRight * sign(dot(rippleDelta, rippleRight) + 1e-5)
+                                         - rippleFwd * 0.34);
+                slope += wakeDir * (cos(wakePhase) * clamp(wakeEnv, 0.0, 1.0) * 0.20);
+                foam += clamp(wakeEnv, 0.0, 1.0) * 0.12;
+            }
+        }
+    }
 #endif
 
     float scale = vertProx * filterAtten;
@@ -207,13 +268,12 @@ vec3 sv_waterLightningShockwave(
     vec2 slope = vec2(0.0);
     float electroFlash = 0.0;
 
-    // PLACEHOLDER HOOK: Exact real-time EntityTypes.LIGHTNING_BOLT strike impact position & timestamp.
-    // WorldStateCollector.kt currently packs bolts into uEmissiveLights (not bound in water_surface.vsl).
-    // See PLACEHOLDERS_HANDOFF.md (#2) for the exact 16-byte WorldUBO / SSBO contract.
+    // Exact real-time EntityTypes.LIGHTNING_BOLT strike impact position & timestamp.
+    // A negative timestamp means no active strike and produces no shockwave or flash.
 #ifdef VS_HAS_LIGHTNING_STRIKE_UBO
     vec2 exactDelta = worldXZ - vsWorld.lightningStrikePosTime.xz;
     float exactAge = timeSec - vsWorld.lightningStrikePosTime.w;
-    if (exactAge >= 0.0 && exactAge < 3.5) {
+    if (vsWorld.lightningStrikePosTime.w >= 0.0 && exactAge >= 0.0 && exactAge < 3.5) {
         float exactR = length(exactDelta);
         float shockR = 0.4 + exactAge * 6.5;
         float ring = exactR - shockR;

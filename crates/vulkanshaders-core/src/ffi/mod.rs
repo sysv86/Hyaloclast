@@ -21,7 +21,8 @@ use crate::{
     install_engine,
     modules::{
         AsyncPipelinePrewarmer, DepthReprojectPushConstants, GpuPipelineManager,
-        PersistentPipelineDiskCache, PipelineCacheKeyInput, WorldUboData,
+        PersistentPipelineDiskCache, PipelineCacheKeyInput, WATER_INTERACTION_SSBO_BYTES,
+        WORLD_UBO_BUFFER_BYTES, WorldUboData,
     },
     rt::{
         ZeroCopyBlasManager,
@@ -931,6 +932,28 @@ pub unsafe extern "C" fn vs_core_update_world_ubo(ubo_address: u64, byte_size: i
             eprintln!("[vulkanshaders-core] ERROR {msg}");
             crate::crash::push_native_error("ERROR", "ffi::world_ubo", &msg);
             crate::crash::global_device_lost_guard().record_vk_result("ffi::upload_world_ubo", err);
+        }
+        // WorldStateCollector appends the std430 water interaction payload directly after the
+        // WorldUBO in the same host buffer so no extra FFI entry point is needed. Older callers
+        // that upload only the UBO keep working: the SSBO is simply left untouched.
+        let ripple_total = WORLD_UBO_BUFFER_BYTES + WATER_INTERACTION_SSBO_BYTES;
+        if byte_size as usize >= ripple_total {
+            let ripple_bytes = unsafe {
+                slice::from_raw_parts(
+                    (ubo_address + WORLD_UBO_BUFFER_BYTES as u64) as *const u8,
+                    WATER_INTERACTION_SSBO_BYTES,
+                )
+            };
+            if let Err(err) = pnc
+                .pipelines
+                .upload_water_ripples(&ctx, slot, ripple_bytes)
+            {
+                let msg = format!("upload_water_ripples(slot={slot}) failed: {err:?}");
+                eprintln!("[vulkanshaders-core] ERROR {msg}");
+                crate::crash::push_native_error("ERROR", "ffi::water_ripples", &msg);
+                crate::crash::global_device_lost_guard()
+                    .record_vk_result("ffi::upload_water_ripples", err);
+            }
         }
     }
 }

@@ -130,6 +130,7 @@ void main() {
         vs_dispatch_hook_water_waves(waveStrength, waveSpeed, waveScale);
         vec3 wavePos = hitPosRel + uSharc.cfg.cameraPosition.xyz;
         float waveHeight = sin(wavePos.x * waveScale + vsWorld.gameTimeSec * waveSpeed) * waveStrength;
+        vsWaterSkyLight = skyLight;
         vs_dispatch_hook_water_surface(s, wavePos, waveHeight);
         // Horizontal surfaces only: vertical waterfall faces keep their flat per-face normal.
         if (abs(s.normal.y) > 0.5) {
