@@ -387,7 +387,13 @@ object WorldStateCollector {
         updateMatrices(effectiveView, projection, isDiscontinuousFrame, sampledProjection)
 
         val dimType = level.dimensionType()
+        // Minecraft 26.3 gives the End `has_skylight = true`, so capability checks alone classify it
+        // as the Overworld. Use the dimension identifier first and keep the capability tests as
+        // fallback for custom dimensions.
+        val dimensionName = dimKey.substringAfter(':')
         val dimensionId = when {
+            dimensionName == "the_end" -> 2
+            dimensionName == "the_nether" -> 1
             dimType.hasCeiling() -> 1
             !dimType.hasSkyLight() -> 2
             else -> 0

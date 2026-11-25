@@ -460,10 +460,15 @@ object VulkanShaders : ClientModInitializer {
 
     private fun resolveDimensionId(level: ClientLevel): Int {
         val dimType = level.dimensionType()
-        return when {
-            dimType.hasCeiling() -> 1
-            !dimType.hasSkyLight() -> 2
-            else -> 0
+        // The End has skylight in Minecraft 26.3; identify it by dimension id first.
+        return when (level.dimension().identifier().toString().substringAfter(':')) {
+            "the_end" -> 2
+            "the_nether" -> 1
+            else -> when {
+                dimType.hasCeiling() -> 1
+                !dimType.hasSkyLight() -> 2
+                else -> 0
+            }
         }
     }
 
