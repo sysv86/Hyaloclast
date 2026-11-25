@@ -36,6 +36,66 @@ impl RenderTier {
     pub const fn index(self) -> u32 {
         self as u32
     }
+
+    /// Parses a short mode name (`classic`, `compute`, `hybrid`, `path`) or numeric index (`0`..`3`).
+    pub fn from_mode_name(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "0" | "classic" | "raster" | "tier_0_raster" => Some(Self::Tier0Raster),
+            "1" | "compute" | "compute_gi" | "tier_1_compute_gi" => Some(Self::Tier1ComputeGi),
+            "2" | "hybrid" | "ray_query" | "tier_2_ray_query" => Some(Self::Tier2RayQuery),
+            "3" | "path" | "path_tracing" | "tier_3_path_tracing" => Some(Self::Tier3PathTracing),
+            _ => None,
+        }
+    }
+
+    pub const fn short_name(self) -> &'static str {
+        match self {
+            Self::Tier0Raster => "Classic",
+            Self::Tier1ComputeGi => "Compute",
+            Self::Tier2RayQuery => "Hybrid",
+            Self::Tier3PathTracing => "Path",
+        }
+    }
+}
+
+/// Preferred public alias for the 4 lighting modes (`Classic`, `Compute`, `Hybrid`, `Path`).
+pub type LightingMode = RenderTier;
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ModeOrIndex {
+    Index(u32),
+    Name(String),
+}
+
+impl ModeOrIndex {
+    fn to_index(self) -> Result<u32, String> {
+        match self {
+            Self::Index(i) => Ok(i),
+            Self::Name(s) => RenderTier::from_mode_name(&s)
+                .map(RenderTier::as_u32)
+                .ok_or_else(|| format!("unknown lighting mode '{s}' (expected classic, compute, hybrid, or path)")),
+        }
+    }
+}
+
+fn deserialize_mode_index<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    ModeOrIndex::deserialize(deserializer)?
+        .to_index()
+        .map_err(serde::de::Error::custom)
+}
+
+fn deserialize_mode_list<'de, D>(deserializer: D) -> Result<Vec<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Vec::<ModeOrIndex>::deserialize(deserializer)?;
+    raw.into_iter()
+        .map(|item| item.to_index().map_err(serde::de::Error::custom))
+        .collect()
 }
 
 /// All 16 composable `.vsl` hook stages in the VulkanShaders v2 (`VSP Graph v2`) specification.
@@ -173,7 +233,7 @@ fn default_author() -> String {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackCapabilities {
-    #[serde(default = "default_tiers")]
+    #[serde(default = "default_tiers", alias = "modes", deserialize_with = "deserialize_mode_list")]
     pub tiers: Vec<u32>,
     #[serde(default)]
     pub pbr_labpbr: bool,
@@ -380,9 +440,9 @@ pub struct PackPassDecl {
     pub fragment_shader: Option<String>,
     #[serde(default = "default_dispatch_scale")]
     pub dispatch_scale: [f32; 2],
-    #[serde(default)]
+    #[serde(default, alias = "min_mode", deserialize_with = "deserialize_mode_index")]
     pub min_tier: u32,
-    #[serde(default = "default_max_tier")]
+    #[serde(default = "default_max_tier", alias = "max_mode", deserialize_with = "deserialize_mode_index")]
     pub max_tier: u32,
     #[serde(default)]
     pub before: Option<String>,
@@ -595,9 +655,9 @@ pub struct PackSettingDecl {
     pub options: Vec<String>,
     #[serde(default = "default_true")]
     pub runtime: bool,
-    #[serde(default)]
+    #[serde(default, alias = "min_mode", deserialize_with = "deserialize_mode_index")]
     pub min_tier: u32,
-    #[serde(default = "default_max_tier")]
+    #[serde(default = "default_max_tier", alias = "max_mode", deserialize_with = "deserialize_mode_index")]
     pub max_tier: u32,
 }
 
@@ -608,9 +668,9 @@ pub struct PackPresetDecl {
     pub description: String,
     #[serde(default)]
     pub order: i32,
-    #[serde(default)]
+    #[serde(default, alias = "min_mode", deserialize_with = "deserialize_mode_index")]
     pub min_tier: u32,
-    #[serde(default = "default_max_tier")]
+    #[serde(default = "default_max_tier", alias = "max_mode", deserialize_with = "deserialize_mode_index")]
     pub max_tier: u32,
     #[serde(default)]
     pub values: BTreeMap<String, SettingValue>,

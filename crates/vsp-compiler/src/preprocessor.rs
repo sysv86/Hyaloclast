@@ -793,7 +793,7 @@ impl VslPreprocessor {
         let mut out = String::with_capacity(512);
         out.push_str("// --- VulkanShaders IGNIS auto-synthesized raster pack prelude ---\n");
         out.push_str(&format!(
-            "#define VS_ACTIVE_RENDER_TIER {}\n",
+            "#define VS_ACTIVE_RENDER_TIER {0}\n#define VS_LIGHTING_MODE {0}\n#define VS_MODE_CLASSIC 0\n#define VS_MODE_COMPUTE 1\n#define VS_MODE_HYBRID 2\n#define VS_MODE_PATH 3\n",
             tier.as_u32()
         ));
 
@@ -1965,7 +1965,7 @@ impl VslPreprocessor {
         let mut out = String::with_capacity(512);
         out.push_str("// --- VulkanShaders IGNIS auto-synthesized pack prelude ---\n");
         out.push_str(&format!(
-            "#define VS_ACTIVE_RENDER_TIER {}\n",
+            "#define VS_ACTIVE_RENDER_TIER {0}\n#define VS_LIGHTING_MODE {0}\n#define VS_MODE_CLASSIC 0\n#define VS_MODE_COMPUTE 1\n#define VS_MODE_HYBRID 2\n#define VS_MODE_PATH 3\n",
             tier.as_u32()
         ));
 

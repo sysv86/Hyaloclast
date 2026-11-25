@@ -192,11 +192,11 @@ pub struct GraphConfig {
 
 impl GraphConfig {
     /// Returns true when the full-resolution denoiser (SVGF/NRD/DLSS-RR) should execute.
-    /// Tier 1 Compute GI bypasses full-res SVGF because direct lighting/shadows/sky are clean
-    /// and SSGI performs its own temporal accumulation.
+    /// Enabled for Compute, Hybrid, and Path modes whenever a denoiser is selected; Classic
+    /// raster mode bypasses denoising since its lighting is deterministic.
     #[inline]
     pub fn effective_denoiser_active(&self) -> bool {
-        self.denoiser_mode != 0 && self.tier != RenderTier::Tier1ComputeGi
+        self.denoiser_mode != 0 && self.tier != RenderTier::Tier0Raster
     }
 
     /// Returns true when `PostGradeAndToneMap` can write directly into `RES_HUDLESS_COLOR`

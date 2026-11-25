@@ -40,7 +40,7 @@ pub use manifest::{
     HookStage, PackBufferDecl, PackCapabilities, PackHeader, PackManifest, PackParameterLayout,
     PackPassDecl, PackPassKind, PackPipelineConfig, PackPresetDecl, PackResourceDecl,
     PackSettingDecl, PackTargetDecl, PackValidationIssue, PackValidationReport, PipelineGraphMode,
-    RenderTier, SettingValue, SettingValueType, ValidationSeverity, validate_pack_directory,
+    LightingMode, RenderTier, SettingValue, SettingValueType, ValidationSeverity, validate_pack_directory,
 };
 pub use preprocessor::{
     ExtractedHookBlock, HardwareShaderCaps, HookAnnotation, PreprocessedShaderSource, Preprocessor,

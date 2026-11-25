@@ -295,9 +295,7 @@ impl GpuTierClass {
     ) -> Self {
         if matches!(
             device_type,
-            vk::PhysicalDeviceType::INTEGRATED_GPU
-                | vk::PhysicalDeviceType::CPU
-                | vk::PhysicalDeviceType::VIRTUAL_GPU
+            vk::PhysicalDeviceType::CPU | vk::PhysicalDeviceType::VIRTUAL_GPU
         ) {
             return Self::Low;
         }
@@ -305,6 +303,25 @@ impl GpuTierClass {
         let lower = gpu_name.to_ascii_lowercase();
         let vram_mib = vram_bytes / (1024 * 1024);
         let is_discrete = device_type == vk::PhysicalDeviceType::DISCRETE_GPU;
+
+        if device_type == vk::PhysicalDeviceType::INTEGRATED_GPU {
+            // Modern unified-memory Apple Silicon and high-bandwidth APUs (Radeon 780M/880M/890M,
+            // Intel Arc integrated) can comfortably run Compute mode at High quality.
+            let is_apple_pro_max = lower.contains("apple m")
+                && (lower.contains("max") || lower.contains("ultra") || lower.contains("pro"));
+            if is_apple_pro_max && vram_mib >= 12_288 {
+                return Self::High;
+            }
+            if (lower.contains("apple m") && vram_mib >= 7_168)
+                || lower.contains("780m")
+                || lower.contains("880m")
+                || lower.contains("890m")
+                || (lower.contains("arc") && vram_mib >= 5_632)
+            {
+                return Self::Mid;
+            }
+            return Self::Low;
+        }
 
         // Explicit Enthusiast flagship models
         if lower.contains("rtx 5090")
@@ -352,8 +369,8 @@ impl GpuTierClass {
             return Self::High;
         }
 
-        // Discrete >= 8 GB VRAM
-        if is_discrete && vram_mib >= 7_168 {
+        // Discrete >= 6 GB VRAM (e.g. GTX 1060 6GB, GTX 1660 Super, RX 5600 XT, RTX 2060)
+        if is_discrete && vram_mib >= 5_632 {
             return Self::Mid;
         }
 
