@@ -41,6 +41,9 @@ object RuntimePerformanceGuard {
     fun nextLowerTier(current: RenderTier, supportedTiers: List<Int>): RenderTier? {
         val candidates = RenderTier.entries
             .filter { it.tierIndex < current.tierIndex }
+            // TIER_2 ray-query stalls the GPU on first submission on the affected driver,
+            // so automatic downgrades go straight from TIER_3 to TIER_1.
+            .filter { it != RenderTier.TIER_2_RAY_QUERY }
             .sortedByDescending { it.tierIndex }
         if (candidates.isEmpty()) return null
         if (supportedTiers.isEmpty()) return candidates.first()
