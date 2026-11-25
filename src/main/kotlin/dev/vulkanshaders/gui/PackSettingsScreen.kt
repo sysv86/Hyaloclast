@@ -95,70 +95,23 @@ class PackSettingsScreen(
         if (selectedCategory != null && selectedCategory !in visibleCategories(tierIndex)) {
             selectedCategory = null
         }
-        layout.setHeaderHeight(if (availablePresets(tierIndex).isNotEmpty()) 102 else 78)
+        // Compact 2-row header (56px) keeps the list usable at small window sizes and high GUI scales.
+        layout.setHeaderHeight(56)
         super.init()
     }
 
     override fun addTitle() {
-        presetButton = null
         val tierIndex = activeTier().tierIndex
         val categories = visibleCategories(tierIndex)
-        val presets = availablePresets(tierIndex)
 
-        val header = layout.addToHeader(LinearLayout.vertical().spacing(3))
+        val header = layout.addToHeader(LinearLayout.vertical().spacing(4))
         header.defaultCellSetting().alignHorizontallyCenter()
         header.addChild(StringWidget(title, font))
 
-        if (presets.isNotEmpty()) {
-            val activePreset = detectActivePreset(tierIndex)
-            presetButton = header.addChild(
-                Button.builder(buildPresetButtonLabel(activePreset)) {
-                    val currentPresets = availablePresets()
-                    if (currentPresets.isNotEmpty()) {
-                        val current = detectActivePreset()
-                        val nextIndex = if (current == null) {
-                            0
-                        } else {
-                            val idx = currentPresets.indexOfFirst { it.id == current.id }
-                            if (idx < 0) 0 else (idx + 1) % currentPresets.size
-                        }
-                        applyPreset(currentPresets[nextIndex])
-                    }
-                }.width(310).tooltip(buildPresetTooltip(activePreset)).build(),
-            )
-        }
-
-        val tabsRow = header.addChild(LinearLayout.horizontal().spacing(3))
-        val tabCount = categories.size + 1
-        val tabWidth = ((310 - (tabCount - 1) * 3) / tabCount).coerceIn(42, 76)
-
-        val allSelected = selectedCategory == null
-        val allLabel = Component.translatable("vulkanshaders.screen.pack_settings.tab.all")
-            .let { if (allSelected) it.withStyle(ChatFormatting.YELLOW) else it }
-        tabsRow.addChild(
-            Button.builder(allLabel) {
-                selectedCategory = null
-                statusBanner = null
-                refreshWidgets(resetScroll = true)
-            }.width(tabWidth).build().apply { active = !allSelected },
-        )
-
-        for (category in categories) {
-            val isSelected = selectedCategory == category
-            val label = Component.literal(category)
-                .let { if (isSelected) it.withStyle(ChatFormatting.YELLOW) else it }
-            tabsRow.addChild(
-                Button.builder(label) {
-                    selectedCategory = category
-                    statusBanner = null
-                    refreshWidgets(resetScroll = true)
-                }.width(tabWidth).build().apply { active = !isSelected },
-            )
-        }
-
-        val searchRow = header.addChild(LinearLayout.horizontal().spacing(4))
-        val field = searchRow.addChild(
-            EditBox(font, 206, 20, Component.translatable("vulkanshaders.screen.pack_settings.search")),
+        // Single 310px toolbar: Search (130) + gap (4) + Category cycle (100) + gap (4) + Modified toggle (72).
+        val toolbar = header.addChild(LinearLayout.horizontal().spacing(4))
+        val field = toolbar.addChild(
+            EditBox(font, 130, 20, Component.translatable("vulkanshaders.screen.pack_settings.search")),
         )
         field.setMaxLength(128)
         field.setHint(Component.translatable("vulkanshaders.screen.pack_settings.search"))
@@ -172,23 +125,63 @@ class PackSettingsScreen(
         }
         searchBox = field
 
+        val catName = selectedCategory?.let { Component.literal(it) }
+            ?: Component.translatable("vulkanshaders.screen.pack_settings.tab.all")
+        val catLabel = Component.translatable("vulkanshaders.screen.pack_settings.category_cycle", catName)
+            .let { if (selectedCategory != null) it.withStyle(ChatFormatting.YELLOW) else it }
+        val categoryButton = Button.builder(catLabel) {
+            val allOptions: List<String?> = listOf(null) + categories
+            val idx = allOptions.indexOf(selectedCategory).coerceAtLeast(0)
+            selectedCategory = allOptions[(idx + 1) % allOptions.size]
+            statusBanner = null
+            refreshWidgets(resetScroll = true)
+        }.width(100)
+            .tooltip(Tooltip.create(Component.translatable("vulkanshaders.screen.pack_settings.category_cycle.tooltip")))
+            .build()
+            .apply { active = categories.isNotEmpty() }
+        toolbar.addChild(categoryButton)
+
         val modState = if (modifiedOnly) CommonComponents.OPTION_ON else CommonComponents.OPTION_OFF
-        val modLabel = Component.translatable("vulkanshaders.screen.pack_settings.modified_only", modState)
+        val modLabel = Component.translatable("vulkanshaders.screen.pack_settings.modified_short", modState)
             .let { if (modifiedOnly) it.withStyle(ChatFormatting.YELLOW) else it }
-        searchRow.addChild(
+        toolbar.addChild(
             Button.builder(modLabel) {
                 modifiedOnly = !modifiedOnly
                 statusBanner = null
                 refreshWidgets(resetScroll = true)
-            }.width(100).build(),
+            }.width(72)
+                .tooltip(Tooltip.create(Component.translatable("vulkanshaders.screen.pack_settings.modified_only.tooltip")))
+                .build(),
         )
     }
 
     override fun addOptions() {
         val list = this.list ?: return
         val packId = pack.manifest.id
+        presetButton = null
 
         statusBanner?.let { list.addHeader(it) }
+
+        val tierIndex = activeTier().tierIndex
+        val presets = availablePresets(tierIndex)
+        if (presets.isNotEmpty()) {
+            val activePreset = detectActivePreset(tierIndex)
+            val btn = Button.builder(buildPresetButtonLabel(activePreset)) {
+                val currentPresets = availablePresets()
+                if (currentPresets.isNotEmpty()) {
+                    val current = detectActivePreset()
+                    val nextIndex = if (current == null) {
+                        0
+                    } else {
+                        val idx = currentPresets.indexOfFirst { it.id == current.id }
+                        if (idx < 0) 0 else (idx + 1) % currentPresets.size
+                    }
+                    applyPreset(currentPresets[nextIndex])
+                }
+            }.tooltip(buildPresetTooltip(activePreset)).build()
+            presetButton = btn
+            list.addBig(btn)
+        }
 
         val query = searchQuery.trim()
         val filtered = visibleSettings().filter { setting ->
@@ -252,9 +245,12 @@ class PackSettingsScreen(
                     statusBanner = null
                     setOverride(packId, setting, (!enabled).toString())
                     refreshWidgets()
-                }.width(150).tooltip(tooltip).build()
-                val resetBtn = createResetButton(packId, setting, modified)
-                list.addSmall(control, resetBtn)
+                }.width(if (modified) 150 else 310).tooltip(tooltip).build()
+                if (modified) {
+                    list.addSmall(control, createResetButton(packId, setting, modified = true))
+                } else {
+                    list.addBig(control)
+                }
             }
             SettingType.ENUM -> {
                 val control = Button.builder(
@@ -268,9 +264,12 @@ class PackSettingsScreen(
                         setOverride(packId, setting, next)
                         refreshWidgets()
                     }
-                }.width(150).tooltip(tooltip).build()
-                val resetBtn = createResetButton(packId, setting, modified)
-                list.addSmall(control, resetBtn)
+                }.width(if (modified) 150 else 310).tooltip(tooltip).build()
+                if (modified) {
+                    list.addSmall(control, createResetButton(packId, setting, modified = true))
+                } else {
+                    list.addBig(control)
+                }
             }
             SettingType.INT, SettingType.FLOAT -> {
                 val min = setting.min ?: 0.0
@@ -389,17 +388,18 @@ class PackSettingsScreen(
     }
 
     override fun addFooter() {
+        // Keep the footer strictly aligned to the 310px column (74 + 4 + 74 + 4 + 74 + 4 + 76).
         val footer = layout.addToFooter(LinearLayout.horizontal().spacing(4))
 
         footer.addChild(
             Button.builder(Component.translatable("vulkanshaders.screen.pack_settings.copy_profile")) {
                 copyProfileToClipboard()
-            }.width(82).build(),
+            }.width(74).build(),
         )
         footer.addChild(
             Button.builder(Component.translatable("vulkanshaders.screen.pack_settings.paste_profile")) {
                 pasteProfileFromClipboard()
-            }.width(82).build(),
+            }.width(74).build(),
         )
 
         val resetKey = if (selectedCategory == null) {
@@ -410,13 +410,13 @@ class PackSettingsScreen(
         footer.addChild(
             Button.builder(Component.translatable(resetKey)) {
                 resetCurrentScope()
-            }.width(78).build(),
+            }.width(74).build(),
         )
 
         footer.addChild(
             Button.builder(CommonComponents.GUI_DONE) {
                 this.onClose()
-            }.width(66).build(),
+            }.width(76).build(),
         )
     }
 
@@ -927,7 +927,6 @@ class PackSettingsScreen(
 
             val labelWidth = font.width(labelText)
             val badgeText = Component.literal("$hex (${rgbChannels[0]}, ${rgbChannels[1]}, ${rgbChannels[2]})")
-                .withStyle(Style.EMPTY.withColor(TextColor.fromRgb(packed)))
             guiGraphics.text(font, badgeText, swatchX + swatchSize + 6 + labelWidth, textY, 0xFFFFFFFF.toInt())
         }
 

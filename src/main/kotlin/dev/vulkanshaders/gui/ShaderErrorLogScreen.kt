@@ -79,6 +79,7 @@ class ShaderErrorLogScreen(
     }
 
     override fun addFooter() {
+        // Keep the footer strictly aligned to the 310px column (78 + 4 + 78 + 4 + 70 + 4 + 72).
         val footer = LinearLayout.horizontal().spacing(4)
 
         val copyBtn = Button.builder(Component.translatable("vulkanshaders.screen.error_log.copy")) {
@@ -88,7 +89,7 @@ class ShaderErrorLogScreen(
             }
             copyButton?.message = Component.translatable("vulkanshaders.screen.error_log.copied")
             copiedResetTicks = 40
-        }.width(82).build()
+        }.width(78).build()
         copyButton = copyBtn
         footer.addChild(copyBtn)
 
@@ -99,20 +100,20 @@ class ShaderErrorLogScreen(
                     Files.createDirectories(dir)
                     Blaze3D.openPath(dir)
                 }
-            }.width(82).build(),
+            }.width(78).build(),
         )
 
         footer.addChild(
             Button.builder(Component.translatable("vulkanshaders.screen.error_log.clear")) {
                 HyaloclastErrorLog.clear()
                 rebuildWidgets()
-            }.width(68).build(),
+            }.width(70).build(),
         )
 
         footer.addChild(
             Button.builder(Component.translatable("vulkanshaders.screen.error_log.close")) {
                 onClose()
-            }.width(68).build(),
+            }.width(72).build(),
         )
 
         layout.addToFooter(footer)
