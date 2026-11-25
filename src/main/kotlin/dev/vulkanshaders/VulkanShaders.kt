@@ -410,6 +410,7 @@ object VulkanShaders : ClientModInitializer {
 
     @JvmStatic
     fun onDimensionChanged(dimensionId: Int, resetTemporal: Boolean = true) {
+        log.info("Dimension changed: id={} (0=Overworld, 1=Nether, 2=End)", dimensionId)
         NativeCoreBridge.setDimension(dimensionId)
         if (resetTemporal) {
             WorldStateCollector.resetHistory()

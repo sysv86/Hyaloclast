@@ -243,8 +243,8 @@ vec4 sv_endBlackHole(
     }
 
     float invCos = 1.0 / max(cosBH, 0.25);
-    float uRaw = (dot(dir, bhRight) * invCos) / 0.052;
-    float vRaw = (dot(dir, bhUp) * invCos) / 0.052;
+    float uRaw = (dot(dir, bhRight) * invCos) / 0.10;
+    float vRaw = (dot(dir, bhUp) * invCos) / 0.10;
     float rRaw = sqrt(uRaw * uRaw + vRaw * vRaw);
 
     // Smooth radial crepuscular accretion light rays streaming into the surrounding End void

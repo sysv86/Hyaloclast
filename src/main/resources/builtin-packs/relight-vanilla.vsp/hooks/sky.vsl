@@ -110,7 +110,7 @@ vec3 sv_endLensedStarDir(vec3 dir) {
     }
 
     // Impact parameter in shadow-radius units; b = 1 is the pixel-art shadow edge.
-    vec2 uv = vec2(dot(dir, bhRight), dot(dir, bhUp)) / (cosBH * 0.052);
+    vec2 uv = vec2(dot(dir, bhRight), dot(dir, bhUp)) / (cosBH * 0.10);
     float b = max(length(uv), 1e-3);
 
     // beta = b - alpha, alpha = 1/b; radial scale keeps the secondary image bounded.
@@ -118,7 +118,7 @@ vec3 sv_endLensedStarDir(vec3 dir) {
     vec2 sourceUv = uv * lensFactor;
 
     // Rebuild the deflected direction in the black-hole tangent basis.
-    vec3 sourceDir = bhDir + (sourceUv.x * 0.052) * bhRight + (sourceUv.y * 0.052) * bhUp;
+    vec3 sourceDir = bhDir + (sourceUv.x * 0.10) * bhRight + (sourceUv.y * 0.10) * bhUp;
     return normalize(sourceDir);
 }
 
