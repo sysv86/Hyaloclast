@@ -1,0 +1,108 @@
+// ReLight Vanilla - single source of truth for foliage wind displacement.
+//
+// NOTE FOR THE VSP PIPELINE: the marker below deliberately closes the include region opened by
+// the VSP preprocessor. The hook linker strips everything between "begin include" / "end include"
+// markers when it injects hook helper code into raster stages. Self-closing here keeps these
+// helpers visible to the raster vertex_displace hook as well as to the compute shader, so the
+// wind math exists exactly once in this file (no duplicated formulas in hooks/compute).
+// --- end include <vulkanshaders/v1/wind_common.vsl> ---
+
+#ifndef VULKANSHADERS_V1_WIND_COMMON_VSL
+#define VULKANSHADERS_V1_WIND_COMMON_VSL
+
+#ifndef VS_WIND_DISPLACEMENT_DEFINED
+#define VS_WIND_DISPLACEMENT_DEFINED
+
+// Low-frequency travelling gust envelope with two incommensurate temporal harmonics (golden-ratio pair).
+float vsWindGustEnvelope(vec3 pos, float timeSec, float storm) {
+    const float TAU = 6.28318530718;
+    const float K16 = 0.3926990817; // 2*pi / 16 -> exact C-infinity continuity across 16-block chunk seams
+
+    float phaseA = mod((pos.x + pos.z) * K16, TAU) - mod(timeSec * 0.41, TAU);
+    float phaseB = mod((-pos.x + 2.0 * pos.z) * K16, TAU) - mod(timeSec * 0.663, TAU) + 0.85;
+    float gustWave = 0.60 * sin(phaseA) + 0.40 * cos(phaseB);
+    return clamp(0.74 + (0.28 + 0.16 * storm) * gustWave, 0.35, 1.35);
+}
+
+// Smooth radial soft-cap keeping total horizontal displacement strictly vanilla-scale (< 0.095 block).
+vec2 vsWindSoftCap(vec2 dispXZ, float knee) {
+    float mag = length(dispXZ);
+    if (mag <= knee) {
+        return dispXZ;
+    }
+    float excess = mag - knee;
+    float capped = knee + excess / (1.0 + excess * 40.0);
+    return dispXZ * (capped / max(mag, 1e-6));
+}
+
+// Chunk-periodic aerodynamic foliage/grass wind displacement.
+// Returns the displaced position; callers may subtract the input to obtain a pure delta.
+vec3 vsApplyWindDisplacement(vec3 localPos, uint materialFlags, float timeSec, float storm) {
+    const float TAU = 6.28318530718;
+    const float K16 = 0.3926990817; // 2*pi / 16
+
+    storm = clamp(storm, 0.0, 1.25);
+
+    // Geometric distinction without hard-coded block IDs:
+    // Full-cube leaves sit on integer XZ corners (interiorXZ = 0); crossed plants & crops sit inside (interiorXZ = 1).
+    float fx = fract(localPos.x);
+    float fz = fract(localPos.z);
+    float dX = min(fx, 1.0 - fx);
+    float dZ = min(fz, 1.0 - fz);
+    float interiorXZ = smoothstep(0.015, 0.045, max(dX, dZ));
+
+    // Bounded, species-safe variation across material IDs 0..15 (golden-ratio low-discrepancy weights).
+    uint materialId = (materialFlags >> 3u) & 15u;
+    float matF = float(materialId);
+    float matHash1 = fract(matF * 0.61803399);
+    float matHash2 = fract(matF * 0.38196601 + 0.17);
+    float stiffScale = mix(0.86, 1.14, matHash1);
+    float flutterScale = mix(0.78, 1.28, matHash2);
+    // Keep cross-species phase offset subtle on shared cube corners so adjacent leaf types never crack.
+    float matPhase = matHash1 * 2.1 * mix(0.15, 1.0, interiorXZ);
+
+    // Smooth C-infinity sub-block flex boost for raised non-integer tips (flowers, crops, saplings)
+    // without freezing full-height grass or tearing double-plant joints at integer Y.
+    float tipWave = 0.5 - 0.5 * cos(mod(localPos.y * TAU, TAU));
+    float flex = mix(0.84, mix(0.74, 1.14, tipWave), interiorXZ) * stiffScale;
+
+    float gustEnv = vsWindGustEnvelope(localPos, timeSec, storm);
+
+    // Constant-frequency modal wind harmonics (incommensurate golden-ratio spacing: 1.48, 2.395, 3.875 rad/s).
+    // Shifting modal amplitude with storm avoids timeSec * windSpeed phase jumps during weather ramps.
+    float p1 = mod((2.0 * localPos.x - localPos.y + localPos.z) * K16, TAU)
+             - mod(timeSec * 1.48, TAU) + matPhase;
+    float p2 = mod((-localPos.x + localPos.y + 3.0 * localPos.z) * K16, TAU)
+             - mod(timeSec * 2.395, TAU) + matPhase * 1.37;
+    float p3 = mod((3.0 * localPos.x + 2.0 * localPos.y - 2.0 * localPos.z) * K16, TAU)
+             - mod(timeSec * 3.875, TAU) + matPhase * 1.91;
+
+    // Prevailing wind axis (26.6 deg off block grid) and orthogonal vortex-shedding cross axis.
+    vec2 windDir = vec2(0.894427, 0.447214);
+    vec2 windPerp = vec2(-0.447214, 0.894427);
+
+    // Along-wind sway + smooth aerodynamic mean wind lean in rain/thunder.
+    float calmAmp = 0.028 + 0.012 * storm;
+    float gustAmp = 0.009 + 0.020 * storm;
+    float meanLean = (0.005 + 0.022 * storm) * (0.60 + 0.40 * gustEnv);
+    float along = (meanLean + (sin(p1) * calmAmp + sin(p2) * gustAmp) * gustEnv) * flex;
+
+    // Perpendicular Karman vortex-shedding flutter (natural elliptical/figure-8 motion, not 1D rail slide).
+    float crossAmp1 = (0.008 + 0.011 * storm) * flutterScale;
+    float crossAmp2 = (0.004 + 0.008 * storm) * flutterScale;
+    float across = (cos(p2 + 0.45) * crossAmp1 + sin(p3) * crossAmp2) * gustEnv * flex;
+
+    vec2 dispXZ = vsWindSoftCap(windDir * along + windPerp * across, 0.075);
+
+    // Cantilever arc-length dip (always <= 0) keeps grounded grass/crops seated; subtle 3D bob only on leaves.
+    float arcDip = -0.42 * dot(dispXZ, dispXZ);
+    float canopyBob = (sin(p3) * 0.0036 + cos(p2) * 0.0022)
+                    * (0.75 + 0.45 * storm)
+                    * gustEnv
+                    * (1.0 - interiorXZ);
+
+    return localPos + vec3(dispXZ.x, arcDip + canopyBob, dispXZ.y);
+}
+
+#endif // VS_WIND_DISPLACEMENT_DEFINED
+#endif // VULKANSHADERS_V1_WIND_COMMON_VSL

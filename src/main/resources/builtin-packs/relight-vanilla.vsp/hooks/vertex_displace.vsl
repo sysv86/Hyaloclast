@@ -1,26 +1,23 @@
 #include <vulkanshaders/v1/common.vsl>
-
-// Smooth traveling gust envelope that modulates breeze amplitude across canopies and fields
-float sv_gustEnvelope(vec3 pos, float timeSec) {
-    float waveA = sin(timeSec * 0.42 + pos.x * 0.11 + pos.z * 0.08);
-    float waveB = cos(timeSec * 0.27 - pos.x * 0.07 + pos.z * 0.13);
-    return 0.80 + 0.28 * (0.60 * waveA + 0.40 * waveB);
-}
+#include <vulkanshaders/v1/wind_common.vsl>
 
 // @hook(stage = "vertex_displace", priority = 100)
-// Sunlit Vanilla - Smooth multi-harmonic breeze and gentle gust sway on foliage, grass, and crops.
+// ReLight Vanilla - Chunk-periodic aerodynamic foliage and grass wind animation.
+// The compute pass owns wind displacement when active; raster must not double-apply it.
 void sv_vertex_displace(inout vec3 localPos, in VsVertexInput v) {
+#if defined(VS_WIND_COMPUTE_ACTIVE) && (VS_WIND_COMPUTE_ACTIVE == 1)
+    return;
+#endif
     if (!VS_SPEC_ENABLE_WIND || (v.materialFlags & 1u) == 0u) {
         return;
     }
+
+    float timeSec = vsWorld.gameTimeSec;
     float rain = clamp(vsWorld.rain, 0.0, 1.0);
-    float windSpeed = 1.75 + rain * 1.10;
-    float gustMod = sv_gustEnvelope(localPos, vsWorld.gameTimeSec);
-    float windAmp = (0.95 + rain * 0.60) * gustMod;
-    float phase = vsWorld.gameTimeSec * windSpeed + localPos.x * 0.68 + localPos.z * 0.52 + localPos.y * 0.28;
-    float flutter = sin(phase * 2.41 + localPos.y * 1.15) * 0.008;
-    float gust = (sin(phase) * 0.038 + cos(phase * 1.73) * 0.016 + flutter) * windAmp;
-    localPos.x += gust;
-    localPos.z += gust * 0.62;
-    localPos.y += cos(phase * 1.37) * 0.006 * windAmp;
+    float thunder = clamp(vsWorld.thunder, 0.0, 1.0);
+    float storm = clamp(rain * 0.72 + thunder * 0.55, 0.0, 1.25);
+
+    // `v` may be the minimal raster prelude struct (only materialFlags) or the full
+    // VsVertexInput; the shared helper takes explicit scalars so both forms compile.
+    localPos = vsApplyWindDisplacement(localPos, v.materialFlags, timeSec, storm);
 }

@@ -3,6 +3,8 @@
 #extension GL_EXT_scalar_block_layout : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 
+#include <vulkanshaders/v1/wind_common.vsl>
+
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
 struct TerrainVertex40B {
@@ -65,37 +67,21 @@ void main() {
     if ((flags & 1u) != 0u) {
         VertexBufferRef dstRef = VertexBufferRef(job.positionsAddress);
         TerrainVertex40B v = srcRef.vertices[vIdx];
-        vec3 worldPhasePos = vec3(
-            v.px + job.wrappedX,
-            v.py + job.wrappedY,
-            v.pz + job.wrappedZ
-        );
-        vec3 n = unpackSnorm4x8(v.normalAndFlags).xyz;
-        bool isAxisAlignedLeaf = max(abs(n.x), max(abs(n.y), abs(n.z))) > 0.92;
-        float baseWeight = 0.42;
-        if (!isAxisAlignedLeaf) {
-            uint quadBase = vIdx & ~3u;
-            if (quadBase + 3u < job.vertexCount) {
-                float y0 = srcRef.vertices[quadBase].py;
-                float y1 = srcRef.vertices[quadBase + 1u].py;
-                float y2 = srcRef.vertices[quadBase + 2u].py;
-                float y3 = srcRef.vertices[quadBase + 3u].py;
-                float minY = min(min(y0, y1), min(y2, y3));
-                float maxY = max(max(y0, y1), max(y2, y3));
-                float quadH = max(maxY - minY, 0.001);
-                float heightFrac = clamp((v.py - minY) / quadH, 0.0, 1.0);
-                baseWeight = smoothstep(0.0, 0.15, heightFrac);
-            } else {
-                baseWeight = smoothstep(0.0, 0.15, fract(v.py));
-            }
-        }
-        float gustMod = 0.80 + 0.25 * sin(pc.time * 0.45 + worldPhasePos.x * 0.11 + worldPhasePos.z * 0.08);
-        float amp = (0.038 + 0.045 * pc.weather) * pc.strength * job.scale * baseWeight * gustMod;
-        float phase = pc.time * 1.85 + dot(worldPhasePos, vec3(0.68, 0.28, 0.52));
-        float dx = clamp((sin(phase) + 0.35 * sin(phase * 1.73)) * amp, -0.14, 0.14);
-        float dz = clamp((cos(phase * 0.87) + 0.30 * cos(phase * 1.41)) * amp * 0.72, -0.14, 0.14);
-        v.px += dx;
-        v.pz += dz;
+
+        // Use the same chunk-periodic phase coordinate the raster hook uses. Wrapped offsets
+        // are whole-chunk translations, so the K16 harmonics stay seamless across chunks.
+        vec3 restPos = vec3(v.px, v.py, v.pz);
+        vec3 phasePos = restPos + vec3(job.wrappedX, job.wrappedY, job.wrappedZ);
+
+        // pc.time / pc.weather are the existing push-constant time/weather inputs;
+        // pc.strength * job.scale preserves the existing per-job amplitude scaling.
+        float storm = clamp(pc.weather, 0.0, 1.25);
+        vec3 displaced = vsApplyWindDisplacement(phasePos, flags, pc.time, storm);
+        vec3 delta = (displaced - phasePos) * (pc.strength * job.scale);
+
+        v.px += delta.x;
+        v.py += delta.y;
+        v.pz += delta.z;
         dstRef.vertices[vIdx] = v;
     }
 }
