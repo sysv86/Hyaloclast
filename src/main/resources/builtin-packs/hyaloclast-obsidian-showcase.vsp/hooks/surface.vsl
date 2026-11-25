@@ -3,7 +3,7 @@
 // @hook(stage = "surface", priority = 100)
 // Obsidian Showcase - High-contrast LabPBR material calibration across all 15 material IDs
 // to demonstrate RT reflections, SHaRC multi-bounce colored GI, ReSTIR DI emissives, and SSS.
-void os_surface(inout VsSurface s, in uint flags, in uint bounce) {
+void os_surface(inout VsSurface s, in vec3 worldPos, in uint flags, in uint bounce) {
     uint materialId = (flags >> 3u) & 15u;
     float luma = dot(s.albedo, vec3(0.2126, 0.7152, 0.0722));
 

@@ -163,7 +163,11 @@ object VulkanShaders : ClientModInitializer {
         ) {
             NativeCoreBridge.setShadowConfig(newConfig.shadowResolution, newConfig.shadowDistanceChunks)
         }
-        config = newConfig
+        // Keep the LIVE config on the previous tier until applyDeferredTier2() has rebuilt the
+        // native graph. Committing TIER_2 here would make the deferred frames run TIER_2 Kotlin
+        // logic (world rasterization, DH targets, blob shadows) against a TIER_3 native graph,
+        // which stalls the render queue until RenderPearl's 5 s semaphore timeout fires.
+        config = if (deferTier2) newConfig.copy(renderTier = prev.renderTier) else newConfig
         ConfigStore.save(newConfig)
         NativeCoreBridge.setRenderScale(newConfig.effectiveUpscalerQuality.renderScale)
         NativeCoreBridge.setHdrParams(newConfig.hdrPeakBrightnessNits, newConfig.hdrPaperWhiteNits)
@@ -205,17 +209,23 @@ object VulkanShaders : ClientModInitializer {
     @JvmStatic
     fun applyDeferredTier2(framesWaited: Int = 0) {
         val pending = pendingDeferredTier2Config ?: return
-        if (pending.renderTier != RenderTier.TIER_2_RAY_QUERY || pending != config) {
+        if (pending.renderTier != RenderTier.TIER_2_RAY_QUERY) {
             pendingDeferredTier2Config = null
             log.warn("Discarded stale deferred TIER_2 activation; current tier is {}", config.renderTier)
             return
         }
         pendingDeferredTier2Config = null
+        // The normal switch path waits for in-flight present work before rebuilding; do the same
+        // here instead of rebuilding while a previous-tier frame is still being submitted.
+        NativeCoreBridge.waitPresentIdle()
         val pipelineStatus = NativeCoreBridge.configurePipeline(pending)
         GbufferTargetManager.invalidateForResize()
         GbufferPipelineRegistry.invalidateShaderSourceCache()
         ShaderPackManager.selectPack(pending.selectedPackId)
+        config = pending
         WorldStateCollector.resetHistory()
+        NativeCoreBridge.resetTemporalHistory()
+        NativeCoreBridge.markHistoryReset()
         refreshRuntimeState()
         RuntimePerformanceGuard.resetForStateChange()
         log.info(
