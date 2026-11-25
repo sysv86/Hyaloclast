@@ -56,11 +56,6 @@ internal class ShaderLibrariesScreen(
             ).withStyle(ChatFormatting.GRAY),
         )
 
-        list.addHeader(
-            Component.translatable("vulkanshaders.libraries.manual_instructions")
-                .withStyle(ChatFormatting.GRAY),
-        )
-
         if (ProprietaryLibraryManager.restartRequired) {
             list.addHeader(
                 Component.translatable("vulkanshaders.libraries.restart_banner")
@@ -80,6 +75,14 @@ internal class ShaderLibrariesScreen(
 
     override fun addFooter() {
         val row = LinearLayout.horizontal().spacing(5)
+        // Keep manual placement instructions in the folder button tooltip instead of an overflowing header.
+        val folderTooltip = Component.translatable(
+            "vulkanshaders.libraries.open_folder.tooltip",
+            ProprietaryLibraryManager.nativesDir().toString(),
+        ).append("\n").append(
+            Component.translatable("vulkanshaders.libraries.manual_instructions")
+                .withStyle(ChatFormatting.GRAY),
+        )
         row.addChild(
             Button.builder(Component.translatable("vulkanshaders.libraries.open_folder")) {
                 val dir = ProprietaryLibraryManager.ensureNativesDir()
@@ -89,14 +92,7 @@ internal class ShaderLibrariesScreen(
                         Component.literal(dir.toString()),
                     )
                 }
-            }.width(100).tooltip(
-                Tooltip.create(
-                    Component.translatable(
-                        "vulkanshaders.libraries.open_folder.tooltip",
-                        ProprietaryLibraryManager.nativesDir().toString(),
-                    ),
-                ),
-            ).build(),
+            }.width(100).tooltip(Tooltip.create(folderTooltip)).build(),
         )
         row.addChild(
             Button.builder(Component.translatable("vulkanshaders.screen.reload")) {

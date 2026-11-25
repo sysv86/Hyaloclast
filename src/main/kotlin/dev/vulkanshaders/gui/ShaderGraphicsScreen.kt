@@ -17,6 +17,7 @@ import net.minecraft.ChatFormatting
 import net.minecraft.client.Options
 import net.minecraft.client.gui.components.Button
 import net.minecraft.client.gui.components.Tooltip
+import net.minecraft.client.gui.layouts.LinearLayout
 import net.minecraft.client.gui.screens.Screen
 import net.minecraft.client.gui.screens.options.OptionsSubScreen
 import net.minecraft.network.chat.CommonComponents
@@ -76,6 +77,21 @@ class ShaderGraphicsScreen(
             FrameGenMode.DLSS_FG -> "vulkanshaders.screen.framegen.tooltip.dlss_fg"
         }
 
+        internal fun upscalerLabelKey(mode: UpscalerMode): String = when (mode) {
+            UpscalerMode.NONE -> "vulkanshaders.screen.upscaler.mode.none"
+            UpscalerMode.TSR -> "vulkanshaders.screen.upscaler.mode.tsr"
+            UpscalerMode.FSR3 -> "vulkanshaders.screen.upscaler.mode.fsr3"
+            UpscalerMode.DLSS -> "vulkanshaders.screen.upscaler.mode.dlss"
+            UpscalerMode.XESS -> "vulkanshaders.screen.upscaler.mode.xess"
+        }
+
+        internal fun denoiserLabelKey(mode: DenoiserMode): String = when (mode) {
+            DenoiserMode.NONE -> "vulkanshaders.screen.denoiser.mode.none"
+            DenoiserMode.SVGF -> "vulkanshaders.screen.denoiser.mode.svgf"
+            DenoiserMode.NRD -> "vulkanshaders.screen.denoiser.mode.nrd"
+            DenoiserMode.DLSS_RR -> "vulkanshaders.screen.denoiser.mode.dlss_rr"
+        }
+
         internal fun tierAvailable(
             tier: RenderTier,
             caps: Int,
@@ -133,9 +149,7 @@ class ShaderGraphicsScreen(
         val libVersion = ProprietaryLibraryManager.stateVersion
         if (libVersion != lastLibraryStateVersion) {
             lastLibraryStateVersion = libVersion
-            val scroll = list?.scrollAmount() ?: 0.0
-            rebuildWidgets()
-            list?.setScrollAmount(scroll)
+            refreshWidgets()
             return
         }
         val mode = VulkanShaders.config.frameGenMode
@@ -143,6 +157,12 @@ class ShaderGraphicsScreen(
             displayedFrameGenMode = mode
             frameGenButton?.message = frameGenLabel(mode)
         }
+    }
+
+    private fun refreshWidgets() {
+        val scroll = list?.scrollAmount() ?: 0.0
+        rebuildWidgets()
+        list?.setScrollAmount(scroll)
     }
 
     private fun frameGenLabel(mode: FrameGenMode): Component =
@@ -166,29 +186,6 @@ class ShaderGraphicsScreen(
         val shadowResOptions = if (highEndGpu) SHADOW_RESOLUTIONS_HIGH_END else SHADOW_RESOLUTIONS
         val shadowDistOptions = if (highEndGpu) SHADOW_DISTANCE_CHUNKS_HIGH_END else SHADOW_DISTANCE_CHUNKS
 
-        val autoCalibrateTooltip = buildAutoCalibrateTooltip()
-        val autoCalibrateButton = Button.builder(
-            Component.translatable("vulkanshaders.screen.graphics.auto_calibrate"),
-        ) {
-            val result = HardwareAutoCalibrator.calibrateCurrent(
-                currentConfig = VulkanShaders.config,
-                manifest = ShaderPackManager.activePack?.manifest,
-            )
-            val calibratedConfig = if (macOsMoltenVk && result.config.renderTier.tierIndex >= 2) {
-                result.config.copy(renderTier = RenderTier.TIER_1_COMPUTE_GI)
-            } else {
-                result.config
-            }
-            if (VulkanShaders.updateConfig(calibratedConfig)) {
-                resetTemporalBuffers()
-                calibrationFeedback = Component.translatable(
-                    "vulkanshaders.screen.graphics.auto_calibrate.done",
-                    result.summary,
-                ).withStyle(ChatFormatting.GREEN)
-            }
-            rebuildWidgets()
-        }.tooltip(autoCalibrateTooltip).build()
-
         val supportedTiers = ShaderPackManager.activePack?.manifest?.supportedTiers
         val tierOk = { tier: RenderTier ->
             tierAvailable(tier, caps, macOsMoltenVk) &&
@@ -203,20 +200,23 @@ class ShaderGraphicsScreen(
             )
         }
         val tierButton = Button.builder(
-            Component.translatable(cfg.renderTier.translationKey),
+            Component.translatable("vulkanshaders.screen.tier")
+                .append(": ")
+                .append(Component.translatable(cfg.renderTier.translationKey)),
         ) {
             val next = nextAvailable(cfg.renderTier, RenderTier.entries, tierOk)
             calibrationFeedback = null
             if (VulkanShaders.updateConfig(VulkanShaders.config.copy(renderTier = next))) {
                 resetTemporalBuffers()
             }
-            rebuildWidgets()
+            refreshWidgets()
         }.tooltip(Tooltip.create(tierTooltip)).build()
 
         val upscalerOk = { mode: UpscalerMode -> upscalerAvailable(mode, caps) }
         val upscalerButton = Button.builder(
             Component.translatable("vulkanshaders.screen.upscaler")
-                .append(": ${cfg.upscalerMode.name}"),
+                .append(": ")
+                .append(Component.translatable(upscalerLabelKey(cfg.upscalerMode))),
         ) {
             val next = nextAvailable(cfg.upscalerMode, UpscalerMode.entries, upscalerOk)
             calibrationFeedback = null
@@ -224,7 +224,7 @@ class ShaderGraphicsScreen(
             if (VulkanShaders.updateConfig(VulkanShaders.config.copy(upscalerMode = next))) {
                 resetTemporalBuffers()
             }
-            rebuildWidgets()
+            refreshWidgets()
         }.tooltip(
             Tooltip.create(
                 Component.translatable(upscalerTooltipKey(cfg.upscalerMode))
@@ -233,6 +233,15 @@ class ShaderGraphicsScreen(
             ),
         ).build()
 
+        val upscalerQualityActive = cfg.upscalerMode != UpscalerMode.NONE &&
+            cfg.renderTier == RenderTier.TIER_3_PATH_TRACING
+        val upscalerQualityTooltip = Component.translatable("vulkanshaders.screen.upscaler_quality.tooltip")
+        if (!upscalerQualityActive) {
+            upscalerQualityTooltip.append(Component.literal("\n")).append(
+                Component.translatable("vulkanshaders.screen.upscaler_quality.requires_pt")
+                    .withStyle(ChatFormatting.GRAY),
+            )
+        }
         val upscalerQualityButton = Button.builder(
             Component.translatable("vulkanshaders.screen.upscaler_quality")
                 .append(": ")
@@ -245,24 +254,22 @@ class ShaderGraphicsScreen(
             if (VulkanShaders.updateConfig(VulkanShaders.config.copy(upscalerQuality = next))) {
                 resetTemporalBuffers()
             }
-            rebuildWidgets()
-        }.tooltip(
-            Tooltip.create(Component.translatable("vulkanshaders.screen.upscaler_quality.tooltip")),
-        ).build()
-        upscalerQualityButton.active = cfg.upscalerMode != UpscalerMode.NONE &&
-            cfg.renderTier == RenderTier.TIER_3_PATH_TRACING
+            refreshWidgets()
+        }.tooltip(Tooltip.create(upscalerQualityTooltip)).build()
+        upscalerQualityButton.active = upscalerQualityActive
 
         val denoiserOk = { mode: DenoiserMode -> denoiserAvailable(mode, caps) }
         val denoiserButton = Button.builder(
             Component.translatable("vulkanshaders.screen.denoiser")
-                .append(": ${cfg.denoiserMode.name}"),
+                .append(": ")
+                .append(Component.translatable(denoiserLabelKey(cfg.denoiserMode))),
         ) {
             val next = nextAvailable(cfg.denoiserMode, DenoiserMode.entries, denoiserOk)
             calibrationFeedback = null
             if (VulkanShaders.updateConfig(VulkanShaders.config.copy(denoiserMode = next))) {
                 resetTemporalBuffers()
             }
-            rebuildWidgets()
+            refreshWidgets()
         }.tooltip(
             Tooltip.create(
                 Component.translatable(denoiserTooltipKey(cfg.denoiserMode))
@@ -274,36 +281,45 @@ class ShaderGraphicsScreen(
         displayedFrameGenMode = cfg.frameGenMode
         val frameGenButton = Button.builder(frameGenLabel(cfg.frameGenMode)) {
             minecraft.gui.setScreen(ShaderFrameGenScreen(this, options))
-        }.build()
+        }.tooltip(
+            Tooltip.create(Component.translatable(frameGenTooltipKey(cfg.frameGenMode))),
+        ).build()
         this.frameGenButton = frameGenButton
+
+        val shadowsActive = cfg.renderTier.tierIndex <= 1
+        val shadowResTooltip = Component.translatable("vulkanshaders.screen.shadow_res.tooltip")
+        val shadowDistTooltip = Component.translatable("vulkanshaders.screen.shadow_dist.tooltip")
+        if (!shadowsActive) {
+            val rtNote = Component.translatable("vulkanshaders.screen.shadows.disabled_in_rt")
+                .withStyle(ChatFormatting.GRAY)
+            shadowResTooltip.append(Component.literal("\n")).append(rtNote)
+            shadowDistTooltip.append(Component.literal("\n")).append(rtNote.copy())
+        }
 
         val shadowResButton = Button.builder(
             Component.translatable("vulkanshaders.screen.shadow_res")
-                .append(": ${cfg.shadowResolution}x${cfg.shadowResolution}"),
+                .append(": ${cfg.shadowResolution}"),
         ) {
             val idx = shadowResOptions.indexOf(cfg.shadowResolution)
             val next = shadowResOptions[(idx + 1) % shadowResOptions.size]
             calibrationFeedback = null
             VulkanShaders.updateConfig(VulkanShaders.config.copy(shadowResolution = next))
-            rebuildWidgets()
-        }.tooltip(
-            Tooltip.create(Component.translatable("vulkanshaders.screen.shadow_res.tooltip")),
-        ).build()
-        shadowResButton.active = cfg.renderTier.tierIndex <= 1
+            refreshWidgets()
+        }.tooltip(Tooltip.create(shadowResTooltip)).build()
+        shadowResButton.active = shadowsActive
 
         val shadowDistButton = Button.builder(
             Component.translatable("vulkanshaders.screen.shadow_dist")
-                .append(": ${cfg.shadowDistanceChunks} ch"),
+                .append(": ")
+                .append(Component.translatable("vulkanshaders.screen.shadow_dist.value", cfg.shadowDistanceChunks)),
         ) {
             val idx = shadowDistOptions.indexOf(cfg.shadowDistanceChunks)
             val next = shadowDistOptions[(idx + 1) % shadowDistOptions.size]
             calibrationFeedback = null
             VulkanShaders.updateConfig(VulkanShaders.config.copy(shadowDistanceChunks = next))
-            rebuildWidgets()
-        }.tooltip(
-            Tooltip.create(Component.translatable("vulkanshaders.screen.shadow_dist.tooltip")),
-        ).build()
-        shadowDistButton.active = cfg.renderTier.tierIndex <= 1
+            refreshWidgets()
+        }.tooltip(Tooltip.create(shadowDistTooltip)).build()
+        shadowDistButton.active = shadowsActive
 
         val hdrButton = Button.builder(
             Component.translatable("vulkanshaders.screen.hdr")
@@ -312,11 +328,19 @@ class ShaderGraphicsScreen(
         ) {
             calibrationFeedback = null
             VulkanShaders.updateConfig(VulkanShaders.config.copy(hdrEnabled = !cfg.hdrEnabled))
-            rebuildWidgets()
+            refreshWidgets()
         }.tooltip(
             Tooltip.create(Component.translatable("vulkanshaders.screen.hdr.tooltip")),
         ).build()
 
+        val overlayDepthActive = cfg.renderTier == RenderTier.TIER_3_PATH_TRACING
+        val overlayDepthTooltip = Component.translatable("vulkanshaders.screen.overlay_depth.tooltip")
+        if (!overlayDepthActive) {
+            overlayDepthTooltip.append(Component.literal("\n")).append(
+                Component.translatable("vulkanshaders.screen.overlay_depth.requires_pt")
+                    .withStyle(ChatFormatting.GRAY),
+            )
+        }
         val overlayDepthButton = Button.builder(
             Component.translatable("vulkanshaders.screen.overlay_depth")
                 .append(": ")
@@ -324,11 +348,9 @@ class ShaderGraphicsScreen(
         ) {
             calibrationFeedback = null
             VulkanShaders.updateConfig(VulkanShaders.config.copy(enableOverlayPass = !cfg.enableOverlayPass))
-            rebuildWidgets()
-        }.tooltip(
-            Tooltip.create(Component.translatable("vulkanshaders.screen.overlay_depth.tooltip")),
-        ).build()
-        overlayDepthButton.active = cfg.renderTier == RenderTier.TIER_3_PATH_TRACING
+            refreshWidgets()
+        }.tooltip(Tooltip.create(overlayDepthTooltip)).build()
+        overlayDepthButton.active = overlayDepthActive
 
         val f3DebugButton = Button.builder(
             Component.translatable("vulkanshaders.screen.f3_debug")
@@ -337,7 +359,7 @@ class ShaderGraphicsScreen(
         ) {
             calibrationFeedback = null
             VulkanShaders.updateConfig(VulkanShaders.config.copy(showF3DebugInfo = !cfg.showF3DebugInfo))
-            rebuildWidgets()
+            refreshWidgets()
         }.tooltip(
             Tooltip.create(Component.translatable("vulkanshaders.screen.f3_debug.tooltip")),
         ).build()
@@ -349,7 +371,7 @@ class ShaderGraphicsScreen(
         ) {
             calibrationFeedback = null
             VulkanShaders.updateConfig(VulkanShaders.config.copy(enableGpuProfiler = !cfg.enableGpuProfiler))
-            rebuildWidgets()
+            refreshWidgets()
         }.tooltip(
             Tooltip.create(Component.translatable("vulkanshaders.screen.gpu_profiler.tooltip")),
         ).build()
@@ -370,28 +392,79 @@ class ShaderGraphicsScreen(
             Tooltip.create(Component.translatable("vulkanshaders.libraries.button.tooltip")),
         ).build()
 
-        if (macOsMoltenVk && !hardwareRtAvailable) {
-            list.addHeader(
-                Component.translatable("vulkanshaders.screen.graphics.macos_rt_banner")
-                    .withStyle(ChatFormatting.GOLD),
-            )
-        }
+        calibrationFeedback?.let { list.addHeader(it) }
         if (ProprietaryLibraryManager.restartRequired) {
             list.addHeader(
                 Component.translatable("vulkanshaders.libraries.restart_banner")
                     .withStyle(ChatFormatting.GOLD),
             )
         }
-        calibrationFeedback?.let { list.addHeader(it) }
-        list.addBig(autoCalibrateButton)
-        list.addSmall(tierButton, upscalerButton)
-        list.addSmall(upscalerQualityButton, denoiserButton)
-        list.addBig(frameGenButton)
-        list.addBig(librariesButton)
-        list.addSmall(shadowResButton, shadowDistButton)
-        lastLibraryStateVersion = ProprietaryLibraryManager.stateVersion
+
+        // Section 1: Pipeline & Ray Tracing
+        list.addHeader(
+            Component.translatable("vulkanshaders.screen.graphics.section.pipeline")
+                .withStyle(ChatFormatting.GOLD),
+        )
+        list.addBig(tierButton)
         list.addSmall(hdrButton, overlayDepthButton)
+
+        // Section 2: Upscaling & Frame Generation
+        list.addHeader(
+            Component.translatable("vulkanshaders.screen.graphics.section.upscaling")
+                .withStyle(ChatFormatting.GOLD),
+        )
+        list.addSmall(upscalerButton, denoiserButton)
+        list.addBig(upscalerQualityButton)
+        list.addBig(frameGenButton)
+
+        // Section 3: Shadows (Tier 0-1)
+        list.addHeader(
+            Component.translatable("vulkanshaders.screen.graphics.section.shadows")
+                .withStyle(ChatFormatting.GOLD),
+        )
+        list.addSmall(shadowResButton, shadowDistButton)
+
+        // Section 4: Diagnostics & Libraries
+        list.addHeader(
+            Component.translatable("vulkanshaders.screen.graphics.section.diagnostics")
+                .withStyle(ChatFormatting.GOLD),
+        )
         list.addSmall(f3DebugButton, gpuProfilerButton)
+        list.addBig(librariesButton)
+
+        lastLibraryStateVersion = ProprietaryLibraryManager.stateVersion
+    }
+
+    override fun addFooter() {
+        val macOsMoltenVk = isMacOsOrMoltenVk()
+        val footer = LinearLayout.horizontal().spacing(10)
+        footer.addChild(
+            Button.builder(Component.translatable("vulkanshaders.screen.graphics.auto_calibrate")) {
+                val result = HardwareAutoCalibrator.calibrateCurrent(
+                    currentConfig = VulkanShaders.config,
+                    manifest = ShaderPackManager.activePack?.manifest,
+                )
+                val calibratedConfig = if (macOsMoltenVk && result.config.renderTier.tierIndex >= 2) {
+                    result.config.copy(renderTier = RenderTier.TIER_1_COMPUTE_GI)
+                } else {
+                    result.config
+                }
+                if (VulkanShaders.updateConfig(calibratedConfig)) {
+                    resetTemporalBuffers()
+                    calibrationFeedback = Component.translatable(
+                        "vulkanshaders.screen.graphics.auto_calibrate.done",
+                        result.summary,
+                    ).withStyle(ChatFormatting.GREEN)
+                }
+                refreshWidgets()
+            }.width(150).tooltip(buildAutoCalibrateTooltip()).build(),
+        )
+        footer.addChild(
+            Button.builder(CommonComponents.GUI_DONE) { onClose() }
+                .width(150)
+                .build(),
+        )
+        layout.addToFooter(footer)
     }
 
     private fun pendingRestartUpscalerSuffix(): Component {
