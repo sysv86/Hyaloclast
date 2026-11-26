@@ -139,23 +139,80 @@ vec3 sv_waterPlayerInteraction(
 ) {
     const float TAU = 6.28318530718;
 
+    // Multi-entity / mob / boat / item wakes are independent of the local-player gates below,
+    // so they are accumulated first and returned even when the player is nowhere near water.
+    vec3 interactionEvents = vec3(0.0);
+#ifdef VS_HAS_WATER_INTERACTION_BUFFER
+    float eventFilterAtten = exp(-0.5 * (7.5 * sigmaFilter) * (7.5 * sigmaFilter));
+    if (eventFilterAtten >= 0.02) {
+        uint rippleCount = min(uWaterRipples.header.x, 64u);
+        for (uint i = 0u; i < rippleCount; ++i) {
+            VsWaterRippleEvent ripple = uWaterRipples.events[i];
+            vec3 ripplePos = ripple.posTime.xyz;
+            float rippleAge = clamp(vsWorld.gameTimeSec - ripple.posTime.w, 0.0, 4.0);
+            vec2 rippleDelta = worldPos.xz - ripplePos.xz;
+            float rippleR = length(rippleDelta);
+            float rippleCamDist = length(ripplePos.xz - camPos.xz);
+            if (rippleAge >= 4.0 || rippleCamDist > 24.0 || rippleR > 12.0) {
+                continue;
+            }
+
+            float rippleStrength = clamp(ripple.velRadius.w, 0.0, 1.5);
+            vec2 rippleVelXZ = ripple.velRadius.xz;
+            float rippleVelMag = length(rippleVelXZ);
+            float ringRadius = rippleStrength * 0.35 + rippleAge * (1.1 + 0.30 * min(rippleVelMag, 4.0));
+            float ring = rippleR - ringRadius;
+            float rippleDy = worldPos.y - ripplePos.y;
+            float rippleHeightFade = exp(-rippleDy * rippleDy * 0.55);
+            float rippleCamFade = 1.0 - smoothstep(12.0, 24.0, rippleCamDist);
+            float rippleLife = (1.0 - 0.25 * rippleAge) * exp(-rippleAge * 1.6);
+            float ringEnv = exp(-ring * ring * 3.2) * rippleLife * inversesqrt(rippleR + 0.5)
+                          * rippleHeightFade * rippleCamFade * eventFilterAtten;
+            float rippleAmp = clamp(rippleStrength * ringEnv, 0.0, 1.0);
+
+            vec2 rippleDir = (rippleR > 1e-4) ? (rippleDelta / rippleR) : vec2(0.0);
+            interactionEvents.xy += rippleDir * (sin(ring * 7.0) * rippleAmp * 0.30);
+            interactionEvents.z += ringEnv * (0.45 + 0.55 * max(sin(ring * 7.0), 0.0)) * 0.16;
+
+            if (rippleVelMag > 0.15) {
+                vec2 rippleFwd = rippleVelXZ / max(rippleVelMag, 1e-4);
+                vec2 rippleRight = sv_waterRot2(rippleFwd, 0.0, 1.0);
+                float behind = -dot(rippleDelta, rippleFwd);
+                if (behind > 0.10 && behind < 5.0) {
+                    float lateral = abs(dot(rippleDelta, rippleRight));
+                    float armDist = abs(lateral - behind * 0.34 - 0.18);
+                    float wakeEnv = exp(-armDist * armDist * 9.5) * exp(-behind * 0.45)
+                                  * smoothstep(0.10, 0.45, behind) * (1.0 - 0.25 * rippleAge)
+                                  * rippleStrength * rippleHeightFade * rippleCamFade * eventFilterAtten;
+                    float wakePhase = armDist * 15.0 + behind * 4.5 - mod(vsWorld.gameTimeSec * 7.0, TAU);
+                    vec2 wakeDir = normalize(rippleRight * sign(dot(rippleDelta, rippleRight) + 1e-5)
+                                             - rippleFwd * 0.34);
+                    interactionEvents.xy += wakeDir * (cos(wakePhase) * clamp(wakeEnv, 0.0, 1.0) * 0.20);
+                    interactionEvents.z += clamp(wakeEnv, 0.0, 1.0) * 0.12;
+                }
+            }
+        }
+    }
+    interactionEvents.z = clamp(interactionEvents.z, 0.0, 0.45);
+#endif
+
     // Approximate player torso/feet plane relative to camera eye height (~1.62m standing, ~0.4m swimming)
     float bodyWaterY = (eyeInWater > 0.5) ? (camPos.y + 0.15) : (camPos.y - 1.38);
     float vertDist = abs(worldPos.y - bodyWaterY);
     float vertProx = exp(-vertDist * vertDist * 0.55);
     if (vertProx < 0.02) {
-        return vec3(0.0);
+        return interactionEvents;
     }
 
     vec2 relXZ = worldPos.xz - camPos.xz;
     float r = length(relXZ);
     if (r > 7.5 || r < 0.08) {
-        return vec3(0.0);
+        return interactionEvents;
     }
 
     float filterAtten = exp(-0.5 * (7.5 * sigmaFilter) * (7.5 * sigmaFilter));
     if (filterAtten < 0.02) {
-        return vec3(0.0);
+        return interactionEvents;
     }
 
     vec2 radDir = relXZ / r;
@@ -166,7 +223,7 @@ vec3 sv_waterPlayerInteraction(
     float swimPresence = clamp(eyeInWater * 0.85 + (1.0 - smoothstep(0.35, 1.65, vertDist)) * 0.70, 0.0, 1.0);
     float activity = clamp(swimPresence * (0.28 + 0.92 * moveEnergy), 0.0, 1.35);
     if (activity < 0.03) {
-        return vec3(0.0);
+        return interactionEvents;
     }
 
     // 1. Outward dispersive concentric ripples from treading/swimming/wading
@@ -195,61 +252,8 @@ vec3 sv_waterPlayerInteraction(
         }
     }
 
-    // Multi-entity / mob / boat / item water wake ring buffer supplied by the engine.
-    // Each event is a decaying expanding ring plus a short velocity-aligned wake; amplitude is
-    // clamped and faded by camera distance so the accumulated contribution stays bounded.
-#ifdef VS_HAS_WATER_INTERACTION_BUFFER
-    uint rippleCount = min(uWaterRipples.header.x, 64u);
-    for (uint i = 0u; i < rippleCount; ++i) {
-        VsWaterRippleEvent ripple = uWaterRipples.events[i];
-        vec3 ripplePos = ripple.posTime.xyz;
-        float rippleAge = clamp(vsWorld.gameTimeSec - ripple.posTime.w, 0.0, 4.0);
-        vec2 rippleDelta = worldPos.xz - ripplePos.xz;
-        float rippleR = length(rippleDelta);
-        float rippleCamDist = length(ripplePos.xz - camPos.xz);
-        if (rippleAge >= 4.0 || rippleCamDist > 24.0 || rippleR > 12.0) {
-            continue;
-        }
-
-        float rippleStrength = clamp(ripple.velRadius.w, 0.0, 1.5);
-        vec2 rippleVelXZ = ripple.velRadius.xz;
-        float rippleVelMag = length(rippleVelXZ);
-        float ringRadius = rippleStrength * 0.35 + rippleAge * (1.1 + 0.30 * min(rippleVelMag, 4.0));
-        float ring = rippleR - ringRadius;
-        float rippleDy = worldPos.y - ripplePos.y;
-        float rippleHeightFade = exp(-rippleDy * rippleDy * 0.55);
-        float rippleCamFade = 1.0 - smoothstep(12.0, 24.0, rippleCamDist);
-        float rippleLife = (1.0 - 0.25 * rippleAge) * exp(-rippleAge * 1.6);
-        float ringEnv = exp(-ring * ring * 3.2) * rippleLife * inversesqrt(rippleR + 0.5)
-                      * rippleHeightFade * rippleCamFade * filterAtten;
-        float rippleAmp = clamp(rippleStrength * ringEnv, 0.0, 1.0);
-
-        vec2 rippleDir = (rippleR > 1e-4) ? (rippleDelta / rippleR) : vec2(0.0);
-        slope += rippleDir * (sin(ring * 7.0) * rippleAmp * 0.30);
-        foam += ringEnv * (0.45 + 0.55 * max(sin(ring * 7.0), 0.0)) * 0.16;
-
-        if (rippleVelMag > 0.15) {
-            vec2 rippleFwd = rippleVelXZ / max(rippleVelMag, 1e-4);
-            vec2 rippleRight = sv_waterRot2(rippleFwd, 0.0, 1.0);
-            float behind = -dot(rippleDelta, rippleFwd);
-            if (behind > 0.10 && behind < 5.0) {
-                float lateral = abs(dot(rippleDelta, rippleRight));
-                float armDist = abs(lateral - behind * 0.34 - 0.18);
-                float wakeEnv = exp(-armDist * armDist * 9.5) * exp(-behind * 0.45)
-                              * smoothstep(0.10, 0.45, behind) * (1.0 - 0.25 * rippleAge)
-                              * rippleStrength * rippleHeightFade * rippleCamFade * filterAtten;
-                float wakePhase = armDist * 15.0 + behind * 4.5 - mod(vsWorld.gameTimeSec * 7.0, TAU);
-                vec2 wakeDir = normalize(rippleRight * sign(dot(rippleDelta, rippleRight) + 1e-5)
-                                         - rippleFwd * 0.34);
-                slope += wakeDir * (cos(wakePhase) * clamp(wakeEnv, 0.0, 1.0) * 0.20);
-                foam += clamp(wakeEnv, 0.0, 1.0) * 0.12;
-            }
-        }
-    }
-#endif
-
     float scale = vertProx * filterAtten;
-    return vec3(slope * scale, clamp(foam * scale, 0.0, 0.45));
+    return vec3(slope * scale + interactionEvents.x, clamp(foam * scale + interactionEvents.y, 0.0, 0.45));
 }
 
 // Thunderstorm lightning strike shockwave & ionized specular flash on water.
