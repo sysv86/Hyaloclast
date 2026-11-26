@@ -187,12 +187,12 @@ object SectionSliceRegistry {
             ?: (allocationKey as? Long)
             ?: return
         val removed = activeSlices.remove(SliceKey(allocId, layerOrdinal))
-        if (removed != null) {
-            if (layerOrdinal == ChunkSectionLayer.CUTOUT.ordinal) {
-                VulkanShadersTurboExtension.clearSectionFoliageFlag(removed.sectionPosLong)
-            }
-            NativeCoreBridge.unregisterSectionSlice(allocId, layerOrdinal)
+        if (removed != null && layerOrdinal == ChunkSectionLayer.CUTOUT.ordinal) {
+            VulkanShadersTurboExtension.clearSectionFoliageFlag(removed.sectionPosLong)
         }
+        // Always release the native slice. Restricting this to Kotlin records that still exist
+        // leaked BLAS/TLAS state when the weak registry entry had already been dropped.
+        NativeCoreBridge.unregisterSectionSlice(allocId, layerOrdinal)
     }
 
     @JvmStatic

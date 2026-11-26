@@ -77,8 +77,12 @@ object RuntimePerformanceGuard {
         }
 
         val avgGpuMs = NativeCoreBridge.getAverageGpuFrameTimeMs()
-        val overloaded = deltaMs >= OVERLOAD_TICK_MS || (avgGpuMs != null && avgGpuMs >= OVERLOAD_GPU_MS)
-        val criticalStall = deltaMs >= CRITICAL_STALL_MS
+        // VRAM pressure is a leading indicator: by the time the render thread blocks in submit,
+        // the tick-driven stall check is already too late to prevent the 5 s semaphore timeout.
+        val vramPressure = NativeCoreBridge.getVramBudgetSnapshot()?.pressure ?: 0
+        val overloaded = deltaMs >= OVERLOAD_TICK_MS ||
+            (avgGpuMs != null && avgGpuMs >= OVERLOAD_GPU_MS) || vramPressure >= 1
+        val criticalStall = deltaMs >= CRITICAL_STALL_MS || vramPressure >= 2
 
         if (overloaded) {
             consecutiveOverloadTicks++
@@ -93,8 +97,24 @@ object RuntimePerformanceGuard {
         consecutiveOverloadTicks = 0
         lastDowngradeAtMs = nowMs
 
-        val reasonMs = avgGpuMs?.takeIf { it >= OVERLOAD_GPU_MS } ?: deltaMs
+        val reason = if (vramPressure > 0) {
+            "VRAM pressure $vramPressure"
+        } else {
+            "${"%.0f".format(avgGpuMs?.takeIf { it >= OVERLOAD_GPU_MS } ?: deltaMs)} ms/frame"
+        }
         if (cfg.renderTier == LightingMode.PATH) {
+            // Full-resolution path tracing is the dominant cost on a 6 GB GPU. Reducing the
+            // internal render resolution is reversible in the GUI and avoids a hard GPU stall
+            // before touching bounce count or lighting mode.
+            if (cfg.upscalerMode == UpscalerMode.NONE) {
+                VulkanShaders.updateConfig(
+                    cfg.copy(upscalerMode = UpscalerMode.TSR, upscalerQuality = UpscalerQuality.BALANCED),
+                )
+                val msg = "$reason — enabled TSR Balanced (58% render scale) for path tracing."
+                HyaloclastErrorLog.recordError("PerfGuard", msg)
+                notifyPlayer(mc, msg)
+                return
+            }
             val activeOverrides = cfg.activePackOverrides(pack.manifest.id, cfg.renderTier)
             val currentBounces = activeOverrides["pt_max_bounces"]?.toIntOrNull()
                 ?: pack.manifest.settings.firstOrNull { it.key == "pt_max_bounces" }?.defaultValue?.toIntOrNull()
@@ -107,7 +127,7 @@ object RuntimePerformanceGuard {
                 val byTier = cfg.packOverridesByTier.toMutableMap()
                 byTier[pack.manifest.id] = tierMap
                 VulkanShaders.updateConfig(cfg.copy(packOverridesByTier = byTier))
-                val msg = "GPU overload (${"%.0f".format(reasonMs)} ms/frame) — lowered path-tracing bounces from $currentBounces to 2."
+                val msg = "$reason — lowered path-tracing bounces from $currentBounces to 2."
                 HyaloclastErrorLog.recordError("PerfGuard", msg)
                 notifyPlayer(mc, msg)
                 return
@@ -116,12 +136,12 @@ object RuntimePerformanceGuard {
         val lowerTier = nextLowerTier(cfg.renderTier, pack.manifest.supportedTiers)
         if (lowerTier != null) {
             VulkanShaders.updateConfig(cfg.copy(renderTier = lowerTier))
-            val msg = "GPU overload (${"%.0f".format(reasonMs)} ms/frame) — lowered lighting mode to ${lowerTier.shortName}."
+            val msg = "$reason — lowered lighting mode to ${lowerTier.shortName}."
             HyaloclastErrorLog.recordError("PerfGuard", msg)
             notifyPlayer(mc, msg)
         } else if (criticalStall) {
             VulkanShaders.updateConfig(cfg.copy(enabled = false))
-            val msg = "Severe GPU stall (${"%.0f".format(reasonMs)} ms) at Classic mode — shaders disabled."
+            val msg = "$reason at Classic mode — shaders disabled."
             HyaloclastErrorLog.recordError("PerfGuard", msg)
             notifyPlayer(mc, msg)
         }

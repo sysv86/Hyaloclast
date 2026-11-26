@@ -761,7 +761,10 @@ impl ZeroCopyBlasManager {
 
         let tier_default_builds =
             Self::default_blas_builds_for_tier(ctx.capabilities.gpu_tier_class);
-        let base_builds = max_blas_builds.max(tier_default_builds).clamp(1, 256);
+        // Honour the caller's budget instead of forcibly raising it to the tier maximum: fast
+        // flight over a 6 GB GPU can otherwise queue far more BLAS work than the timeline
+        // retire queue can free, leading to a multi-second GPU stall.
+        let base_builds = max_blas_builds.clamp(1, tier_default_builds.max(1)).clamp(1, 256);
         self.max_builds_per_frame = if self.vram_throttle_compaction
             || (self.pending_build_queue.len() > 24
                 && matches!(
