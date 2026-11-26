@@ -782,6 +782,9 @@ object VulkanShadersTurboExtension : TurboShadersExtension {
         }
 
         worldGraphExecutedThisFrame = steps > 0
+        if (worldGraphExecutedThisFrame) {
+            VulkanShaders.markWorldGraphFrame()
+        }
         if (VulkanShaders.hasPendingDeferredTier2()) {
             if (worldGraphExecutedThisFrame) {
                 val frames = ++deferredTier2Frames

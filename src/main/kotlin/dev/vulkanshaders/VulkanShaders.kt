@@ -79,6 +79,11 @@ object VulkanShaders : ClientModInitializer {
 
     @JvmField @Volatile var shaderPackActive: Boolean = false
     @JvmField @Volatile var vulkanReady: Boolean = false
+    // Session-only kill switch: the render thread can be blocked inside VulkanCommandEncoder.submit
+    // before the tick-driven performance guard ever gets a chance to run. A separate watchdog
+    // thread flips this when no world-graph frame completes in time; config on disk is untouched.
+    @JvmField @Volatile var emergencyBypass: Boolean = false
+    @Volatile private var lastWorldGraphFrameNanos: Long = 0L
     @Volatile private var pendingChatAnnouncement: Boolean = false
     @Volatile private var lastSyncedGpuProfilerEnabled: Boolean? = null
     @Volatile private var lastDimensionKey: Any? = null
@@ -102,6 +107,7 @@ object VulkanShaders : ClientModInitializer {
         }
 
         config = ConfigStore.load()
+        startRenderWatchdog()
         if (!StandaloneRenderPearlBridge.vulkanTurboLoaded && config.enabled) {
             config = config.copy(enabled = false, selectedPackId = "off")
             ConfigStore.save(config)
@@ -135,6 +141,7 @@ object VulkanShaders : ClientModInitializer {
     fun updateConfig(newConfig: VulkanShadersConfig): Boolean {
         // Any later config change (rapid switch, watchdog rollback) supersedes a queued activation.
         pendingDeferredTier2Config = null
+        clearEmergencyBypass()
         if (!StandaloneRenderPearlBridge.vulkanTurboLoaded && newConfig.enabled &&
             !newConfig.selectedPackId.equals("off", ignoreCase = true)
         ) {
@@ -216,6 +223,63 @@ object VulkanShaders : ClientModInitializer {
         return true
     }
 
+    /** Called by the render graph once a world frame has been fully recorded. */
+    @JvmStatic
+    fun markWorldGraphFrame() {
+        lastWorldGraphFrameNanos = System.nanoTime()
+    }
+
+    /** Any explicit config change from the GUI is an intentional request to return to shaders. */
+    @JvmStatic
+    fun clearEmergencyBypass() {
+        emergencyBypass = false
+    }
+
+    /**
+     * Session-only emergency shutdown. Keeps the user's saved config and selected pack intact so
+     * the shader can be restored from the GUI or by restarting the game.
+     */
+    @JvmStatic
+    fun emergencyDisableForSession(reason: String) {
+        if (emergencyBypass) return
+        emergencyBypass = true
+        shaderPackActive = false
+        val msg = "$reason — Hyaloclast shaders disabled for this session."
+        log.warn(msg)
+        HyaloclastErrorLog.recordError("RenderWatchdog", msg)
+        runCatching { Minecraft.getInstance() }.getOrNull()?.execute {
+            runCatching {
+                ShaderNotices.showStatusNotice(
+                    Component.literal("Hyaloclast Watchdog"),
+                    Component.literal(msg),
+                )
+                Minecraft.getInstance().gui.hud.getChat()
+                    .addClientSystemMessage(buildGradientMessage(": $msg"))
+            }
+        }
+    }
+
+    private fun startRenderWatchdog() {
+        Thread({
+            while (!Thread.currentThread().isInterrupted) {
+                Thread.sleep(250L)
+                val mc = runCatching { Minecraft.getInstance() }.getOrNull() ?: continue
+                if (mc.level == null || mc.isPaused) {
+                    lastWorldGraphFrameNanos = System.nanoTime()
+                    continue
+                }
+                if (!shaderPackActive || emergencyBypass) continue
+                val last = lastWorldGraphFrameNanos
+                if (last > 0L && System.nanoTime() - last > 2_000_000_000L) {
+                    emergencyDisableForSession("No render-graph frame completed for 2 s")
+                }
+            }
+        }, "hyaloclast-render-watchdog").apply {
+            isDaemon = true
+            start()
+        }
+    }
+
     @JvmStatic
     fun hasPendingDeferredTier2(): Boolean = pendingDeferredTier2Config != null
 
@@ -271,7 +335,7 @@ object VulkanShaders : ClientModInitializer {
             StandaloneRenderPearlBridge.isBackendAllowed() &&
             StandaloneRenderPearlBridge.isVulkanBackendActive()
         vulkanReady = backendOk
-        shaderPackActive = config.enabled && backendOk && ShaderPackManager.activePack != null
+        shaderPackActive = !emergencyBypass && config.enabled && backendOk && ShaderPackManager.activePack != null
         StandaloneRenderPearlBridge.refreshBridgeState()
         if (wasActive != shaderPackActive) {
             val client: Minecraft? = Minecraft.getInstance()
