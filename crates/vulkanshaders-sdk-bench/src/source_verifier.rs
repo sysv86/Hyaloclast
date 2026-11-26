@@ -762,7 +762,7 @@ pub fn verify_c_header_abi_parity(opts: &VerifyOptions<'_>) -> SuiteReport {
         let mut mismatches = Vec::new();
         let expected_ints: &[(&str, i64)] = &[
             ("FFX_API_RETURN_OK", 0),
-            ("FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK", 0x0100_0003),
+            ("FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK", 0x0200_0003),
             ("FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE", 0x0001_0000),
             ("FFX_API_DISPATCH_DESC_TYPE_UPSCALE", 0x0001_0001),
             (
@@ -1011,8 +1011,8 @@ pub fn verify_repr_c_layouts() -> SuiteReport {
             format!("actual={}", fsr3::FFX_API_RETURN_OK),
         ),
         (
-            "fsr3::FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK == 0x01000003",
-            fsr3::FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK == 0x0100_0003,
+            "fsr3::FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK == 0x02000003",
+            fsr3::FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK == 0x0200_0003,
             format!(
                 "actual={:#x}",
                 fsr3::FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK
