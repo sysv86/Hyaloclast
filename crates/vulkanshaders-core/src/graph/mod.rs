@@ -2683,10 +2683,8 @@ impl RenderGraph {
                         );
                     }
                     PassKind::DenoiserSvgfOrNrd => {
-                        if self.config.tier == RenderTier::Tier1ComputeGi {
-                            executed_steps += 1;
-                            continue;
-                        }
+                        // Compute mode also selects `radiance_after_denoise` downstream. Skipping
+                        // this pass left RES_DENOISED_RADIANCE unwritten and the frame black.
                         let mut used_vendor = false;
                         let mut denoise_dispatch = *dispatch;
                         denoise_dispatch.width = rw;
