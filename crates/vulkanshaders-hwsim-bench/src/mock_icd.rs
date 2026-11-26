@@ -1312,19 +1312,20 @@ fn apply_image_transition(
     fn_name: &str,
 ) {
     let raw = image.as_raw();
-    let Some(tracked) = inner.images.get_mut(&raw) else {
+    let Some(expected) = inner.images.get(&raw).map(|img| img.layout) else {
         inner.push_violation(format!(
             "{fn_name}: layout transition on unknown VkImage {raw:#x}"
         ));
         return;
     };
-    if old_layout != vk::ImageLayout::UNDEFINED && tracked.layout != old_layout {
-        let expected = tracked.layout;
+    if old_layout != vk::ImageLayout::UNDEFINED && expected != old_layout {
         inner.push_violation(format!(
             "{fn_name}: VkImage {raw:#x} expected oldLayout={expected:?}, got {old_layout:?}"
         ));
     }
-    tracked.layout = new_layout;
+    if let Some(tracked) = inner.images.get_mut(&raw) {
+        tracked.layout = new_layout;
+    }
 }
 
 unsafe extern "system" fn mock_vk_cmd_pipeline_barrier(

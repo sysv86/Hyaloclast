@@ -950,6 +950,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "vulkanshaders-hwsim-bench"
+version = "0.2.0"
+dependencies = [
+ "ash",
+ "bitflags",
+ "blake3",
+ "bytemuck",
+ "clap",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tracing-subscriber",
+ "vulkanshaders-core",
+]
+
+[[package]]
 name = "vulkanshaders-sdk-bench"
 version = "0.2.0"
 dependencies = [

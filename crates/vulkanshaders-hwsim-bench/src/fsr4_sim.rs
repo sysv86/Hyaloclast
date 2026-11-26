@@ -106,7 +106,6 @@ pub struct FfxSdk24DispatchDescUpscale {
 }
 
 /// Active simulated FSR 4.1.2 / 3.1.6 context state.
-#[derive(Debug)]
 pub struct SimulatedFsrContext {
     pub selected_network: Fsr4Network,
     pub max_render_size: FfxApiDimensions2D,
